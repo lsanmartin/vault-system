@@ -284,13 +284,27 @@ struct EditorAreaView: View {
         </style>
         """
         
-        let html = content
-            .replacingOccurrences(of: "\n", with: "<br>")
-            .replacingOccurrences(of: "### ", with: "<h3>")
-            .replacingOccurrences(of: "## ", with: "<h2>")
-            .replacingOccurrences(of: "# ", with: "<h1>")
+        // Procesamiento línea por línea para evitar propagación de estilos
+        let lines = content.components(separatedBy: .newlines)
+        var htmlLines: [String] = []
         
-        return "<html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><style>\(style)</style><body>\(html)</body></html>"
+        for line in lines {
+            var processed = line
+            if line.hasPrefix("### ") {
+                processed = "<h3>" + line.dropFirst(4) + "</h3>"
+            } else if line.hasPrefix("## ") {
+                processed = "<h2>" + line.dropFirst(3) + "</h2>"
+            } else if line.hasPrefix("# ") {
+                processed = "<h1>" + line.dropFirst(2) + "</h1>"
+            } else if !line.isEmpty {
+                processed = line + "<br>"
+            }
+            htmlLines.append(processed)
+        }
+        
+        let htmlBody = htmlLines.joined(separator: "\n")
+        
+        return "<html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><style>\(style)</style><body>\(htmlBody)</body></html>"
     }
     
     var body: some View {
@@ -320,13 +334,9 @@ struct EditorAreaView: View {
                     .id("\(tab.id)-\(selectedTheme.rawValue)") 
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TextEditor(text: $tab.content)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(selectedTheme == .night ? .hidden : .visible)
-                    .background(selectedTheme == .night ? Color.black : Color.clear)
-                    .foregroundColor(selectedTheme == .night ? Color(red: 0.8, green: 0, blue: 0) : .primary)
+                // El editor ahora es un CodeEditor con sugerencias
+                CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

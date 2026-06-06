@@ -6,8 +6,14 @@ struct TabItem: Identifiable, Hashable {
     let id: String // Path del archivo
     let title: String
     var content: String
-    var isPreviewMode: Bool = true // Vista por defecto: Renderizado
+    var isPreviewMode: Bool = true
     var isHTML: Bool = false
+    
+    // Detectar lenguaje para el resaltado
+    var language: String {
+        if isHTML || id.lowercased().hasSuffix(".html") { return "html" }
+        return "markdown"
+    }
     
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
