@@ -1,0 +1,9 @@
+target/
+**/target/
+.DS_Store
+*.dylib
+*.a
+core/bindings/*.swift
+core/bindings/*.h
+**/*.xcodeproj/
+**/*.xcworkspace/

@@ -1,0 +1,7 @@
+[package]
+name = "vault_daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vault_core = { path = "../core" }
