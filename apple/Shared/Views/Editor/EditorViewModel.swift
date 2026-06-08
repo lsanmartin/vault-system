@@ -29,6 +29,12 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+enum SortOption: String, CaseIterable, Identifiable {
+    case name = "Nombre"
+    case date = "Fecha"
+    var id: String { self.rawValue }
+}
+
 class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String?
@@ -37,6 +43,7 @@ class EditorViewModel: ObservableObject {
     @Published var selectedLocationId: UUID?
     @Published var showSystemFiles: Bool = true 
     @Published var selectedTheme: AppTheme = .system
+    @Published var sortOption: SortOption = .name
     
     @AppStorage("vault_render_mode_v2") var defaultRenderModeStr: String = RenderMode.md.rawValue
     
@@ -59,19 +66,58 @@ class EditorViewModel: ObservableObject {
     private func startPolling() {
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             let currentTs = getLastSyncTs()
-            if currentTs > self?.lastSyncTs ?? 0 { self?.lastSyncTs = currentTs }
+            if currentTs > self?.lastSyncTs ?? 0 { 
+                self?.lastSyncTs = currentTs
+                // No forzar refresh aquí para no interrumpir escritura, pero se podría
+            }
         }
     }
     
     func refreshNotes(locations: [VaultLocation]) {
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
         let selectedPath = locations.first(where: { $0.id == selectedLocationId })?.path
-        self.notes = queryNotes(searchTerm: searchText, pathFilter: selectedPath, ignorePatterns: ignorePatterns)
+        
+        var results = queryNotes(searchTerm: searchText, pathFilter: selectedPath, ignorePatterns: ignorePatterns)
+        
+        // Aplicar ordenamiento en Swift
+        switch sortOption {
+        case .name:
+            results.sort { $0.title.lowercased() < $1.title.lowercased() }
+        case .date:
+            // Por ahora query_notes ya ordena por fecha, pero esto asegura consistencia
+            break 
+        }
+        
+        self.notes = results
     }
     
     func syncAll(locations: [VaultLocation]) {
         for location in locations { _ = scanVault(path: location.path, ignorePatterns: []) }
         refreshNotes(locations: locations)
+    }
+    
+    func createNewNote(locations: [VaultLocation]) {
+        guard let location = locations.first(where: { $0.id == selectedLocationId }) else { return }
+        let fileName = "Nueva Nota \(Date().timeIntervalSince1970).md"
+        let fullPath = URL(fileURLWithPath: location.path).appendingPathComponent(fileName).path
+        if createItem(path: fullPath, isDir: false) {
+            syncAll(locations: locations)
+            // Abrir automáticamente la nueva nota
+            if let newNote = notes.first(where: { $0.path == fullPath }) {
+                openNote(newNote)
+            }
+        }
+    }
+    
+    func deleteNote(_ note: NoteRecord, locations: [VaultLocation]) {
+        if deleteItem(path: note.path) {
+            // Cerrar pestaña si está abierta
+            if let index = tabs.firstIndex(where: { $0.id == note.id }) {
+                tabs.remove(at: index)
+                if activeTabId == note.id { activeTabId = tabs.last?.id }
+            }
+            syncAll(locations: locations)
+        }
     }
     
     func openNote(_ note: NoteRecord) {

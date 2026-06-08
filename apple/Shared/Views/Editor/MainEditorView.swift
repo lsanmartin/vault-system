@@ -25,9 +25,32 @@ struct MainEditorView: View {
             .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
         } content: {
             VStack(spacing: 0) {
-                TextField("Buscar...", text: $viewModel.searchText)
-                    .textFieldStyle(.roundedBorder).padding()
-                    .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
+                // Barra de herramientas de Notas
+                HStack {
+                    TextField("Buscar...", text: $viewModel.searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
+                    
+                    Menu {
+                        Picker("Ordenar por", selection: $viewModel.sortOption) {
+                            ForEach(SortOption.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 14))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
+
+                    Button(action: { viewModel.createNewNote(locations: workspaceManager.locations) }) {
+                        Image(systemName: "plus").font(.system(size: 14))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(viewModel.selectedLocationId == nil)
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+
                 List(viewModel.notes, id: \.id) { note in
                     VStack(alignment: .leading) {
                         Text(note.title).font(.headline)
@@ -35,6 +58,13 @@ struct MainEditorView: View {
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { viewModel.openNote(note) }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            viewModel.deleteNote(note, locations: workspaceManager.locations)
+                        } label: {
+                            Label("Eliminar", systemImage: "trash")
+                        }
+                    }
                 }.listStyle(.inset)
             }.navigationTitle("Notas")
         } detail: {

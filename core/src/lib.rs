@@ -177,6 +177,35 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 }
 
 #[uniffi::export]
+pub fn create_item(path: String, is_dir: bool) -> bool {
+    let target = Path::new(&path);
+    if is_dir {
+        fs::create_dir_all(target).is_ok()
+    } else {
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(target, "").is_ok()
+    }
+}
+
+#[uniffi::export]
+pub fn rename_item(old_path: String, new_path: String) -> bool {
+    fs::rename(old_path, new_path).is_ok()
+}
+
+#[uniffi::export]
+pub fn delete_item(path: String) -> bool {
+    // Nota: A futuro implementar mover a Trash nativo de macOS. Por ahora borrado directo.
+    let target = Path::new(&path);
+    if target.is_dir() {
+        fs::remove_dir_all(target).is_ok()
+    } else {
+        fs::remove_file(target).is_ok()
+    }
+}
+
+#[uniffi::export]
 pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ignore_patterns: Vec<String>) -> Vec<NoteRecord> {
     let conn_guard = DB_CONN.lock().unwrap();
     let conn = match conn_guard.as_ref() {
