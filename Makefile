@@ -32,8 +32,8 @@ build-universal: build-x86_64 build-aarch64
 		TARGET=$(TARGET_ARM); \
 		BREW_PATH=$(BREW_PATH_ARM); \
 	fi; \
-	DUCKDB_LIB_DIR="$$BREW_PATH/lib" DUCKDB_INCLUDE_DIR="$$BREW_PATH/include" \
-	cargo run --bin uniffi-bindgen --features=uniffi/cli -- generate --library target/$$TARGET/release/libvault_core.dylib --language swift --out-dir core/bindings/
+	DUCKDB_LIB_DIR="$$BREW_PATH/lib" DUCKDB_INCLUDE_DIR="$$BREW_PATH/include" RUSTFLAGS="-L $$BREW_PATH/lib -l duckdb" \
+	cargo run --target $$TARGET --bin uniffi-bindgen --features=uniffi/cli -- generate --library target/$$TARGET/release/libvault_core.dylib --language swift --out-dir core/bindings/
 
 	@echo "--- Creando binario universal (lipo) ---"
 	mkdir -p target/universal/release

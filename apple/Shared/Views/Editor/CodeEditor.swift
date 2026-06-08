@@ -108,6 +108,26 @@ struct CodeEditor: NSViewRepresentable {
                 // Negritas/Cursivas (Simple)
                 let emphColor = theme == .night ? NSColor.magenta : (theme == .dark ? NSColor.systemPink : NSColor.systemGray)
                 applyRegex(to: textStorage, pattern: "\\*\\*.*?\\*\\*|__.*?__", color: emphColor)
+
+                // Listas
+                let listColor = theme == .night ? NSColor.yellow : (theme == .dark ? NSColor.systemYellow : NSColor.systemGreen)
+                applyRegex(to: textStorage, pattern: "^[\\t ]*(?:[-*+]|\\d+\\.)[\\t ]", color: listColor)
+
+                // Tareas
+                let taskColor = theme == .night ? NSColor.green : (theme == .dark ? NSColor.systemGreen : NSColor.systemTeal)
+                applyRegex(to: textStorage, pattern: "^[\\t ]*[-*+][\\t ]+\\[[ xX]\\]", color: taskColor)
+
+                // Citas / Blockquotes
+                let quoteColor = theme == .night ? NSColor.brown : (theme == .dark ? NSColor.systemGray : NSColor.gray)
+                applyRegex(to: textStorage, pattern: "^[\\t ]*>[^\\n]*", color: quoteColor)
+
+                // Código en línea
+                let inlineCodeColor = theme == .night ? NSColor.cyan : (theme == .dark ? NSColor.systemCyan : NSColor.systemPurple)
+                applyRegex(to: textStorage, pattern: "`[^`\\n]+`", color: inlineCodeColor)
+
+                // Bloques de código (multilínea)
+                let codeBlockColor = theme == .night ? NSColor.cyan : (theme == .dark ? NSColor.systemCyan : NSColor.systemPurple)
+                applyRegex(to: textStorage, pattern: "(?s)```.*?```", color: codeBlockColor)
             }
             
             textStorage.endEditing()

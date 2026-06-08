@@ -4,341 +4,204 @@ struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
     
-    // Colores para el modo Noche (IR)
-    private let nightBg = Color.black
-    private let nightText = Color(red: 0.7, green: 0, blue: 0) // Rojo profundo
-    private let nightAccent = Color.red
-    
     var body: some View {
         NavigationSplitView {
-            // COLUMNA 1: Sidebar de Workspaces
             List(selection: $viewModel.selectedLocationId) {
                 Section("Workspaces") {
                     ForEach(workspaceManager.locations) { location in
                         NavigationLink(value: location.id) {
                             Label(location.name, systemImage: "folder.fill")
-                                .foregroundColor(viewModel.selectedTheme == .night ? nightText : .primary)
                         }
                     }
-                    .onDelete(perform: workspaceManager.removeLocation)
                 }
-                
-                Section("Inteligencia") {
-                    Toggle(isOn: $viewModel.showSystemFiles) {
-                        Label("Meta-Memorias", systemImage: "brain.head.profile")
-                            .foregroundColor(viewModel.selectedTheme == .night ? nightText : .primary)
-                    }
-                    .toggleStyle(.switch)
-                    .tint(viewModel.selectedTheme == .night ? .red : .accentColor)
-                }
-                
                 Section("Apariencia") {
                     Picker(selection: $viewModel.selectedTheme) {
-                        ForEach(AppTheme.allCases) { theme in
-                            Text(theme.rawValue).tag(theme)
-                                .foregroundColor(viewModel.selectedTheme == .night ? nightText : .primary)
-                        }
-                    } label: {
-                        Label("Tema", systemImage: "paintbrush")
-                            .foregroundColor(viewModel.selectedTheme == .night ? nightText : .primary)
-                    }
+                        ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
+                    } label: { Label("Tema", systemImage: "paintbrush") }
                 }
             }
             .navigationTitle("Vault System")
-            .accentColor(viewModel.selectedTheme == .night ? .red : .accentColor)
-            .scrollContentBackground(viewModel.selectedTheme == .night ? .hidden : .visible)
-            .background(viewModel.selectedTheme == .night ? nightBg : Color.clear)
-            .listStyle(.sidebar)
-            
-            .onChange(of: viewModel.selectedLocationId) {
-                viewModel.refreshNotes(locations: workspaceManager.locations)
-            }
-            .onChange(of: viewModel.showSystemFiles) {
-                viewModel.refreshNotes(locations: workspaceManager.locations)
-            }
-            .onChange(of: viewModel.selectedTheme) {
-                // Forzar refresco al cambiar tema
-                viewModel.refreshNotes(locations: workspaceManager.locations)
-            }
+            .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
+            .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
         } content: {
-            // COLUMNA 2: Lista de Notas filtrada
             VStack(spacing: 0) {
                 TextField("Buscar...", text: $viewModel.searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding()
-                    .onChange(of: viewModel.searchText) {
-                        viewModel.refreshNotes(locations: workspaceManager.locations)
-                    }
-                
+                    .textFieldStyle(.roundedBorder).padding()
+                    .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
                 List(viewModel.notes, id: \.id) { note in
                     VStack(alignment: .leading) {
-                        Text(note.title)
-                            .font(.headline)
-                            .foregroundColor(viewModel.selectedTheme == .night ? nightText : .primary)
-                        Text(note.path)
-                            .font(.caption2)
-                            .foregroundColor(viewModel.selectedTheme == .night ? nightText.opacity(0.7) : .secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        Text(note.title).font(.headline)
+                        Text(note.path).font(.caption2).lineLimit(1)
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        viewModel.openNote(note)
-                    }
-                    .listRowBackground(viewModel.selectedTheme == .night ? nightBg : nil)
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(viewModel.selectedTheme == .night ? .hidden : .visible)
-                .background(viewModel.selectedTheme == .night ? nightBg : Color.clear)
-            }
-            .navigationTitle("Notas")
-            
+                    .onTapGesture { viewModel.openNote(note) }
+                }.listStyle(.inset)
+            }.navigationTitle("Notas")
         } detail: {
-            // COLUMNA 3: Editor con Pestañas
-            if let activeId = viewModel.activeTabId {
+            if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
                 VStack(spacing: 0) {
-                    // Tab Bar
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 0) {
                             ForEach(viewModel.tabs) { tab in
-                                TabHeaderView(tab: tab, isActive: tab.id == activeId, selectedTheme: viewModel.selectedTheme) {
+                                TabHeaderView(tab: tab, isActive: tab.id == activeId) {
                                     viewModel.activeTabId = tab.id
                                 } onClose: {
-                                    if let index = viewModel.tabs.firstIndex(where: { $0.id == tab.id }) {
-                                        viewModel.closeTab(at: IndexSet(integer: index))
+                                    if let idx = viewModel.tabs.firstIndex(where: { $0.id == tab.id }) {
+                                        viewModel.closeTab(at: IndexSet(integer: idx))
                                     }
                                 }
                             }
                         }
-                    }
-                    .background(viewModel.selectedTheme == .night ? Color.black : Color.secondary.opacity(0.1))
+                    }.background(Color.secondary.opacity(0.1))
                     
-                    // Editor Content
-                    if let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
-                        EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .toolbar {
-                                ToolbarItemGroup(placement: .primaryAction) {
-                                    Button(action: { viewModel.saveActiveTab(locations: workspaceManager.locations) }) {
-                                        Label("Save", systemImage: "checkmark.circle")
-                                    }
-                                    .keyboardShortcut("s", modifiers: .command)
-                                    
-                                    Button(action: { viewModel.togglePreview() }) {
-                                        Label("Preview", systemImage: "eye")
-                                    }
-                                    .keyboardShortcut("r", modifiers: .command)
-                                }
+                    EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
+                        .toolbar {
+                            ToolbarItemGroup(placement: .primaryAction) {
+                                Button(action: { viewModel.saveActiveTab(locations: workspaceManager.locations) }) {
+                                    Label("Save", systemImage: "checkmark.circle")
+                                }.keyboardShortcut("s", modifiers: .command)
+                                Button(action: { viewModel.togglePreview() }) {
+                                    Label("Preview", systemImage: "eye")
+                                }.keyboardShortcut("r", modifiers: .command)
                             }
-                    }
+                        }
                 }
-                .background(viewModel.selectedTheme == .night ? nightBg : Color.clear)
             } else {
-                ContentUnavailableView("Selecciona una nota", systemImage: "text.document", description: Text("Haz clic en una nota para comenzar a editar."))
-                    .background(viewModel.selectedTheme == .night ? nightBg : Color.clear)
-                    .foregroundColor(viewModel.selectedTheme == .night ? nightText : .secondary)
+                ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
             }
         }
         .onAppear {
             viewModel.syncAll(locations: workspaceManager.locations)
-            let paths = workspaceManager.locations.map { $0.path }
-            let ignorePatterns = viewModel.showSystemFiles ? [] : [
-                "_memory.md", "_metadata.md", "_specs.md", "_lore.md",
-                "00-Sistema", "01-Diario", "05-IA-Drafts",
-                "agent.md", ".git", ".obsidian"
-            ]
-            viewModel.launchWatcher(paths: paths, ignorePatterns: ignorePatterns)
+            viewModel.launchWatcher(paths: workspaceManager.locations.map { $0.path }, ignorePatterns: [])
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            viewModel.refreshNotes(locations: workspaceManager.locations)
-        }
-        .preferredColorScheme(viewModel.selectedTheme == .light ? .light : (viewModel.selectedTheme == .dark || viewModel.selectedTheme == .night ? .dark : nil))
-        .background(viewModel.selectedTheme == .night ? nightBg : Color.clear)
     }
 }
 
 struct TabHeaderView: View {
     let tab: TabItem
     let isActive: Bool
-    let selectedTheme: AppTheme
     let onSelect: () -> Void
     let onClose: () -> Void
-    
     var body: some View {
-        HStack(spacing: 8) {
-            Text(tab.title)
-                .font(.subheadline)
-                .fontWeight(isActive ? .bold : .regular)
-                .foregroundColor(selectedTheme == .night ? (isActive ? .red : Color(red: 0.5, green: 0, blue: 0)) : .primary)
-            
-            Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            .opacity(isActive ? 1 : 0.5)
-            .foregroundColor(selectedTheme == .night ? .red : .primary)
+        HStack {
+            Text(tab.title).font(.subheadline).fontWeight(isActive ? .bold : .regular)
+            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 10)) }.buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(isActive ? (selectedTheme == .night ? Color(red: 0.1, green: 0, blue: 0) : Color(NSColor.windowBackgroundColor)) : Color.clear)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(isActive ? Color(NSColor.windowBackgroundColor) : Color.clear)
         .onTapGesture(perform: onSelect)
-        .overlay(Divider().background(selectedTheme == .night ? Color.red.opacity(0.3) : Color.clear).frame(maxWidth: .infinity, maxHeight: 1), alignment: .bottom)
     }
 }
 
 struct EditorAreaView: View {
     @Binding var tab: TabItem
     let selectedTheme: AppTheme
+    @ObservedObject var viewModel: EditorViewModel
     
-    // Función mejorada para renderizado Markdown -> HTML con soporte de temas
-    private func renderMarkdown(_ content: String, theme: AppTheme) -> String {
-        var themeCSS = ""
+    private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode) -> String {
+        let base64Content = Data(content.utf8).base64EncodedString()
         
+        var themeCSS = ""
         switch theme {
-        case .light:
-            themeCSS = ":root { color-scheme: light; --bg: #ffffff; --text: #333; --accent: #2b82d9; --code-bg: #8882; --code-text: #d94181; }"
-        case .dark:
-            themeCSS = ":root { color-scheme: dark; --bg: #1e1e1e; --text: #e0e0e0; --accent: #58a6ff; --code-bg: #8883; --code-text: #ff79c6; }"
-        case .night:
-            // Modo Infrarrojo (IR): Negro absoluto y Rojos para preservar visión nocturna
-            themeCSS = """
-            :root { 
-                color-scheme: dark; 
-                --bg: #000000; 
-                --text: #ff3b30; 
-                --accent: #ff453a; 
-                --code-bg: #1a0505; 
-                --code-text: #ff9f0a; 
-            }
-            body { background-color: #000 !important; color: #ff3b30 !important; }
-            h1, h2, h3, h4 { color: #ff453a !important; border-bottom: 1px solid #ff453a33 !important; }
-            pre, code { background-color: #1a0505 !important; color: #ff9f0a !important; }
-            blockquote { border-left: 4px solid #ff453a !important; color: #8e0000 !important; }
-            a { color: #ff453a !important; }
-            """
-        case .system:
-            themeCSS = """
-            :root { 
-                color-scheme: light dark; 
-                --bg: canvas; 
-                --text: canvastext; 
-                --accent: #2b82d9; 
-                --code-bg: rgba(128, 128, 128, 0.1); 
-                --code-text: #d94181; 
-            }
-            @media (prefers-color-scheme: dark) {
-                :root {
-                    --bg: #1e1e1e;
-                    --text: #e0e0e0;
-                    --accent: #58a6ff;
-                    --code-bg: rgba(255, 255, 255, 0.1);
-                    --code-text: #ff79c6;
-                }
-                body { background-color: #1e1e1e !important; color: #e0e0e0 !important; }
-            }
-            """
+        case .light: themeCSS = ":root { --bg: #fff; --text: #333; --accent: #2b82d9; }"
+        case .dark: themeCSS = ":root { --bg: #1e1e1e; --text: #e0e0e0; --accent: #58a6ff; }"
+        case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
+        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #1e1e1e; --text: #e0e0e0; --accent: #58a6ff; } }"
         }
 
-        let style = """
-        <style>
-            \(themeCSS)
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-                padding: 30px;
-                line-height: 1.6;
-                color: var(--text);
-                background-color: var(--bg);
-                max-width: 900px;
-                margin: 0 auto;
-            }
-            h1, h2, h3, h4 {
-                border-bottom: 1px solid #7774;
-                padding-bottom: 0.3em;
-                margin-top: 1.5em;
-                color: var(--accent);
-            }
-            pre {
-                background-color: var(--code-bg);
-                padding: 16px;
-                border-radius: 8px;
-                overflow: auto;
-                font-family: 'SF Mono', ui-monospace, monospace;
-            }
-            code {
-                font-family: 'SF Mono', ui-monospace, monospace;
-                background-color: var(--code-bg);
-                padding: 0.2em 0.4em;
-                border-radius: 4px;
-                color: var(--code-text);
-            }
-            blockquote {
-                border-left: 4px solid var(--accent);
-                padding-left: 1em;
-                color: #777;
-                margin-left: 0;
-            }
-            a { color: var(--accent); text-decoration: none; }
-            a:hover { text-decoration: underline; }
-            hr { border: 0; border-top: 1px solid #7774; margin: 2em 0; }
-        </style>
+        let isHTML = mode == .html
+        let enableMath = mode == .latex
+
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+            <style>
+                \(themeCSS)
+                body { font-family: -apple-system, system-ui, sans-serif; padding: 2rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; }
+                img { max-width: 100%; height: auto; border-radius: 8px; }
+                pre { background: rgba(128,128,128,0.1); padding: 1rem; border-radius: 8px; overflow: auto; }
+                blockquote { border-left: 4px solid var(--accent); margin: 1.5rem 0; padding: 0.5rem 1rem; background: rgba(128,128,128,0.05); font-style: italic; color: var(--text); opacity: 0.9; }
+                table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+                th, td { border: 1px solid rgba(128,128,128,0.3); padding: 8px; text-align: left; }
+                .katex { font-size: 1.1em; color: inherit !important; }
+            </style>
+        </head>
+        <body>
+            <div id="content">Cargando...</div>
+            <script>
+                function decodeUTF8Base64(base64) {
+                    const binaryString = atob(base64);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    return new TextDecoder('utf-8').decode(bytes);
+                }
+
+                try {
+                    const raw = decodeUTF8Base64("\(base64Content)");
+                    const isHTML = \(isHTML);
+                    const enableMath = \(enableMath);
+                    
+                    let finalHTML = "";
+                    if (isHTML) {
+                        finalHTML = raw;
+                    } else {
+                        // Usar Marked.js para un Markdown completo (incluye >, tablas, etc)
+                        finalHTML = marked.parse(raw);
+                    }
+                    
+                    document.getElementById('content').innerHTML = finalHTML;
+
+                    if (enableMath) {
+                        renderMathInElement(document.body, {
+                            delimiters: [
+                                {left: '$$', right: '$$', display: true},
+                                {left: '$', right: '$', display: false},
+                                {left: '\\\\(', right: '\\\\)', display: false},
+                                {left: '\\\\[', right: '\\\\]', display: true}
+                            ],
+                            throwOnError: false
+                        });
+                    }
+                    console.log("Renderizado completado con éxito");
+                } catch (e) {
+                    document.getElementById('content').innerHTML = "<div style='color:red'>Error de Renderizado: " + e.message + "</div>";
+                    console.error(e);
+                }
+            </script>
+        </body>
+        </html>
         """
-        
-        // Procesamiento línea por línea para evitar propagación de estilos
-        let lines = content.components(separatedBy: .newlines)
-        var htmlLines: [String] = []
-        
-        for line in lines {
-            var processed = line
-            if line.hasPrefix("### ") {
-                processed = "<h3>" + line.dropFirst(4) + "</h3>"
-            } else if line.hasPrefix("## ") {
-                processed = "<h2>" + line.dropFirst(3) + "</h2>"
-            } else if line.hasPrefix("# ") {
-                processed = "<h1>" + line.dropFirst(2) + "</h1>"
-            } else if !line.isEmpty {
-                processed = line + "<br>"
-            }
-            htmlLines.append(processed)
-        }
-        
-        let htmlBody = htmlLines.joined(separator: "\n")
-        
-        return "<html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><style>\(style)</style><body>\(htmlBody)</body></html>"
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
-                
-                Toggle("HTML", isOn: $tab.isHTML)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .foregroundColor(selectedTheme == .night ? .red : .primary)
-                    .tint(selectedTheme == .night ? .red : .accentColor)
-                
-                Button(tab.isPreviewMode ? "Editar" : "Ver") {
-                    tab.isPreviewMode.toggle()
+                Picker("", selection: $tab.renderMode) {
+                    ForEach(RenderMode.allCases) { Text($0.rawValue).tag($0) }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .foregroundColor(selectedTheme == .night ? .red : .primary)
-            }
-            .padding(8)
-            .background(selectedTheme == .night ? Color.black : Color.secondary.opacity(0.05))
+                .pickerStyle(.segmented).frame(width: 150).labelsHidden()
+                .onChange(of: tab.renderMode) { _, newValue in
+                    viewModel.updateRenderMode(for: tab.id, mode: newValue)
+                }
+                Button(tab.isPreviewMode ? "Editar" : "Ver") { tab.isPreviewMode.toggle() }.buttonStyle(.bordered)
+            }.padding(8)
             
             if tab.isPreviewMode {
-                // Previsualización con WebView (Markdown/HTML)
-                WebView(htmlContent: tab.isHTML ? tab.content : renderMarkdown(tab.content, theme: selectedTheme))
-                    .id("\(tab.id)-\(selectedTheme.rawValue)") 
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode))
+                    .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)")
             } else {
-                // El editor ahora es un CodeEditor con sugerencias
                 CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

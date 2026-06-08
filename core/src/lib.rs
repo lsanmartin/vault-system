@@ -38,6 +38,45 @@ pub fn hello_vault() -> String {
     "Hello from Vault Core IA (DuckDB Engine)!".to_string()
 }
 
+fn generate_embedding(text: &str) -> Vec<f32> {
+    let mut vec = vec![0.0f32; 384];
+    if text.is_empty() {
+        return vec;
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    for word in &words {
+        let mut h = 5381u64;
+        for c in word.chars() {
+            h = (h << 5).wrapping_add(h).wrapping_add(c as u64);
+        }
+        for step in 0..12 {
+            let dim = ((h ^ (step * 0x9e3779b9u64)) % 384) as usize;
+            let val = if (h & (1 << step)) != 0 { 1.0f32 } else { -1.0f32 };
+            vec[dim] += val;
+        }
+    }
+    let sum_sq: f32 = vec.iter().map(|x| x * x).sum();
+    let norm = sum_sq.sqrt();
+    if norm > 0.0001f32 {
+        for val in vec.iter_mut() {
+            *val /= norm;
+        }
+    }
+    vec
+}
+
+fn vector_to_sql_array(vec: &[f32]) -> String {
+    let mut s = "ARRAY[".to_string();
+    for (i, val) in vec.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&val.to_string());
+    }
+    s.push(']');
+    s
+}
+
 #[uniffi::export]
 pub fn init_knowledge_base() -> String {
     let mut conn_guard = DB_CONN.lock().unwrap();
@@ -56,7 +95,8 @@ pub fn init_knowledge_base() -> String {
             path VARCHAR,
             content TEXT,
             created_at TIMESTAMP,
-            tags VARCHAR[]
+            tags VARCHAR[],
+            embedding FLOAT[]
         );
         CREATE TABLE IF NOT EXISTS links (
             source_id VARCHAR,
@@ -114,9 +154,16 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             // Leer contenido del archivo
             let content = fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
 
-            // Insertar en la tabla de notas incluyendo el contenido
+            // Generar embedding
+            let emb = generate_embedding(&content);
+            let sql = format!(
+                "INSERT OR REPLACE INTO notes (id, title, path, content, created_at, embedding) VALUES (?, ?, ?, ?, now(), {})",
+                vector_to_sql_array(&emb)
+            );
+
+            // Insertar en la tabla de notas incluyendo el contenido y embedding
             let insert_res = conn.execute(
-                "INSERT OR REPLACE INTO notes (id, title, path, content, created_at) VALUES (?, ?, ?, ?, now())",
+                &sql,
                 params![full_path_str, title, full_path_str, content],
             );
 
@@ -126,7 +173,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         }
     }
 
-    format!("Escaneado completado: {} notas procesadas con contenido.", count)
+    format!("Escaneado completado: {} notas procesadas con contenido y embeddings.", count)
 }
 
 #[uniffi::export]
@@ -137,7 +184,25 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         None => return Vec::new(),
     };
 
-    let mut sql = "SELECT id, title, path, content FROM notes WHERE 1=1".to_string();
+    let mut search_emb_sql = String::new();
+    let mut is_semantic = false;
+
+    if let Some(ref term) = search_term {
+        if !term.is_empty() {
+            let emb = generate_embedding(term);
+            search_emb_sql = vector_to_sql_array(&emb);
+            is_semantic = true;
+        }
+    }
+
+    let mut sql = if is_semantic {
+        format!(
+            "SELECT id, title, path, content, array_cosine_similarity(embedding, {}) as similarity FROM notes WHERE 1=1",
+            search_emb_sql
+        )
+    } else {
+        "SELECT id, title, path, content FROM notes WHERE 1=1".to_string()
+    };
     
     // Filtro por Workspace (Path)
     if let Some(path) = path_filter {
@@ -151,12 +216,11 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         sql.push_str(&format!(" AND path NOT LIKE '%{}%'", pattern));
     }
 
-    if let Some(term) = search_term {
-        if !term.is_empty() {
-            sql.push_str(&format!(" AND (title ILIKE '%{}%' OR content ILIKE '%{}%')", term, term));
-        }
+    if is_semantic {
+        sql.push_str(" ORDER BY similarity DESC");
+    } else {
+        sql.push_str(" ORDER BY created_at DESC");
     }
-    sql.push_str(" ORDER BY created_at DESC");
 
     let mut stmt = conn.prepare(&sql).unwrap();
     let note_iter = stmt.query_map([], |row| {
@@ -226,8 +290,13 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                             if let Some(conn) = conn_guard.as_mut() {
                                 let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
                                 let content = fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
+                                let emb = generate_embedding(&content);
+                                let sql = format!(
+                                    "INSERT OR REPLACE INTO notes (id, title, path, content, created_at, embedding) VALUES (?, ?, ?, ?, now(), {})",
+                                    vector_to_sql_array(&emb)
+                                );
                                 let _ = conn.execute(
-                                    "INSERT OR REPLACE INTO notes (id, title, path, content, created_at) VALUES (?, ?, ?, ?, now())",
+                                    &sql,
                                     params![path_str, title, path_str, content],
                                 );
                                 update_sync_ts();
