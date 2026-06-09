@@ -45,7 +45,7 @@ struct CodeEditor: NSViewRepresentable {
             textView.backgroundColor = .black
             textView.insertionPointColor = .red
         case .dark:
-            textView.backgroundColor = NSColor(white: 0.1, alpha: 1)
+            textView.backgroundColor = NSColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1.0) // #121212
             textView.insertionPointColor = .white
         case .light, .system:
             textView.backgroundColor = .textBackgroundColor
