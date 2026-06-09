@@ -147,7 +147,16 @@ class EditorViewModel: ObservableObject {
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
         
         // Obtenemos todo de la DB
-        let allItems = queryNotes(searchTerm: searchText, pathFilter: nil, ignorePatterns: ignorePatterns)
+        let rawItems = queryNotes(searchTerm: searchText, pathFilter: nil, ignorePatterns: ignorePatterns)
+        
+        // Aplicar filtro de sesión GLOBAL (para el árbol y para la lista)
+        let allItems = rawItems.filter { item in
+            if deletedPathsThisSession.contains(item.path) || 
+               deletedPathsThisSession.contains(where: { item.path.hasPrefix("\($0)/") }) { 
+                return false 
+            }
+            return true
+        }
         
         // Guardamos todo para el árbol jerárquico
         self.allFolders = allItems.filter { $0.isDir }
@@ -155,13 +164,6 @@ class EditorViewModel: ObservableObject {
         
         // Filtramos para mostrar SOLO lo que está en el currentPath (Finder Style)
         var results = allItems.filter { item in
-            // Filtro de sesión para evitar que aparezcan elementos recién borrados (ghost items)
-            // Filtramos tanto el item exacto como sus hijos si es una carpeta borrada
-            if deletedPathsThisSession.contains(item.path) || 
-               deletedPathsThisSession.contains(where: { item.path.hasPrefix("\($0)/") }) { 
-                return false 
-            }
-            
             let itemURL = URL(fileURLWithPath: item.path)
             let parentPath = itemURL.deletingLastPathComponent().path
             
