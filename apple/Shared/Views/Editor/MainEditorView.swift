@@ -41,9 +41,12 @@ struct NoteCard: View {
                 .foregroundColor(EditorViewModel.macSecondaryText)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
-        .background(EditorViewModel.macSidebar.opacity(isSelected ? 1.0 : 0.4))
+        .background(Color(hex: "1A1A1A")) // Fondo sutilmente más claro para la card
         .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(isSelected ? EditorViewModel.macAccent : Color.clear, lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isSelected ? EditorViewModel.macAccent : Color.white.opacity(0.05), lineWidth: 1)
+        )
         .contextMenu {
             Button {
                 newName = note.title
@@ -116,7 +119,13 @@ struct MainContentColumn: View {
                         }
                     }
                     .frame(width: CGFloat(viewModel.tacticalSidebarWidth))
-                    .background(EditorViewModel.macSidebar)
+                    .background(EditorViewModel.macBackground)
+                    .overlay(
+                        Rectangle()
+                            .fill(Color.black.opacity(0.2))
+                            .frame(width: 1),
+                        alignment: .trailing
+                    )
 
                     ZStack {
                         Rectangle().fill(Color.black.opacity(0.3)).frame(width: 1)
@@ -196,7 +205,7 @@ struct MainContentColumn: View {
             }
         }
         .padding()
-        .background(EditorViewModel.macSidebar.opacity(0.8))
+        .background(EditorViewModel.macBackground)
     }
 }
 
@@ -283,7 +292,7 @@ struct VaultTreeRow: View {
                 .padding(.vertical, 4)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
-                .background(isSelected ? EditorViewModel.macAccent.opacity(0.2) : Color.clear)
+                .background(isSelected ? EditorViewModel.macAccent.opacity(0.15) : Color.white.opacity(0.03))
                 .cornerRadius(4)
                 .onTapGesture {
                     if item.isDir {
@@ -353,8 +362,11 @@ struct DetailColumn: View {
                     }
             }
         } else {
-            ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
-                .background(EditorViewModel.macBackground)
+            ZStack {
+                EditorViewModel.macBackground.ignoresSafeArea()
+                ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
+                    .opacity(0.5)
+            }
         }
     }
 }
@@ -427,6 +439,12 @@ struct FileRowView: View {
             Button("Guardar") { viewModel.performRename(item: item, newName: newName, locations: locations) }
         }
         .listRowBackground(EditorViewModel.macBackground)
+        .overlay(
+            Rectangle()
+                .fill(Color.white.opacity(0.05))
+                .frame(height: 1),
+            alignment: .bottom
+        )
     }
 }
 
@@ -478,6 +496,7 @@ struct EditorAreaView: View {
                 CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 16)
+                    .background(EditorViewModel.macBackground) // Fondo explícito
             }
         }
         .background(EditorViewModel.macBackground)
@@ -488,9 +507,9 @@ struct EditorAreaView: View {
         var themeCSS = ""
         switch theme {
         case .light: themeCSS = ":root { --bg: #fff; --text: #333; --accent: #2b82d9; }"
-        case .dark: themeCSS = ":root { --bg: #1e1e1e; --text: #e0e0e0; --accent: #58a6ff; }"
+        case .dark: themeCSS = ":root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; }"
         case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
-        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #1e1e1e; --text: #e0e0e0; --accent: #58a6ff; } }"
+        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } }"
         }
         
         let renderModeStr = mode.rawValue
