@@ -197,17 +197,26 @@ class EditorViewModel: ObservableObject {
             } else {
                 selectedItemIds.insert(id)
             }
-        } else if extend {
-            // Implementación simplificada de extensión: añade a la selección
-            selectedItemIds.insert(id)
+        } else if extend, let lastId = lastSelectedId {
+            // Implementación de Rango real
+            let allVisible = folders + notes
+            if let startIdx = allVisible.firstIndex(where: { $0.path == lastId }),
+               let endIdx = allVisible.firstIndex(where: { $0.path == id }) {
+                let range = startIdx < endIdx ? startIdx...endIdx : endIdx...startIdx
+                for i in range {
+                    selectedItemIds.insert(allVisible[i].path)
+                }
+            } else {
+                selectedItemIds.insert(id)
+            }
         } else {
             selectedItemIds = [id]
         }
         
         lastSelectedId = id
         
-        // Si es nota, abrirla (comportamiento por defecto)
-        if !item.isDir {
+        // Si es nota única y no estamos extendiendo, abrirla
+        if !item.isDir && !extend && !toggle {
             openNote(item)
         }
     }
@@ -264,6 +273,30 @@ class EditorViewModel: ObservableObject {
                 if activeTabId == note.id { activeTabId = tabs.last?.id }
             }
             syncAll(locations: locations)
+        }
+    }
+    
+    func deleteSelectedItems(locations: [VaultLocation]) {
+        let itemsToDelete = Array(selectedItemIds)
+        var deletedAny = false
+        
+        for path in itemsToDelete {
+            if deleteItem(path: path) {
+                deletedAny = true
+                // Cerrar pestaña si está abierta
+                if let index = tabs.firstIndex(where: { $0.id == path }) {
+                    tabs.remove(at: index)
+                }
+            }
+        }
+        
+        if deletedAny {
+            selectedItemIds.removeAll()
+            if !tabs.contains(where: { $0.id == activeTabId }) {
+                activeTabId = tabs.last?.id
+            }
+            syncAll(locations: locations)
+            Telemetry.shared.log("Editor", eventType: "BatchDelete", message: "Eliminados \(itemsToDelete.count) elementos")
         }
     }
     

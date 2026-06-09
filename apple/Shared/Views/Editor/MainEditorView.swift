@@ -54,12 +54,21 @@ struct NoteCard: View {
             viewModel.selectItem(note, extend: extend, toggle: toggle)
         }
         .contextMenu {
-            Button {
-                newName = note.title
-                isShowingRename = true
-            } label: { Label("Renombrar", systemImage: "pencil") }
-            
-            Button(role: .destructive) { viewModel.deleteNote(note, locations: locations) } label: { Label("Eliminar", systemImage: "trash") }
+            if viewModel.selectedItemIds.count > 1 {
+                Button(role: .destructive) {
+                    viewModel.deleteSelectedItems(locations: locations)
+                } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
+            } else {
+                Button {
+                    newName = note.title
+                    isShowingRename = true
+                } label: { Label("Renombrar", systemImage: "pencil") }
+                
+                Button(role: .destructive) { 
+                    viewModel.selectItem(note)
+                    viewModel.deleteSelectedItems(locations: locations) 
+                } label: { Label("Eliminar", systemImage: "trash") }
+            }
         }
         .alert("Renombrar Nota", isPresented: $isShowingRename) {
             TextField("Nuevo nombre", text: $newName)
@@ -207,6 +216,13 @@ struct MainContentColumn: View {
                     Image(systemName: "folder.badge.plus")
                         .foregroundColor(EditorViewModel.macControlIcon)
                 }.buttonStyle(.borderless)
+                
+                if !viewModel.selectedItemIds.isEmpty {
+                    Button(role: .destructive, action: { viewModel.deleteSelectedItems(locations: workspaceManager.locations) }) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.8))
+                    }.buttonStyle(.borderless)
+                }
             }
         }
         .padding()
@@ -314,18 +330,27 @@ struct VaultTreeRow: View {
                     }
                 }
                 .contextMenu {
-                    if item.isDir {
-                        Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
-                        Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
-                        Divider()
-                    }
-                    
-                    Button {
-                        newName = item.title
-                        isShowingRename = true
-                    } label: { Label("Renombrar", systemImage: "pencil") }
+                    if viewModel.selectedItemIds.count > 1 {
+                         Button(role: .destructive) {
+                            viewModel.deleteSelectedItems(locations: locations)
+                        } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
+                    } else {
+                        if item.isDir {
+                            Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
+                            Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
+                            Divider()
+                        }
+                        
+                        Button {
+                            newName = item.title
+                            isShowingRename = true
+                        } label: { Label("Renombrar", systemImage: "pencil") }
 
-                    Button(role: .destructive) { viewModel.deleteNote(item, locations: locations) } label: { Label("Eliminar", systemImage: "trash") }
+                        Button(role: .destructive) { 
+                            viewModel.selectItem(item)
+                            viewModel.deleteSelectedItems(locations: locations) 
+                        } label: { Label("Eliminar", systemImage: "trash") }
+                    }
                 }
             }
             
@@ -444,18 +469,27 @@ struct FileRowView: View {
             }
         }
         .contextMenu {
-            if item.isDir {
-                Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
-                Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
-                Divider()
-            }
-            
-            Button {
-                newName = item.title
-                isShowingRename = true
-            } label: { Label("Renombrar", systemImage: "pencil") }
+            if viewModel.selectedItemIds.count > 1 {
+                Button(role: .destructive) {
+                    viewModel.deleteSelectedItems(locations: locations)
+                } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
+            } else {
+                if item.isDir {
+                    Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
+                    Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
+                    Divider()
+                }
+                
+                Button {
+                    newName = item.title
+                    isShowingRename = true
+                } label: { Label("Renombrar", systemImage: "pencil") }
 
-            Button(role: .destructive) { viewModel.deleteNote(item, locations: locations) } label: { Label("Eliminar", systemImage: "trash") }
+                Button(role: .destructive) { 
+                    viewModel.selectItem(item)
+                    viewModel.deleteSelectedItems(locations: locations) 
+                } label: { Label("Eliminar", systemImage: "trash") }
+            }
         }
         .listRowBackground(EditorViewModel.macBackground)
         .overlay(
@@ -617,11 +651,7 @@ struct EditorAreaView: View {
                         {left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false},
                         {left: '\\(', right: '\\)', display: false}, {left: '\\[', right: '\\]', display: true},
                         {left: '\\begin{equation}', right: '\\end{equation}', display: true},
-                        {left: '\\begin{align}', right: '\\end{align}', display: true},
-                        {left: '\\begin{pmatrix}', right: '\\end{pmatrix}', display: true},
-                        {left: '\\begin{matrix}', right: '\\end{matrix}', display: true},
-                        {left: '\\begin{vmatrix}', right: '\\end{vmatrix}', display: true},
-                        {left: '\\begin{cases}', right: '\\end{cases}', display: true}
+                        {left: '\\begin{align}', right: '\\end{align}', display: true}
                     ],
                     throwOnError: false
                 });
