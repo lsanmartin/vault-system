@@ -267,9 +267,12 @@ struct VaultTreeRow: View {
     let locations: [VaultLocation]
     let showNotes: Bool
     
-    @State private var isExpanded: Bool = false
     @State private var isShowingRename = false
     @State private var newName = ""
+    
+    var isExpanded: Bool {
+        viewModel.expandedPaths.contains(item.path)
+    }
     
     var children: [NoteRecord] {
         guard item.isDir else { return [] }
@@ -291,7 +294,7 @@ struct VaultTreeRow: View {
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .foregroundColor(EditorViewModel.macSecondaryText)
                         .frame(width: 12)
-                        .onTapGesture { withAnimation { isExpanded.toggle() } }
+                        .onTapGesture { withAnimation { viewModel.toggleExpansion(path: item.path) } }
                 } else {
                     Spacer().frame(width: 12)
                 }
@@ -321,7 +324,7 @@ struct VaultTreeRow: View {
                     if item.isDir {
                         if !extend && !toggle {
                             viewModel.navigateTo(path: item.path)
-                            withAnimation { isExpanded.toggle() } 
+                            withAnimation { viewModel.toggleExpansion(path: item.path) } 
                         } else {
                             viewModel.selectItem(item, extend: extend, toggle: toggle)
                         }

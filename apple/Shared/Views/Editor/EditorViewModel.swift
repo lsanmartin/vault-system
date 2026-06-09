@@ -71,6 +71,7 @@ class EditorViewModel: ObservableObject {
     @Published var allNotes: [NoteRecord] = [] // Todas las notas (para árbol completo)
     @Published var searchText: String = ""
     @Published var selectedItemIds: Set<String> = []
+    @Published var expandedPaths: Set<String> = []
     private var lastSelectedId: String? = nil
     
     @Published var selectedLocationId: UUID? {
@@ -189,7 +190,7 @@ class EditorViewModel: ObservableObject {
     }
     
     func selectItem(_ item: NoteRecord, extend: Bool = false, toggle: Bool = false) {
-        let id = item.path // Usamos path como ID único en la UI
+        let id = item.path
         
         if toggle {
             if selectedItemIds.contains(id) {
@@ -198,13 +199,14 @@ class EditorViewModel: ObservableObject {
                 selectedItemIds.insert(id)
             }
         } else if extend, let lastId = lastSelectedId {
-            // Implementación de Rango real
-            let allVisible = folders + notes
-            if let startIdx = allVisible.firstIndex(where: { $0.path == lastId }),
-               let endIdx = allVisible.firstIndex(where: { $0.path == id }) {
+            // Obtener lista plana de lo que el usuario está viendo realmente
+            let visibleItems = getFlattenedVisibleItems()
+            
+            if let startIdx = visibleItems.firstIndex(where: { $0.path == lastId }),
+               let endIdx = visibleItems.firstIndex(where: { $0.path == id }) {
                 let range = startIdx < endIdx ? startIdx...endIdx : endIdx...startIdx
                 for i in range {
-                    selectedItemIds.insert(allVisible[i].path)
+                    selectedItemIds.insert(visibleItems[i].path)
                 }
             } else {
                 selectedItemIds.insert(id)
@@ -214,10 +216,45 @@ class EditorViewModel: ObservableObject {
         }
         
         lastSelectedId = id
+        if !item.isDir && !extend && !toggle { openNote(item) }
+    }
+    
+    // Helper para calcular la lista plana de elementos visibles (jerárquico)
+    private func getFlattenedVisibleItems() -> [NoteRecord] {
+        var flattened: [NoteRecord] = []
         
-        // Si es nota única y no estamos extendiendo, abrirla
-        if !item.isDir && !extend && !toggle {
-            openNote(item)
+        // Determinar qué lista usar según el modo
+        if layoutMode == .tactical && !searchText.isEmpty {
+            return folders + notes
+        }
+        
+        // En modo lista o táctico (sidebar), el orden lo dicta el árbol
+        if let rootId = selectedLocationId, 
+           let root = currentLocations?.first(where: { $0.id == rootId }) {
+            appendChildren(of: root.path, to: &flattened)
+        }
+        
+        return flattened
+    }
+    
+    private func appendChildren(of path: String, to list: inout [NoteRecord]) {
+        let children = (allFolders + allNotes).filter { 
+            URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == path 
+        }.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        
+        for child in children {
+            list.append(child)
+            if child.isDir && expandedPaths.contains(child.path) {
+                appendChildren(of: child.path, to: &list)
+            }
+        }
+    }
+    
+    func toggleExpansion(path: String) {
+        if expandedPaths.contains(path) {
+            expandedPaths.remove(path)
+        } else {
+            expandedPaths.insert(path)
         }
     }
     
