@@ -18,6 +18,7 @@
     - Se ha **ocultado el toggle manual** de modos en la UI (comentado en `MainEditorView.swift`) para simplificar la experiencia de usuario.
     - **Detección Automática**: El motor identifica y procesa dinámicamente bloques Markdown, documentos HTML y estructuras complejas de LaTeX (incluyendo matrices `pmatrix`, `align`, etc.).
     - **Protección de Bloques**: Las ecuaciones y entornos LaTeX se blindan antes del parseo de Markdown para preservar secuencias de escape como `\\`.
+  - **Filtro de Borrado de Sesión**: Implementada lógica de filtrado global (`deletedPathsThisSession`) para ocultar de inmediato elementos eliminados tanto en el árbol jerárquico como en la lista de resultados, evitando "ghost items" durante la sincronización activa.
   - **Blindaje Estructural**: Implementado el uso de Raw Strings de triple comilla y doble hash (`##""" ... """##`) en Swift para una inyección segura de código JS/LaTeX.
 
 ## Especificaciones de Renderizado (Para la IA)
