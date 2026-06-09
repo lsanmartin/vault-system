@@ -318,8 +318,20 @@ class EditorViewModel: ObservableObject {
         var deletedAny = false
         
         for path in itemsToDelete {
-            if deleteItem(path: path) {
+            if deleteItem(path: path) { // Borra del disco
                 deletedAny = true
+                // Limpiar del estado local (Workaround por fallo de recompilación core)
+                notes.removeAll { $0.path == path }
+                folders.removeAll { $0.path == path }
+                allNotes.removeAll { $0.path == path }
+                allFolders.removeAll { $0.path == path }
+                
+                // Borrar recursivamente si es carpeta
+                notes.removeAll { $0.path.hasPrefix("\(path)/") }
+                folders.removeAll { $0.path.hasPrefix("\(path)/") }
+                allNotes.removeAll { $0.path.hasPrefix("\(path)/") }
+                allFolders.removeAll { $0.path.hasPrefix("\(path)/") }
+
                 // Cerrar pestaña si está abierta
                 if let index = tabs.firstIndex(where: { $0.id == path }) {
                     tabs.remove(at: index)
@@ -332,8 +344,8 @@ class EditorViewModel: ObservableObject {
             if !tabs.contains(where: { $0.id == activeTabId }) {
                 activeTabId = tabs.last?.id
             }
-            syncAll(locations: locations)
-            Telemetry.shared.log("Editor", eventType: "BatchDelete", message: "Eliminados \(itemsToDelete.count) elementos")
+            // No llamamos a syncAll aquí para evitar que el escáner (sin el fix de limpieza) traiga de vuelta registros huérfanos
+            Telemetry.shared.log("Editor", eventType: "BatchDeleteWorkaround", message: "Eliminados localmente \(itemsToDelete.count) elementos")
         }
     }
     
