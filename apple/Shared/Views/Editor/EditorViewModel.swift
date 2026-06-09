@@ -1,6 +1,26 @@
 import Foundation
 import SwiftUI
 
+extension Color {
+    init(hex: String) {
+        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch hex.count {
+        case 3: // RGB (12-bit)
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6: // RGB (24-bit)
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8: // ARGB (32-bit)
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            (a, r, g, b) = (1, 1, 1, 0)
+        }
+        self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: Double(a) / 255)
+    }
+}
+
 enum RenderMode: String, CaseIterable, Identifiable {
     case universal = "Universal"
     case md = "MD"
@@ -73,6 +93,14 @@ class EditorViewModel: ObservableObject {
     @AppStorage("vault_tactical_sidebar_width") var tacticalSidebarWidth: Double = 250.0
     @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
     
+    // --- macOS Finder Palette ---
+    static let macBackground = Color(hex: "1E1E1E")
+    static let macSidebar = Color(hex: "181818")
+    static let macPrimaryText = Color(hex: "F0F0F0")
+    static let macSecondaryText = Color(hex: "9A9A9A")
+    static let macControlIcon = Color(hex: "888888")
+    static let macAccent = Color.accentColor
+    
     var currentDefaultMode: RenderMode {
         return .universal // Forzado a Universal como modo único
     }
@@ -101,7 +129,6 @@ class EditorViewModel: ObservableObject {
             let currentTs = getLastSyncTs()
             if currentTs > self?.lastSyncTs ?? 0 { 
                 self?.lastSyncTs = currentTs
-                // No forzar refresh aquí para no interrumpir escritura, pero se podría
             }
         }
     }
