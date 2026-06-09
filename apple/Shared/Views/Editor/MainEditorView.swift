@@ -41,12 +41,18 @@ struct NoteCard: View {
                 .foregroundColor(EditorViewModel.macSecondaryText)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(hex: "1A1A1A")) // Fondo sutilmente más claro para la card
+        .background(Color(hex: "1A1A1A")) 
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(isSelected ? EditorViewModel.macAccent : Color.white.opacity(0.05), lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            let extend = NSEvent.modifierFlags.contains(.shift)
+            let toggle = NSEvent.modifierFlags.contains(.command)
+            viewModel.selectItem(note, extend: extend, toggle: toggle)
+        }
         .contextMenu {
             Button {
                 newName = note.title
@@ -146,8 +152,7 @@ struct MainContentColumn: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
                             ForEach(viewModel.notes) { note in
-                                NoteCard(note: note, isSelected: viewModel.activeTabId == note.id, selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
-                                    .onTapGesture { viewModel.openNote(note) }
+                                NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
                             }
                         }.padding()
                     }
@@ -258,8 +263,7 @@ struct VaultTreeRow: View {
     }
     
     var isSelected: Bool {
-        if item.isDir { return viewModel.currentPath == item.path }
-        return viewModel.activeTabId == item.id
+        viewModel.selectedItemIds.contains(item.path)
     }
     
     var body: some View {
@@ -295,11 +299,18 @@ struct VaultTreeRow: View {
                 .background(isSelected ? EditorViewModel.macAccent.opacity(0.15) : Color.white.opacity(0.03))
                 .cornerRadius(4)
                 .onTapGesture {
+                    let extend = NSEvent.modifierFlags.contains(.shift)
+                    let toggle = NSEvent.modifierFlags.contains(.command)
+                    
                     if item.isDir {
-                        viewModel.navigateTo(path: item.path)
-                        withAnimation { isExpanded.toggle() } 
+                        if !extend && !toggle {
+                            viewModel.navigateTo(path: item.path)
+                            withAnimation { isExpanded.toggle() } 
+                        } else {
+                            viewModel.selectItem(item, extend: extend, toggle: toggle)
+                        }
                     } else {
-                        viewModel.openNote(item)
+                        viewModel.selectItem(item, extend: extend, toggle: toggle)
                     }
                 }
                 .contextMenu {
@@ -418,7 +429,20 @@ struct FileRowView: View {
             if item.isDir { Spacer(); Image(systemName: "chevron.right").font(.system(size: 10)).opacity(0.3) }
         }
         .contentShape(Rectangle())
-        .onTapGesture { if item.isDir { viewModel.navigateTo(path: item.path) } else { viewModel.openNote(item) } }
+        .onTapGesture { 
+            let extend = NSEvent.modifierFlags.contains(.shift)
+            let toggle = NSEvent.modifierFlags.contains(.command)
+            
+            if item.isDir {
+                if !extend && !toggle {
+                    viewModel.navigateTo(path: item.path)
+                } else {
+                    viewModel.selectItem(item, extend: extend, toggle: toggle)
+                }
+            } else {
+                viewModel.selectItem(item, extend: extend, toggle: toggle)
+            }
+        }
         .contextMenu {
             if item.isDir {
                 Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
@@ -432,11 +456,6 @@ struct FileRowView: View {
             } label: { Label("Renombrar", systemImage: "pencil") }
 
             Button(role: .destructive) { viewModel.deleteNote(item, locations: locations) } label: { Label("Eliminar", systemImage: "trash") }
-        }
-        .alert("Renombrar", isPresented: $isShowingRename) {
-            TextField("Nuevo nombre", text: $newName)
-            Button("Cancelar", role: .cancel) { }
-            Button("Guardar") { viewModel.performRename(item: item, newName: newName, locations: locations) }
         }
         .listRowBackground(EditorViewModel.macBackground)
         .overlay(
@@ -496,7 +515,7 @@ struct EditorAreaView: View {
                 CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 16)
-                    .background(EditorViewModel.macBackground) // Fondo explícito
+                    .background(EditorViewModel.macBackground) 
             }
         }
         .background(EditorViewModel.macBackground)

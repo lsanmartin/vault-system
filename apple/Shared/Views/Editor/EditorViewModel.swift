@@ -70,6 +70,9 @@ class EditorViewModel: ObservableObject {
     @Published var allFolders: [NoteRecord] = [] // Todas las carpetas (Árbol Sidebar)
     @Published var allNotes: [NoteRecord] = [] // Todas las notas (para árbol completo)
     @Published var searchText: String = ""
+    @Published var selectedItemIds: Set<String> = []
+    private var lastSelectedId: String? = nil
+    
     @Published var selectedLocationId: UUID? {
         didSet {
             if let id = selectedLocationId {
@@ -93,12 +96,12 @@ class EditorViewModel: ObservableObject {
     @AppStorage("vault_tactical_sidebar_width") var tacticalSidebarWidth: Double = 250.0
     @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
     
-    // --- macOS Finder Palette ---
-    static let macBackground = Color(hex: "1E1E1E")
-    static let macSidebar = Color(hex: "181818")
-    static let macPrimaryText = Color(hex: "F0F0F0")
-    static let macSecondaryText = Color(hex: "9A9A9A")
-    static let macControlIcon = Color(hex: "888888")
+    // --- macOS Finder Palette (Refined) ---
+    static let macBackground = Color(hex: "121212")
+    static let macSidebar = Color(hex: "121212")
+    static let macPrimaryText = Color(hex: "F0F0F0").opacity(0.85)
+    static let macSecondaryText = Color(hex: "9A9A9A").opacity(0.85)
+    static let macControlIcon = Color(hex: "888888").opacity(0.85)
     static let macAccent = Color.accentColor
     
     var currentDefaultMode: RenderMode {
@@ -178,8 +181,34 @@ class EditorViewModel: ObservableObject {
     
     func navigateTo(path: String) {
         currentPath = path
+        // Al navegar, limpiamos selección por defecto para evitar confusiones de contexto
+        selectedItemIds = [path] 
         if let locs = currentLocations {
             refreshNotes(locations: locs)
+        }
+    }
+    
+    func selectItem(_ item: NoteRecord, extend: Bool = false, toggle: Bool = false) {
+        let id = item.path // Usamos path como ID único en la UI
+        
+        if toggle {
+            if selectedItemIds.contains(id) {
+                selectedItemIds.remove(id)
+            } else {
+                selectedItemIds.insert(id)
+            }
+        } else if extend {
+            // Implementación simplificada de extensión: añade a la selección
+            selectedItemIds.insert(id)
+        } else {
+            selectedItemIds = [id]
+        }
+        
+        lastSelectedId = id
+        
+        // Si es nota, abrirla (comportamiento por defecto)
+        if !item.isDir {
+            openNote(item)
         }
     }
     
