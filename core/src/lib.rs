@@ -197,12 +197,33 @@ pub fn create_item(path: String, is_dir: bool) -> bool {
 
 #[uniffi::export]
 pub fn rename_item(old_path: String, new_path: String) -> bool {
+    // Borrar registros viejos de la DB (el sync posterior creará los nuevos)
+    {
+        let mut conn_guard = DB_CONN.lock().unwrap();
+        if let Some(conn) = conn_guard.as_mut() {
+            let _ = conn.execute(
+                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+                params![old_path, format!("{}/%", old_path)],
+            );
+        }
+    }
     fs::rename(old_path, new_path).is_ok()
 }
 
 #[uniffi::export]
 pub fn delete_item(path: String) -> bool {
-    // Nota: A futuro implementar mover a Trash nativo de macOS. Por ahora borrado directo.
+    // 1. Borrar de la base de datos
+    {
+        let mut conn_guard = DB_CONN.lock().unwrap();
+        if let Some(conn) = conn_guard.as_mut() {
+            let _ = conn.execute(
+                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+                params![path, format!("{}/%", path)],
+            );
+        }
+    }
+
+    // 2. Borrar del disco
     let target = Path::new(&path);
     if target.is_dir() {
         fs::remove_dir_all(target).is_ok()
@@ -347,6 +368,18 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                                 }
                                 update_sync_ts();
                             }
+                        }
+                    }
+                } else if event.kind.is_remove() {
+                    for path in event.paths {
+                        let path_str = path.to_str().unwrap_or("");
+                        let mut conn_guard = DB_CONN.lock().unwrap();
+                        if let Some(conn) = conn_guard.as_mut() {
+                            let _ = conn.execute(
+                                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+                                params![path_str, format!("{}/%", path_str)],
+                            );
+                            update_sync_ts();
                         }
                     }
                 }
