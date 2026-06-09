@@ -421,8 +421,6 @@ class EditorViewModel: ObservableObject {
     }
 }
 
-extension NoteRecord: Identifiable {}
-
 public class Telemetry {
     public static let shared = Telemetry()
     public let logFileURL: URL
