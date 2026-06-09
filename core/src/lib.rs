@@ -133,6 +133,14 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         None => return "Error: La base de datos no ha sido inicializada.".to_string(),
     };
 
+    // Limpiar registros antiguos para evitar huérfanos antes de re-escanear
+    // Usamos un patrón que incluya el directorio raíz y todos sus hijos
+    let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
+    let _ = conn.execute(
+        "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+        params![path, format!("{}%", clean_path)],
+    );
+
     let mut count = 0;
     let vault_path = Path::new(&path);
 
