@@ -72,6 +72,7 @@ class EditorViewModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var selectedItemIds: Set<String> = []
     @Published var expandedPaths: Set<String> = []
+    @Published var deletedPathsThisSession: Set<String> = []
     private var lastSelectedId: String? = nil
     
     @Published var selectedLocationId: UUID? {
@@ -154,6 +155,13 @@ class EditorViewModel: ObservableObject {
         
         // Filtramos para mostrar SOLO lo que está en el currentPath (Finder Style)
         var results = allItems.filter { item in
+            // Filtro de sesión para evitar que aparezcan elementos recién borrados (ghost items)
+            // Filtramos tanto el item exacto como sus hijos si es una carpeta borrada
+            if deletedPathsThisSession.contains(item.path) || 
+               deletedPathsThisSession.contains(where: { item.path.hasPrefix("\($0)/") }) { 
+                return false 
+            }
+            
             let itemURL = URL(fileURLWithPath: item.path)
             let parentPath = itemURL.deletingLastPathComponent().path
             
@@ -320,6 +328,9 @@ class EditorViewModel: ObservableObject {
         for path in itemsToDelete {
             if deleteItem(path: path) { // Borra del disco
                 deletedAny = true
+                // Marcar como borrado en esta sesión para evitar que el scanner lo traiga de vuelta
+                deletedPathsThisSession.insert(path)
+                
                 // Limpiar del estado local (Workaround por fallo de recompilación core)
                 notes.removeAll { $0.path == path }
                 folders.removeAll { $0.path == path }
