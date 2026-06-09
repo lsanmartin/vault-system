@@ -160,7 +160,7 @@ struct MainContentColumn: View {
 
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                            ForEach(viewModel.notes) { note in
+                            ForEach(viewModel.notes, id: \.path) { note in
                                 NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
                             }
                         }.padding()
@@ -252,7 +252,7 @@ struct VaultTreeView: View {
             if rootPath.isEmpty {
                 ContentUnavailableView("No Workspace", systemImage: "folder.badge.questionmark")
             } else {
-                ForEach(rootItems) { item in
+                ForEach(rootItems, id: \.path) { item in
                     VaultTreeRow(item: item, viewModel: viewModel, locations: locations, showNotes: showNotes)
                 }
             }
@@ -359,7 +359,7 @@ struct VaultTreeRow: View {
             
             if item.isDir && isExpanded {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(children) { child in
+                    ForEach(children, id: \.path) { child in
                         VaultTreeRow(item: child, viewModel: viewModel, locations: locations, showNotes: showNotes)
                     }
                 }

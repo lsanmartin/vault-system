@@ -1,6 +1,9 @@
 import Foundation
 import SwiftUI
 
+// Extender el modelo generado para que SwiftUI pueda identificarlo sin especificar el ID en cada ForEach
+extension NoteRecord: Identifiable {}
+
 extension Color {
     init(hex: String) {
         let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
@@ -417,6 +420,8 @@ class EditorViewModel: ObservableObject {
         refreshNotes(locations: locations)
     }
 }
+
+extension NoteRecord: Identifiable {}
 
 public class Telemetry {
     public static let shared = Telemetry()
