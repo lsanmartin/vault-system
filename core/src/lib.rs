@@ -17,6 +17,7 @@ pub struct NoteRecord {
     pub title: String,
     pub path: String,
     pub content: String,
+    pub is_dir: bool,
 }
 
 static DB_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
@@ -94,6 +95,7 @@ pub fn init_knowledge_base() -> String {
             title VARCHAR,
             path VARCHAR,
             content TEXT,
+            is_dir BOOLEAN DEFAULT false,
             created_at TIMESTAMP,
             tags VARCHAR[],
             embedding FLOAT[]
@@ -147,8 +149,12 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             continue;
         }
         
-        // Filtrar solo archivos .md
-        if file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md") {
+        // Procesar directorios y archivos
+        if file_path.is_dir() {
+            let title = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
+            let sql = "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())";
+            let _ = conn.execute(sql, params![full_path_str, title, full_path_str, ""]);
+        } else if file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md") {
             let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
 
             // Leer contenido del archivo
@@ -157,7 +163,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             // Generar embedding
             let emb = generate_embedding(&content);
             let sql = format!(
-                "INSERT OR REPLACE INTO notes (id, title, path, content, created_at, embedding) VALUES (?, ?, ?, ?, now(), {})",
+                "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding) VALUES (?, ?, ?, ?, false, now(), {})",
                 vector_to_sql_array(&emb)
             );
 
@@ -226,11 +232,11 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
 
     let mut sql = if is_semantic {
         format!(
-            "SELECT id, title, path, content, array_cosine_similarity(embedding, {}) as similarity FROM notes WHERE 1=1",
+            "SELECT id, title, path, content, is_dir, array_cosine_similarity(embedding, {}) as similarity FROM notes WHERE 1=1",
             search_emb_sql
         )
     } else {
-        "SELECT id, title, path, content FROM notes WHERE 1=1".to_string()
+        "SELECT id, title, path, content, is_dir FROM notes WHERE 1=1".to_string()
     };
     
     // Filtro por Workspace (Path)
@@ -258,6 +264,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
             title: row.get(1)?,
             path: row.get(2)?,
             content: row.get(3)?,
+            is_dir: row.get(4)?,
         })
     }).unwrap();
 
@@ -314,20 +321,30 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                 if event.kind.is_modify() || event.kind.is_create() {
                     for path in event.paths {
                         let path_str = path.to_str().unwrap_or("");
-                        if path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p)) {
+                        let is_dir = path.is_dir();
+                        
+                        if is_dir || (path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p))) {
                             let mut conn_guard = DB_CONN.lock().unwrap();
                             if let Some(conn) = conn_guard.as_mut() {
-                                let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
-                                let content = fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
-                                let emb = generate_embedding(&content);
-                                let sql = format!(
-                                    "INSERT OR REPLACE INTO notes (id, title, path, content, created_at, embedding) VALUES (?, ?, ?, ?, now(), {})",
-                                    vector_to_sql_array(&emb)
-                                );
-                                let _ = conn.execute(
-                                    &sql,
-                                    params![path_str, title, path_str, content],
-                                );
+                                let title = path.file_name().and_then(|s| s.to_str()).unwrap_or("Sin título");
+                                
+                                if is_dir {
+                                    let _ = conn.execute(
+                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())",
+                                        params![path_str, title, path_str, ""],
+                                    );
+                                } else {
+                                    let content = fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
+                                    let emb = generate_embedding(&content);
+                                    let sql = format!(
+                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding) VALUES (?, ?, ?, ?, false, now(), {})",
+                                        vector_to_sql_array(&emb)
+                                    );
+                                    let _ = conn.execute(
+                                        &sql,
+                                        params![path_str, title, path_str, content],
+                                    );
+                                }
                                 update_sync_ts();
                             }
                         }

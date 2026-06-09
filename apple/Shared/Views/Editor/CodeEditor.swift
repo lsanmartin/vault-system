@@ -17,6 +17,10 @@ struct CodeEditor: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         
+        // Agregar espacio interno (Padding)
+        textView.textContainerInset = NSSize(width: 20, height: 20)
+        textView.textContainer?.lineFragmentPadding = 5
+        
         return scrollView
     }
     

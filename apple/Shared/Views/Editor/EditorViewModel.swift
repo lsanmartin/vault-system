@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 
 enum RenderMode: String, CaseIterable, Identifiable {
+    case universal = "Universal"
     case md = "MD"
     case html = "HTML"
     case latex = "LaTeX"
@@ -35,20 +36,45 @@ enum SortOption: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+enum LayoutMode: String, CaseIterable, Identifiable {
+    case list = "Lista"
+    case tactical = "Táctico"
+    var id: String { self.rawValue }
+}
+
 class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String?
     @Published var notes: [NoteRecord] = []
+    @Published var folders: [NoteRecord] = [] // Carpetas del nivel actual (Grid)
+    @Published var allFolders: [NoteRecord] = [] // Todas las carpetas (Árbol Sidebar)
+    @Published var allNotes: [NoteRecord] = [] // Todas las notas (para árbol completo)
     @Published var searchText: String = ""
-    @Published var selectedLocationId: UUID?
+    @Published var selectedLocationId: UUID? {
+        didSet {
+            if let id = selectedLocationId {
+                UserDefaults.standard.set(id.uuidString, forKey: "vault_last_selected_location")
+                // Al cambiar de workspace, ir a la raíz
+                if let location = currentLocations?.first(where: { $0.id == id }) {
+                    currentPath = location.path
+                }
+            }
+        }
+    }
+    @Published var currentPath: String = "" // Ruta que estamos "viendo" actualmente (Finder style)
+    @Published var currentLocations: [VaultLocation]? // Referencia temporal para el didSet
+    
+    @Published var selectedFolderId: String? // Mantenemos para resaltar seleccionadas si es necesario
     @Published var showSystemFiles: Bool = true 
     @Published var selectedTheme: AppTheme = .system
     @Published var sortOption: SortOption = .name
     
-    @AppStorage("vault_render_mode_v2") var defaultRenderModeStr: String = RenderMode.md.rawValue
+    @AppStorage("vault_layout_mode") var layoutMode: LayoutMode = .list
+    @AppStorage("vault_tactical_sidebar_width") var tacticalSidebarWidth: Double = 250.0
+    @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
     
     var currentDefaultMode: RenderMode {
-        RenderMode(rawValue: defaultRenderModeStr) ?? .md
+        return .universal // Forzado a Universal como modo único
     }
     
     private var lastSyncTs: UInt64 = 0
@@ -56,6 +82,13 @@ class EditorViewModel: ObservableObject {
 
     init() {
         _ = initKnowledgeBase()
+        
+        // Restaurar última ubicación seleccionada
+        if let savedId = UserDefaults.standard.string(forKey: "vault_last_selected_location"),
+           let uuid = UUID(uuidString: savedId) {
+            self.selectedLocationId = uuid
+        }
+        
         startPolling()
     }
     
@@ -74,38 +107,96 @@ class EditorViewModel: ObservableObject {
     }
     
     func refreshNotes(locations: [VaultLocation]) {
+        self.currentLocations = locations
+        if currentPath.isEmpty, let first = locations.first(where: { $0.id == selectedLocationId }) {
+            currentPath = first.path
+        }
+
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
-        let selectedPath = locations.first(where: { $0.id == selectedLocationId })?.path
         
-        var results = queryNotes(searchTerm: searchText, pathFilter: selectedPath, ignorePatterns: ignorePatterns)
+        // Obtenemos todo de la DB
+        let allItems = queryNotes(searchTerm: searchText, pathFilter: nil, ignorePatterns: ignorePatterns)
         
-        // Aplicar ordenamiento en Swift
+        // Guardamos todo para el árbol jerárquico
+        self.allFolders = allItems.filter { $0.isDir }
+        self.allNotes = allItems.filter { !$0.isDir }
+        
+        // Filtramos para mostrar SOLO lo que está en el currentPath (Finder Style)
+        var results = allItems.filter { item in
+            let itemURL = URL(fileURLWithPath: item.path)
+            let parentPath = itemURL.deletingLastPathComponent().path
+            
+            // Si hay búsqueda, mostramos todo lo que coincida
+            if !searchText.isEmpty { return true }
+            
+            // Si no hay búsqueda, solo lo que cuelga directamente de currentPath
+            return parentPath == currentPath
+        }
+        
+        // Aplicar ordenamiento
         switch sortOption {
         case .name:
-            results.sort { $0.title.lowercased() < $1.title.lowercased() }
+            results.sort { a, b in
+                if a.isDir != b.isDir { return a.isDir } // Carpetas primero
+                return a.title.lowercased() < b.title.lowercased()
+            }
         case .date:
-            // Por ahora query_notes ya ordena por fecha, pero esto asegura consistencia
             break 
         }
         
-        self.notes = results
+        // Separar carpetas y notas para el layout táctico
+        self.folders = results.filter { $0.isDir }
+        self.notes = results.filter { !$0.isDir }
+    }
+    
+    func navigateTo(path: String) {
+        currentPath = path
+        if let locs = currentLocations {
+            refreshNotes(locations: locs)
+        }
+    }
+    
+    func navigateBack() {
+        let currentURL = URL(fileURLWithPath: currentPath)
+        let parentPath = currentURL.deletingLastPathComponent().path
+        
+        // No subir más allá de la raíz del workspace
+        if let locs = currentLocations, let currentWorkspace = locs.first(where: { $0.id == selectedLocationId }) {
+            if currentPath != currentWorkspace.path {
+                navigateTo(path: parentPath)
+            }
+        }
     }
     
     func syncAll(locations: [VaultLocation]) {
+        self.currentLocations = locations
         for location in locations { _ = scanVault(path: location.path, ignorePatterns: []) }
         refreshNotes(locations: locations)
     }
     
     func createNewNote(locations: [VaultLocation]) {
-        guard let location = locations.first(where: { $0.id == selectedLocationId }) else { return }
-        let fileName = "Nueva Nota \(Date().timeIntervalSince1970).md"
-        let fullPath = URL(fileURLWithPath: location.path).appendingPathComponent(fileName).path
+        if currentPath.isEmpty { return }
+
+        let fileName = "Nueva Nota \(Int(Date().timeIntervalSince1970)).md"
+        let fullPath = URL(fileURLWithPath: currentPath).appendingPathComponent(fileName).path
+        
         if createItem(path: fullPath, isDir: false) {
+            UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
             syncAll(locations: locations)
-            // Abrir automáticamente la nueva nota
             if let newNote = notes.first(where: { $0.path == fullPath }) {
                 openNote(newNote)
             }
+        }
+    }
+    
+    func createNewFolder(locations: [VaultLocation]) {
+        if currentPath.isEmpty { return }
+
+        let folderName = "Nueva Carpeta \(Int(Date().timeIntervalSince1970))"
+        let fullPath = URL(fileURLWithPath: currentPath).appendingPathComponent(folderName).path
+        
+        if createItem(path: fullPath, isDir: true) {
+            syncAll(locations: locations)
         }
     }
     
@@ -120,13 +211,30 @@ class EditorViewModel: ObservableObject {
         }
     }
     
+    func performRename(item: NoteRecord, newName: String, locations: [VaultLocation]) {
+        let oldURL = URL(fileURLWithPath: item.path)
+        let parentURL = oldURL.deletingLastPathComponent()
+        var newFileName = newName
+        
+        // Asegurar extensión .md si es una nota y el usuario no la puso
+        if !item.isDir && !newFileName.lowercased().hasSuffix(".md") {
+            newFileName += ".md"
+        }
+        
+        let newPath = parentURL.appendingPathComponent(newFileName).path
+        
+        if renameItem(oldPath: item.path, newPath: newPath) {
+            syncAll(locations: locations)
+            Telemetry.shared.log("Editor", eventType: "Rename", message: "De \(item.title) a \(newFileName)")
+        }
+    }
+    
     func openNote(_ note: NoteRecord) {
         if !tabs.contains(where: { $0.id == note.id }) {
-            // Cargar modo específico de esta nota, si no existe usar el global
-            let savedModeStr = UserDefaults.standard.string(forKey: "render_mode_\(note.id)")
-            let savedMode = RenderMode(rawValue: savedModeStr ?? "") ?? currentDefaultMode
+            // Modo Universal por defecto para todas las nuevas pestañas
+            let initialMode: RenderMode = .universal
             
-            let newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: savedMode)
+            let newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: initialMode)
             tabs.append(newTab)
         }
         activeTabId = note.id

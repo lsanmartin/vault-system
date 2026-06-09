@@ -11,6 +11,7 @@ class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
 
 struct WebView: NSViewRepresentable {
     let htmlContent: String
+    let baseURL: URL?
     
     func makeCoordinator() -> WebViewModel { WebViewModel() }
     
@@ -34,6 +35,6 @@ struct WebView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        nsView.loadHTMLString(htmlContent, baseURL: URL(string: "https://cdn.jsdelivr.net"))
+        nsView.loadHTMLString(htmlContent, baseURL: baseURL)
     }
 }

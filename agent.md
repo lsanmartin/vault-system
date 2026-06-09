@@ -1,26 +1,31 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-07 11:39]
+Última actualización: [2026-06-08 20:45]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
-... (Mantenido igual) ...
+- **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas (`DragGesture`), y navegación jerárquica (`VaultTreeView`).
+- **Capa 2: Motor de Renderizado (Universal)**: Procesamiento unificado de MD, HTML y LaTeX con detección automática.
+- **Capa 3: Core (Rust)**: Búsqueda semántica, File Watcher y persistencia en DuckDB.
 
 ## Resumen Técnico
-- **Objetivo**: Consolidación de un Entorno de Trabajo Reactivo y Táctico.
-- **Estado Actual**
-  - **Editor Inteligente**: ¡Implementado!
-    - Motor nativo `NSTextView` con resaltado de sintaxis dinámico (Títulos, Enlaces, Tags).
-    - Sistema de autocompletado nativo (tecla Esc) para MD y HTML.
-  - **Motor de Renderizado Híbrido (V2)**: ¡Implementado!
-    - Arquitectura de Puente Seguro: Envío de contenido vía Base64 (UTF-8 safe) para evitar corrupción de caracteres especiales y barras invertidas (`\`).
-    - Renderizado Industrial: Integración de `Marked.js` para Markdown completo y `KaTeX` para ecuaciones matemáticas.
-    - Persistencia Atómica: El `RenderMode` (MD, HTML, LaTeX) se guarda automáticamente por archivo (ID único) en `UserDefaults`.
-  - **Telemetría y Debug**: Sistema de logs persistentes en `~/Documents/vault_telemetry.log` y captura de errores JS en tiempo real hacia Swift.
-  - **Modo Noche (IR)**: Inmersión total (negro/rojo) en sidebar, listas y editor, con soporte heredado en fórmulas matemáticas.
-  - **Sincronización**: Reactividad en el foco y File Watcher funcional en Rust.
-  - **Repositorio**: Sincronizado y limpio en `lsanmartin/vault-system`.
-  - **Búsqueda Semántica**: ¡Implementada! Embeddings locales de 384 dimensiones integrados en DuckDB usando `array_cosine_similarity`.
+- **Objetivo**: Estandarización del Renderizador Universal y simplificación de la interfaz.
+- **Cambios Realizados**:
+  - **Navegación Jerárquica**: Árbol de carpetas desplegable con toggle de expansión y chevrons.
+  - **Redimensión Táctica**: Tirador de columnas funcional y persistente.
+  - **Gestión de Archivos**: Renombrado integrado en menús contextuales.
+  - **Renderizador Universal Standard**:
+    - Se ha establecido el modo **Universal** como el estándar único del sistema.
+    - Se ha **ocultado el toggle manual** de modos en la UI (comentado en `MainEditorView.swift`) para simplificar la experiencia de usuario.
+    - **Detección Automática**: El motor identifica y procesa dinámicamente bloques Markdown, documentos HTML y estructuras complejas de LaTeX (incluyendo matrices `pmatrix`, `align`, etc.).
+    - **Protección de Bloques**: Las ecuaciones y entornos LaTeX se blindan antes del parseo de Markdown para preservar secuencias de escape como `\\`.
+  - **Blindaje Estructural**: Implementado el uso de Raw Strings de triple comilla y doble hash (`##""" ... """##`) en Swift para una inyección segura de código JS/LaTeX.
+
+## Especificaciones de Renderizado (Para la IA)
+1. **Detección de Formato**:
+   - `Universal Mode`: Analiza el texto. Prioriza HTML si detecta `<html>`, limpia preámbulo si detecta `\documentclass`, y procesa Markdown en todo lo demás.
+2. **Motor Matemático**: Se utiliza `KaTeX 0.16.9` con soporte extendido para entornos matriciales y de sistemas.
+3. **Interfaz**: El selector de modo está comentado en el código por si se requiere restaurar, pero el sistema opera de forma autónoma.
 
 ## Pendientes Próxima Sesión
-- **Ajuste de Búsqueda Híbrida**: Sintonización de búsqueda híbrida.
-- **Optimización de Reactividad**: Mejorar reactividad del sistema.
+- **Sintonización de Búsqueda**: Ajustar pesos de búsqueda híbrida (Semántica + Keyword).
+- **Mejoras de Exportación**: Evaluar la generación de PDFs basados en el renderizado universal.
