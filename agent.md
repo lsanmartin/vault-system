@@ -30,3 +30,10 @@
 ## Pendientes Próxima Sesión
 - **Sintonización de Búsqueda**: Ajustar pesos de búsqueda híbrida (Semántica + Keyword).
 - **Mejoras de Exportación**: Evaluar la generación de PDFs basados en el renderizado universal.
+
+## Visión Estratégica (Nuevos Requerimientos)
+- **Búsqueda & Referencia Local**: Capacidad de buscar y vincular documentos/carpetas de todo el Mac (Spotlight Integration/Indexación).
+- **Continuidad Inteligente**: Iniciar sesión con los items de trabajo recientes disponibles de inmediato.
+- **Dashboard de Historial**: Lista interactiva (clickable) para reanudar contextos de trabajo rápidamente.
+- **Vault App Store**: Sistema de gestión para harnesses, workflows, skills y MCPs oficiales.
+- **Artefactos Seguros**: Compartición de notas/artefactos (MD, HTML, LaTeX) con opciones de seguridad (password opcional).
