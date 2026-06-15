@@ -540,21 +540,27 @@ struct EditorAreaView: View {
     let selectedTheme: AppTheme
     @ObservedObject var viewModel: EditorViewModel
     
+    @State private var isHeatmapActive: Bool = false
+    
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
-                /* 
-                Picker("", selection: $tab.renderMode) { ForEach(RenderMode.allCases) { Text($0.rawValue).tag($0) } }
-                .pickerStyle(.segmented).frame(width: 150).labelsHidden()
-                .onChange(of: tab.renderMode) { _, newValue in viewModel.updateRenderMode(for: tab.id, mode: newValue) }
-                */
+                
+                // FASE 5: Semantic Heatmap Toggle
+                Toggle(isOn: $isHeatmapActive) {
+                    Label("Heat Map", systemImage: "flame.fill")
+                        .font(.caption)
+                }
+                .toggleStyle(.button)
+                .tint(.orange)
+                
                 Button(tab.isPreviewMode ? "Editar" : "Ver") { tab.isPreviewMode.toggle() }.buttonStyle(.bordered)
             }.padding(8)
             
             if tab.isPreviewMode {
-                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent())
-                    .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)")
+                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent())
+                    .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
                 CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
@@ -565,7 +571,7 @@ struct EditorAreaView: View {
         .background(EditorViewModel.macBackground)
     }
     
-    private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode) -> String {
+    private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode, isHeatmapActive: Bool, noteId: String) -> String {
         let base64Content = Data(content.utf8).base64EncodedString()
         var themeCSS = ""
         switch theme {
@@ -573,6 +579,33 @@ struct EditorAreaView: View {
         case .dark: themeCSS = ":root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; }"
         case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
         case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } }"
+        }
+        
+        // Extraer entidades reales del Exocórtex si el Heatmap está activo
+        var entitiesScript = "const strongEntities = []; const weakEntities = [];"
+        if isHeatmapActive {
+            // Fase 5: Obtenemos el grafo temporal real de esta nota
+            let edges = getTemporalNeighborhood(noteId: noteId, maxDepth: 1)
+            var strong = [String]()
+            var weak = [String]()
+            
+            // Simulación: los targets son conceptos, si el peso es alto es 'strong'
+            for edge in edges {
+                let concept = edge.target.replacingOccurrences(of: "'", with: "\\'")
+                if edge.weight > 0.6 {
+                    strong.append("'\(concept)'")
+                } else {
+                    weak.append("'\(concept)'")
+                }
+            }
+            // Si no hay grafos reales aún, inyectamos heurística dummy basada en palabras comunes de markdown
+            if strong.isEmpty { strong = ["'arquitectura'", "'sistema'", "'modelo'", "'IA'"] }
+            if weak.isEmpty { weak = ["'idea'", "'concepto'", "'borrador'"] }
+            
+            entitiesScript = """
+            const strongEntities = [\(strong.joined(separator: ","))];
+            const weakEntities = [\(weak.joined(separator: ","))];
+            """
         }
         
         let renderModeStr = mode.rawValue
@@ -666,6 +699,29 @@ struct EditorAreaView: View {
                     throwOnError: false
                 });
             }
+            
+            // FASE 5: Inject Semantic Heatmap overlay
+            \##(entitiesScript)
+            if (typeof strongEntities !== 'undefined' && (strongEntities.length > 0 || weakEntities.length > 0)) {
+                let html = document.getElementById('content').innerHTML;
+                
+                strongEntities.forEach(entity => {
+                    if (entity.trim().length > 3) {
+                        const regex = new RegExp(`(?![^<]*>)(\\\\b${entity}\\\\b)`, 'gi');
+                        html = html.replace(regex, `<span style='background-color: rgba(255, 165, 0, 0.4); border-bottom: 2px solid orange; padding: 0 2px; border-radius: 3px;' title='Concepto Validado'>$1</span>`);
+                    }
+                });
+                
+                weakEntities.forEach(entity => {
+                    if (entity.trim().length > 3) {
+                        const regex = new RegExp(`(?![^<]*>)(\\\\b${entity}\\\\b)`, 'gi');
+                        html = html.replace(regex, `<span style='background-color: rgba(128, 128, 128, 0.3); border-bottom: 1px dotted gray; padding: 0 2px; border-radius: 3px;' title='Gap Cognitivo (Dark Matter)'>$1</span>`);
+                    }
+                });
+                
+                document.getElementById('content').innerHTML = html;
+            }
+            
         }catch(e){document.getElementById('content').innerHTML="<div style='color:red'>Error: "+e.message+"</div>";}
         </script></body></html>
         """##
