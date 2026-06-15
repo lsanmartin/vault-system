@@ -102,12 +102,12 @@ class EditorViewModel: ObservableObject {
     @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
     
     // --- macOS Finder Palette (Dynamic) ---
-    static let macBackground = Color(nsColor: .windowBackgroundColor)
-    static let macSidebar = Color(nsColor: .underPageBackgroundColor)
-    static let macPrimaryText = Color.primary
-    static let macSecondaryText = Color.secondary
-    static let macControlIcon = Color.secondary
-    static let macAccent = Color.accentColor
+    var macBackground: Color { selectedTheme == .night ? .black : Color(nsColor: .windowBackgroundColor) }
+    var macSidebar: Color { selectedTheme == .night ? .black : Color(nsColor: .underPageBackgroundColor) }
+    var macPrimaryText: Color { selectedTheme == .night ? .red : .primary }
+    var macSecondaryText: Color { selectedTheme == .night ? Color.red.opacity(0.7) : .secondary }
+    var macControlIcon: Color { selectedTheme == .night ? Color.red.opacity(0.5) : .secondary }
+    var macAccent: Color { selectedTheme == .night ? .red : .accentColor }
     
     var currentDefaultMode: RenderMode {
         return .universal // Forzado a Universal como modo único

@@ -24,28 +24,28 @@ struct NoteCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: "doc.text.fill")
-                    .foregroundColor(EditorViewModel.macControlIcon)
+                    .foregroundColor(viewModel.macControlIcon)
                     .font(.system(size: 12))
                 Spacer()
-                Circle().fill(EditorViewModel.macAccent).frame(width: 4, height: 4)
+                Circle().fill(viewModel.macAccent).frame(width: 4, height: 4)
             }
             Text(note.title)
                 .font(.headline)
                 .lineLimit(2)
-                .foregroundColor(EditorViewModel.macPrimaryText)
+                .foregroundColor(viewModel.macPrimaryText)
             
             Spacer(minLength: 4)
             Text(displayPath)
                 .font(.system(size: 9, design: .monospaced))
                 .lineLimit(1)
-                .foregroundColor(EditorViewModel.macSecondaryText)
+                .foregroundColor(viewModel.macSecondaryText)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor)) 
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isSelected ? EditorViewModel.macAccent : Color.primary.opacity(0.1), lineWidth: 1)
+                .stroke(isSelected ? viewModel.macAccent : Color.primary.opacity(0.1), lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -100,7 +100,7 @@ struct SidebarColumn: View {
             }
         }
         .navigationTitle("Vault System")
-        .background(EditorViewModel.macSidebar)
+        .background(viewModel.macSidebar)
         .scrollContentBackground(.hidden)
     }
 }
@@ -141,14 +141,14 @@ struct MainContentColumn: View {
                             .padding(.vertical, 8)
                     }
                 }
-                .background(EditorViewModel.macBackground)
+                .background(viewModel.macBackground)
             } else {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             Text("Explorar")
                                 .font(.caption).bold().opacity(0.5)
-                                .foregroundColor(EditorViewModel.macSecondaryText)
+                                .foregroundColor(viewModel.macSecondaryText)
                             
                             Spacer()
                             
@@ -171,7 +171,7 @@ struct MainContentColumn: View {
                         }
                     }
                     .frame(width: CGFloat(viewModel.tacticalSidebarWidth))
-                    .background(EditorViewModel.macBackground)
+                    .background(viewModel.macBackground)
                     .overlay(
                         Rectangle()
                             .fill(Color.black.opacity(0.2))
@@ -203,12 +203,12 @@ struct MainContentColumn: View {
                         }.padding()
                     }
                     .frame(maxWidth: .infinity)
-                    .background(EditorViewModel.macBackground)
+                    .background(viewModel.macBackground)
                 }
             }
         }
         .navigationTitle("Notas")
-        .background(EditorViewModel.macBackground)
+        .background(viewModel.macBackground)
     }
     
     private var headerView: some View {
@@ -217,13 +217,13 @@ struct MainContentColumn: View {
                 if let workspace = workspaceManager.locations.first(where: { $0.id == viewModel.selectedLocationId }) {
                     Button(action: { viewModel.navigateBack() }) { 
                         Image(systemName: "chevron.left")
-                            .foregroundColor(EditorViewModel.macControlIcon)
+                            .foregroundColor(viewModel.macControlIcon)
                     }
                     .buttonStyle(.borderless).disabled(viewModel.currentPath == workspace.path)
                     
                     Text(viewModel.currentPath == workspace.path ? workspace.name : URL(fileURLWithPath: viewModel.currentPath).lastPathComponent)
                         .font(.headline)
-                        .foregroundColor(EditorViewModel.macPrimaryText)
+                        .foregroundColor(viewModel.macPrimaryText)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -240,18 +240,18 @@ struct MainContentColumn: View {
                     Picker("Ordenar", selection: $viewModel.sortOption) { ForEach(SortOption.allCases) { Text($0.rawValue).tag($0) } }
                 } label: { 
                     Image(systemName: "arrow.up.arrow.down")
-                        .foregroundColor(EditorViewModel.macControlIcon)
+                        .foregroundColor(viewModel.macControlIcon)
                 }
                 .menuStyle(.borderlessButton).fixedSize()
                 
                 Button(action: { viewModel.createNewNote(locations: workspaceManager.locations) }) { 
                     Image(systemName: "note.text.badge.plus")
-                        .foregroundColor(EditorViewModel.macControlIcon)
+                        .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
                 
                 Button(action: { viewModel.createNewFolder(locations: workspaceManager.locations) }) { 
                     Image(systemName: "folder.badge.plus")
-                        .foregroundColor(EditorViewModel.macControlIcon)
+                        .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
                 
                 if !viewModel.selectedItemIds.isEmpty {
@@ -263,7 +263,7 @@ struct MainContentColumn: View {
             }
         }
         .padding()
-        .background(EditorViewModel.macBackground)
+        .background(viewModel.macBackground)
     }
 }
 
@@ -329,7 +329,7 @@ struct VaultTreeRow: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .foregroundColor(EditorViewModel.macSecondaryText)
+                        .foregroundColor(viewModel.macSecondaryText)
                         .frame(width: 12)
                         .onTapGesture { withAnimation { viewModel.toggleExpansion(path: item.path) } }
                 } else {
@@ -338,12 +338,12 @@ struct VaultTreeRow: View {
                 
                 HStack(spacing: 8) {
                     Image(systemName: item.isDir ? (isExpanded ? "folder.fill" : "folder") : "doc.text")
-                        .foregroundColor(item.isDir ? EditorViewModel.macAccent : EditorViewModel.macSecondaryText)
+                        .foregroundColor(item.isDir ? viewModel.macAccent : viewModel.macSecondaryText)
                         .font(.system(size: 12))
                     
                     Text(item.title)
                         .font(.subheadline)
-                        .foregroundColor(isSelected ? EditorViewModel.macPrimaryText : EditorViewModel.macSecondaryText)
+                        .foregroundColor(isSelected ? viewModel.macPrimaryText : viewModel.macSecondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     
@@ -352,7 +352,7 @@ struct VaultTreeRow: View {
                 .padding(.vertical, 4)
                 .padding(.horizontal, 4)
                 .contentShape(Rectangle())
-                .background(isSelected ? EditorViewModel.macAccent.opacity(0.15) : Color.white.opacity(0.03))
+                .background(isSelected ? viewModel.macAccent.opacity(0.15) : Color.white.opacity(0.03))
                 .cornerRadius(4)
                 .onTapGesture {
                     let extend = NSEvent.modifierFlags.contains(.shift)
@@ -421,14 +421,14 @@ struct DetailColumn: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 0) {
                         ForEach(viewModel.tabs) { tab in
-                            TabHeaderView(tab: tab, isActive: tab.id == activeId) {
+                            TabHeaderView(tab: tab, isActive: tab.id == activeId, viewModel: viewModel) {
                                 viewModel.activeTabId = tab.id
                             } onClose: {
                                 if let idx = viewModel.tabs.firstIndex(where: { $0.id == tab.id }) { viewModel.closeTab(at: IndexSet(integer: idx)) }
                             }
                         }
                     }
-                }.background(EditorViewModel.macSidebar)
+                }.background(viewModel.macSidebar)
                 EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
                 
                 // FASE 5: Cognitive Radar
@@ -436,7 +436,7 @@ struct DetailColumn: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
                     .padding(.top, 8)
-                    .background(EditorViewModel.macBackground)
+                    .background(viewModel.macBackground)
             }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
@@ -446,7 +446,7 @@ struct DetailColumn: View {
             }
         } else {
             ZStack {
-                EditorViewModel.macBackground.ignoresSafeArea()
+                viewModel.macBackground.ignoresSafeArea()
                 ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
                     .opacity(0.5)
             }
@@ -498,13 +498,13 @@ struct FileRowView: View {
     var body: some View {
         HStack {
             Image(systemName: item.isDir ? "folder.fill" : "doc.text")
-                .foregroundColor(item.isDir ? EditorViewModel.macAccent : EditorViewModel.macSecondaryText)
+                .foregroundColor(item.isDir ? viewModel.macAccent : viewModel.macSecondaryText)
                 .font(.system(size: 14))
             
             VStack(alignment: .leading) {
-                Text(item.title).font(.headline).foregroundColor(EditorViewModel.macPrimaryText)
+                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText)
                 if !viewModel.searchText.isEmpty { 
-                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(EditorViewModel.macSecondaryText) 
+                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText) 
                 }
             }
             if item.isDir { Spacer(); Image(systemName: "chevron.right").font(.system(size: 10)).opacity(0.3) }
@@ -547,7 +547,7 @@ struct FileRowView: View {
                 } label: { Label("Eliminar", systemImage: "trash") }
             }
         }
-        .listRowBackground(EditorViewModel.macBackground)
+        .listRowBackground(viewModel.macBackground)
         .overlay(
             Rectangle()
                 .fill(Color.white.opacity(0.05))
@@ -560,6 +560,7 @@ struct FileRowView: View {
 struct TabHeaderView: View {
     let tab: TabItem
     let isActive: Bool
+    @ObservedObject var viewModel: EditorViewModel
     let onSelect: () -> Void
     let onClose: () -> Void
     var body: some View {
@@ -567,16 +568,16 @@ struct TabHeaderView: View {
             Text(tab.title)
                 .font(.subheadline)
                 .fontWeight(isActive ? .bold : .regular)
-                .foregroundColor(isActive ? EditorViewModel.macPrimaryText : EditorViewModel.macSecondaryText)
+                .foregroundColor(isActive ? viewModel.macPrimaryText : viewModel.macSecondaryText)
             
             Button(action: onClose) { 
                 Image(systemName: "xmark")
                     .font(.system(size: 10))
-                    .foregroundColor(EditorViewModel.macControlIcon)
+                    .foregroundColor(viewModel.macControlIcon)
             }.buttonStyle(.plain)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(isActive ? EditorViewModel.macBackground : EditorViewModel.macSidebar)
+        .background(isActive ? viewModel.macBackground : viewModel.macSidebar)
         .onTapGesture(perform: onSelect)
     }
 }
@@ -611,10 +612,10 @@ struct EditorAreaView: View {
                 CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 16)
-                    .background(EditorViewModel.macBackground) 
+                    .background(viewModel.macBackground) 
             }
         }
-        .background(EditorViewModel.macBackground)
+        .background(viewModel.macBackground)
     }
     
     private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode, isHeatmapActive: Bool, noteId: String) -> String {
@@ -826,12 +827,12 @@ struct SemanticClusterRow: View {
             HStack {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(EditorViewModel.macSecondaryText)
+                    .foregroundColor(viewModel.macSecondaryText)
                     .frame(width: 12, height: 12)
                 
                 Text(title)
                     .font(.subheadline)
-                    .foregroundColor(EditorViewModel.macPrimaryText)
+                    .foregroundColor(viewModel.macPrimaryText)
                 
                 Spacer()
                 Text("\(notes.count)")
