@@ -466,6 +466,7 @@ struct MainEditorView: View {
         } detail: {
             DetailColumn(viewModel: viewModel)
         }
+        .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
         .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
         .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
         .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
@@ -474,6 +475,14 @@ struct MainEditorView: View {
             viewModel.syncAll(locations: workspaceManager.locations)
             if viewModel.selectedLocationId == nil, let first = workspaceManager.locations.first { viewModel.selectedLocationId = first.id }
             viewModel.launchWatcher(paths: workspaceManager.locations.map { $0.path }, ignorePatterns: [])
+        }
+    }
+    
+    private func colorScheme(for theme: AppTheme) -> ColorScheme? {
+        switch theme {
+        case .light: return .light
+        case .dark, .night: return .dark
+        case .system: return nil
         }
     }
 }
