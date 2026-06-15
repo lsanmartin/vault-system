@@ -88,7 +88,7 @@ pub fn init_knowledge_base() -> String {
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
 
-    // Crear tablas de esquema básico
+    // Crear tablas de esquema básico y Arquitectura Dual-Brain
     let schema_res = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
             id VARCHAR PRIMARY KEY,
@@ -112,6 +112,27 @@ pub fn init_knowledge_base() -> String {
             event_type VARCHAR,
             message TEXT,
             metadata JSON
+        );
+        
+        -- FASE 2: ARQUITECTURA DUAL-BRAIN (Metadata Offloading)
+        -- Esta tabla almacena los resúmenes sintéticos generados por la IA Local (Daemon).
+        -- Es la ÚNICA tabla de contenido que el MCP expondrá a los LLMs Remotos.
+        CREATE TABLE IF NOT EXISTS semantic_summaries (
+            note_id VARCHAR PRIMARY KEY,
+            synthetic_summary TEXT,
+            extracted_entities VARCHAR[],
+            cognitive_timestamp TIMESTAMP DEFAULT now(),
+            semantic_density FLOAT,
+            FOREIGN KEY (note_id) REFERENCES notes(id)
+        );
+        
+        -- FASE 3: GRAFO TEMPORAL Y NAVEGACIÓN
+        CREATE TABLE IF NOT EXISTS entity_graphs (
+            entity_name VARCHAR,
+            note_id VARCHAR,
+            relation_type VARCHAR,
+            discovered_at TIMESTAMP DEFAULT now(),
+            FOREIGN KEY (note_id) REFERENCES notes(id)
         );"
     );
 
