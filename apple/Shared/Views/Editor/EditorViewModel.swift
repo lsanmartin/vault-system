@@ -136,6 +136,9 @@ class EditorViewModel: ObservableObject {
     }
     
     func launchWatcher(paths: [String], ignorePatterns: [String]) {
+        for path in paths {
+            _ = scanVault(path: path, ignorePatterns: ignorePatterns)
+        }
         _ = startWatcher(paths: paths, ignorePatterns: ignorePatterns)
     }
 
