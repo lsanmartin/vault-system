@@ -101,12 +101,12 @@ class EditorViewModel: ObservableObject {
     @AppStorage("vault_tactical_sidebar_width") var tacticalSidebarWidth: Double = 250.0
     @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
     
-    // --- macOS Finder Palette (Refined) ---
-    static let macBackground = Color(hex: "121212")
-    static let macSidebar = Color(hex: "121212")
-    static let macPrimaryText = Color(hex: "F0F0F0").opacity(0.85)
-    static let macSecondaryText = Color(hex: "9A9A9A").opacity(0.85)
-    static let macControlIcon = Color(hex: "888888").opacity(0.85)
+    // --- macOS Finder Palette (Dynamic) ---
+    static let macBackground = Color(nsColor: .windowBackgroundColor)
+    static let macSidebar = Color(nsColor: .underPageBackgroundColor)
+    static let macPrimaryText = Color.primary
+    static let macSecondaryText = Color.secondary
+    static let macControlIcon = Color.secondary
     static let macAccent = Color.accentColor
     
     var currentDefaultMode: RenderMode {

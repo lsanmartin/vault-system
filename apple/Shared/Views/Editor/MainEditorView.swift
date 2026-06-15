@@ -41,11 +41,11 @@ struct NoteCard: View {
                 .foregroundColor(EditorViewModel.macSecondaryText)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(hex: "1A1A1A")) 
+        .background(Color(nsColor: .controlBackgroundColor)) 
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isSelected ? EditorViewModel.macAccent : Color.white.opacity(0.05), lineWidth: 1)
+                .stroke(isSelected ? EditorViewModel.macAccent : Color.primary.opacity(0.1), lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
