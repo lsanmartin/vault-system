@@ -64,7 +64,10 @@ fn generate_embedding(text: &str) -> Vec<f32> {
     
     // Simulación de un paso de transformación matricial en NPU (Linear Layer)
     let weights = mlx_rs::ops::ones::<f32>(&[384, 384]).unwrap_or(array!(0.0f32));
-    let result_tensor = mlx_rs::ops::matmul(&expanded, &weights).unwrap_or(array!(0.0f32));
+    let mut result_tensor = mlx_rs::ops::matmul(&expanded, &weights).unwrap_or(array!(0.0f32));
+    
+    // Evaluar el tensor en memoria (NPU/GPU) antes de extraerlo a la CPU
+    let _ = result_tensor.eval();
     
     // 3. Extraemos los resultados a un Vec<f32> seguro para DuckDB
     let mut vec: Vec<f32> = result_tensor.as_slice::<f32>().to_vec();
