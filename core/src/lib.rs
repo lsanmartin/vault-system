@@ -1,5 +1,6 @@
 use duckdb::{params, Connection, Result};
 use std::sync::Mutex;
+use std::time::Duration;
 use once_cell::sync::Lazy;
 use walkdir::WalkDir;
 use std::path::Path;
@@ -429,4 +430,113 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
         }
     });
     "File Watcher iniciado.".to_string()
+}
+
+#[uniffi::export]
+pub fn start_cognitive_daemon() -> String {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(10));
+            
+            // Usar un nuevo binding para evitar mantener el lock demasiado tiempo
+            let mut pending_notes = Vec::new();
+            
+            {
+                let conn_guard = DB_CONN.lock().unwrap();
+                if let Some(conn) = conn_guard.as_ref() {
+                    // Buscar notas que no están en semantic_summaries
+                    let query = "
+                        SELECT id, title, content 
+                        FROM notes 
+                        WHERE is_dir = false 
+                          AND id NOT IN (SELECT note_id FROM semantic_summaries)
+                        LIMIT 50
+                    ";
+                    
+                    let mut stmt = match conn.prepare(query) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    
+                    let note_iter = match stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    }) {
+                        Ok(i) => i,
+                        Err(_) => continue,
+                    };
+                    
+                    for note in note_iter {
+                        if let Ok(n) = note {
+                            pending_notes.push(n);
+                        }
+                    }
+                }
+            }
+            
+            if pending_notes.is_empty() {
+                continue;
+            }
+            
+            // Procesamiento: IA Local (Fase 2)
+            // Aquí en un futuro se llamará al modelo local (MLX / LLaMA / Phi)
+            // Por ahora, usamos un Mock cognitivo
+            
+            let mut processed = Vec::new();
+            for (id, title, content) in pending_notes {
+                // Mock Summary
+                let mut snippet = content.chars().take(150).collect::<String>();
+                if content.len() > 150 { snippet.push_str("..."); }
+                
+                let synthetic_summary = format!("SÍNTESIS DE [{}]: {}", title, snippet);
+                
+                // Mock Entities (palabras de más de 6 letras que empiezan con mayúscula)
+                let extracted_entities: Vec<String> = content.split_whitespace()
+                    .filter(|w| w.len() > 6 && w.chars().next().unwrap_or('a').is_uppercase())
+                    .map(|w| w.to_string())
+                    .collect();
+                    
+                // Mock Semantic Density (densidad de información calculada heurísticamente)
+                let density = (extracted_entities.len() as f32 / (content.split_whitespace().count().max(1) as f32)) * 100.0;
+                
+                processed.push((id, synthetic_summary, vector_to_sql_array_str(&extracted_entities), density));
+            }
+            
+            // Insertar resultados (Offloading)
+            {
+                let mut conn_guard = DB_CONN.lock().unwrap();
+                if let Some(conn) = conn_guard.as_mut() {
+                    for (id, summary, entities_sql_array, density) in processed {
+                        let sql = format!(
+                            "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density) 
+                             VALUES (?, ?, {}, now(), ?)",
+                            entities_sql_array
+                        );
+                        let _ = conn.execute(&sql, params![id, summary, density]);
+                    }
+                }
+            }
+        }
+    });
+    
+    "Cognitive Daemon iniciado en segundo plano (Ciclo: 10s)".to_string()
+}
+
+fn vector_to_sql_array_str(vec: &[String]) -> String {
+    if vec.is_empty() {
+        return "ARRAY[]".to_string();
+    }
+    let mut s = "ARRAY[".to_string();
+    for (i, val) in vec.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        let safe_val = val.replace("'", "''");
+        s.push_str(&format!("'{}'", safe_val));
+    }
+    s.push(']');
+    s
 }
