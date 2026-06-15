@@ -118,6 +118,8 @@ pub fn init_knowledge_base() -> String {
             source_id VARCHAR,
             target_id VARCHAR,
             type VARCHAR,
+            weight FLOAT DEFAULT 1.0,
+            created_at TIMESTAMP DEFAULT now(),
             FOREIGN KEY (source_id) REFERENCES notes(id)
         );
         CREATE TABLE IF NOT EXISTS telemetry (
@@ -502,20 +504,30 @@ pub fn start_cognitive_daemon() -> String {
                 // Mock Semantic Density (densidad de información calculada heurísticamente)
                 let density = (extracted_entities.len() as f32 / (content.split_whitespace().count().max(1) as f32)) * 100.0;
                 
-                processed.push((id, synthetic_summary, vector_to_sql_array_str(&extracted_entities), density));
+                processed.push((id, synthetic_summary, extracted_entities, density));
             }
             
-            // Insertar resultados (Offloading)
+            // Insertar resultados (Offloading y Grafo Temporal)
             {
                 let mut conn_guard = DB_CONN.lock().unwrap();
                 if let Some(conn) = conn_guard.as_mut() {
-                    for (id, summary, entities_sql_array, density) in processed {
+                    for (id, summary, entities, density) in processed {
+                        let sql_array = vector_to_sql_array_str(&entities);
                         let sql = format!(
                             "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density) 
                              VALUES (?, ?, {}, now(), ?)",
-                            entities_sql_array
+                            sql_array
                         );
                         let _ = conn.execute(&sql, params![id, summary, density]);
+                        
+                        // FASE 3: Poblar el Grafo Temporal
+                        for entity in entities {
+                            let _ = conn.execute(
+                                "INSERT INTO entity_graphs (entity_name, note_id, relation_type, discovered_at) 
+                                 VALUES (?, ?, 'MENTIONS', now())",
+                                params![entity, id]
+                            );
+                        }
                     }
                 }
             }
@@ -539,4 +551,67 @@ fn vector_to_sql_array_str(vec: &[String]) -> String {
     }
     s.push(']');
     s
+}
+
+#[derive(uniffi::Record)]
+pub struct TemporalEdge {
+    pub source: String,
+    pub target: String,
+    pub relation: String,
+    pub weight: f32,
+    pub timestamp: String,
+}
+
+#[uniffi::export]
+pub fn get_temporal_neighborhood(note_id: String, max_depth: u32) -> Vec<TemporalEdge> {
+    let conn_guard = DB_CONN.lock().unwrap();
+    let conn = match conn_guard.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    
+    // Usamos una consulta recursiva de DuckDB (CTE) para navegar el grafo hasta max_depth
+    let query = format!("
+        WITH RECURSIVE traverse(source_id, target_id, type, weight, created_at, depth) AS (
+            SELECT source_id, target_id, type, weight, created_at, 1 as depth
+            FROM links
+            WHERE source_id = '{}' OR target_id = '{}'
+            
+            UNION ALL
+            
+            SELECT l.source_id, l.target_id, l.type, l.weight, l.created_at, t.depth + 1
+            FROM links l
+            JOIN traverse t ON (l.source_id = t.target_id OR l.target_id = t.source_id)
+            WHERE t.depth < {}
+        )
+        SELECT DISTINCT source_id, target_id, type, weight, created_at
+        FROM traverse
+        LIMIT 500;
+    ", note_id, note_id, max_depth);
+    
+    let mut stmt = match conn.prepare(&query) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    
+    let edges = stmt.query_map([], |row| {
+        Ok(TemporalEdge {
+            source: row.get(0)?,
+            target: row.get(1)?,
+            relation: row.get(2)?,
+            weight: row.get(3)?,
+            timestamp: row.get::<_, String>(4).unwrap_or_else(|_| "".to_string()),
+        })
+    });
+    
+    let mut result = Vec::new();
+    if let Ok(iter) = edges {
+        for edge in iter {
+            if let Ok(e) = edge {
+                result.push(e);
+            }
+        }
+    }
+    
+    result
 }
