@@ -104,6 +104,12 @@ struct SidebarColumn: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 } label: { Label("Modo", systemImage: "magnifyingglass") }
+                
+                if viewModel.treeMode == .hierarchy {
+                    VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
+                } else {
+                    SemanticTreeView(viewModel: viewModel)
+                }
             }
         }
         .navigationTitle("Vault System")
@@ -115,7 +121,6 @@ struct SidebarColumn: View {
 struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
-    @State private var dragWidth: CGFloat = 0
     
     var body: some View {
         VStack(spacing: 0) {
@@ -123,71 +128,30 @@ struct MainContentColumn: View {
             
             if viewModel.layoutMode == .list {
                 ScrollView {
-                    if viewModel.treeMode == .hierarchy {
-                        VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: true)
-                            .padding(.vertical, 8)
-                    } else {
-                        SemanticTreeView(viewModel: viewModel)
-                            .padding(.vertical, 8)
+                    LazyVStack(spacing: 2) {
+                        ForEach(viewModel.notes, id: \.path) { note in
+                            FileRowView(item: note, viewModel: viewModel, locations: workspaceManager.locations)
+                                .padding(.horizontal, 8)
+                                .onTapGesture {
+                                    let extend = NSEvent.modifierFlags.contains(.shift)
+                                    let toggle = NSEvent.modifierFlags.contains(.command)
+                                    viewModel.selectItem(note, extend: extend, toggle: toggle)
+                                }
+                        }
                     }
+                    .padding(.vertical, 8)
                 }
                 .background(viewModel.macBackground)
             } else {
-                HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack {
-                            Text("Explorar")
-                                .font(.caption).bold().opacity(0.5)
-                                .foregroundColor(viewModel.macSecondaryText)
-                            
-                            Spacer()
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
+                        ForEach(viewModel.notes, id: \.path) { note in
+                            NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
                         }
-                        .padding([.horizontal, .top])
-                        .padding(.bottom, 8)
-                        
-                        ScrollView {
-                            if viewModel.treeMode == .hierarchy {
-                                VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
-                            } else {
-                                SemanticTreeView(viewModel: viewModel)
-                            }
-                        }
-                    }
-                    .frame(width: CGFloat(viewModel.tacticalSidebarWidth))
-                    .background(viewModel.macBackground)
-                    .overlay(
-                        Rectangle()
-                            .fill(Color.black.opacity(0.2))
-                            .frame(width: 1),
-                        alignment: .trailing
-                    )
-
-                    ZStack {
-                        Rectangle().fill(Color.black.opacity(0.3)).frame(width: 1)
-                        Rectangle().fill(Color.clear).frame(width: 8)
-                            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-                    }
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let newWidth = CGFloat(viewModel.tacticalSidebarWidth) + value.translation.width - dragWidth
-                                viewModel.tacticalSidebarWidth = Double(max(140, min(newWidth, 450)))
-                                dragWidth = value.translation.width
-                            }
-                            .onEnded { _ in dragWidth = 0 }
-                    )
-
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
-                            ForEach(viewModel.notes, id: \.path) { note in
-                                NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
-                            }
-                        }.padding()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .background(viewModel.macBackground)
+                    }.padding()
                 }
+                .frame(maxWidth: .infinity)
+                .background(viewModel.macBackground)
             }
         }
         .navigationTitle("Notas")
