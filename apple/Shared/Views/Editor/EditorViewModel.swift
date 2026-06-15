@@ -65,9 +65,16 @@ enum LayoutMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+enum TreeMode: String, CaseIterable, Identifiable {
+    case hierarchy = "Carpetas"
+    case semantic = "Palacio Mental"
+    var id: String { self.rawValue }
+}
+
 class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String?
+    @Published var treeMode: TreeMode = .hierarchy
     @Published var notes: [NoteRecord] = []
     @Published var folders: [NoteRecord] = [] // Carpetas del nivel actual (Grid)
     @Published var allFolders: [NoteRecord] = [] // Todas las carpetas (Árbol Sidebar)

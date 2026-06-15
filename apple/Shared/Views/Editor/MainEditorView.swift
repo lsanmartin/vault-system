@@ -98,6 +98,13 @@ struct SidebarColumn: View {
                     ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
                 } label: { Label("Tema", systemImage: "paintbrush") }
             }
+            Section("Explorar") {
+                Picker(selection: $viewModel.treeMode) {
+                    ForEach(TreeMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                } label: { Label("Modo", systemImage: "magnifyingglass") }
+            }
         }
         .navigationTitle("Vault System")
         .background(viewModel.macSidebar)
@@ -110,30 +117,13 @@ struct MainContentColumn: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var dragWidth: CGFloat = 0
     
-    enum TreeMode: String, CaseIterable, Identifiable {
-        case hierarchy = "Carpetas"
-        case semantic = "Palacio Mental"
-        var id: String { self.rawValue }
-    }
-    @State private var treeMode: TreeMode = .hierarchy
-    
     var body: some View {
         VStack(spacing: 0) {
             headerView
             
             if viewModel.layoutMode == .list {
-                // Selector de modo de árbol (Fase 5)
-                Picker("", selection: $treeMode) {
-                    ForEach(TreeMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                
                 ScrollView {
-                    if treeMode == .hierarchy {
+                    if viewModel.treeMode == .hierarchy {
                         VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: true)
                             .padding(.vertical, 8)
                     } else {
@@ -151,19 +141,12 @@ struct MainContentColumn: View {
                                 .foregroundColor(viewModel.macSecondaryText)
                             
                             Spacer()
-                            
-                            Picker("", selection: $treeMode) {
-                                Text("📁").tag(TreeMode.hierarchy)
-                                Text("🧠").tag(TreeMode.semantic)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 80)
                         }
                         .padding([.horizontal, .top])
                         .padding(.bottom, 8)
                         
                         ScrollView {
-                            if treeMode == .hierarchy {
+                            if viewModel.treeMode == .hierarchy {
                                 VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
                             } else {
                                 SemanticTreeView(viewModel: viewModel)
