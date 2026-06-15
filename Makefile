@@ -35,7 +35,7 @@ build-universal: build-aarch64
 	@echo "--- Empaquetando XCFramework para Xcode (Sólo Apple Silicon) ---"
 	rm -rf $(XCFRAMEWORK_DIR)
 	xcodebuild -create-xcframework \
-		-library target/$(TARGET_ARM)/release/libvault_core.a -headers core/bindings/ \
+		-library target/$(TARGET_ARM)/release/libvault_core.dylib -headers core/bindings/ \
 		-output $(XCFRAMEWORK_DIR)
 
 clean:

@@ -1,5 +1,4 @@
 import SwiftUI
-import vault_core
 
 @main
 struct VaultApp: App {

@@ -92,7 +92,7 @@ fn vector_to_sql_array(vec: &[f32]) -> String {
         }
         s.push_str(&val.to_string());
     }
-    s.push(']');
+    s.push_str("]::FLOAT[384]");
     s
 }
 
@@ -327,18 +327,31 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         sql.push_str(" ORDER BY created_at DESC");
     }
 
-    let mut stmt = conn.prepare(&sql).unwrap();
-    let note_iter = stmt.query_map([], |row| {
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("DuckDB prepare error: {}", e);
+            return Vec::new();
+        }
+    };
+    
+    let note_iter = match stmt.query_map([], |row| {
         Ok(NoteRecord {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            path: row.get(2)?,
-            content: row.get(3)?,
-            is_dir: row.get(4)?,
+            id: row.get(0).unwrap_or_default(),
+            title: row.get(1).unwrap_or_default(),
+            path: row.get(2).unwrap_or_default(),
+            content: row.get(3).unwrap_or_default(),
+            is_dir: row.get(4).unwrap_or(false),
         })
-    }).unwrap();
+    }) {
+        Ok(iter) => iter,
+        Err(e) => {
+            println!("DuckDB query_map error: {}", e);
+            return Vec::new();
+        }
+    };
 
-    note_iter.map(|n| n.unwrap()).collect()
+    note_iter.filter_map(|n| n.ok()).collect()
 }
 
 #[uniffi::export]
