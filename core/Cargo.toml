@@ -17,6 +17,7 @@ duckdb = { version = "1.10503.1" }
 once_cell = "1.19"
 walkdir = "2.5"
 notify = "6.1"
+mlx-rs = "0.25.3"
 
 [build-dependencies]
 uniffi = { version = "0.27", features = ["build"] }
