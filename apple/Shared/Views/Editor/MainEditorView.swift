@@ -110,27 +110,64 @@ struct MainContentColumn: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var dragWidth: CGFloat = 0
     
+    enum TreeMode: String, CaseIterable, Identifiable {
+        case hierarchy = "Carpetas"
+        case semantic = "Palacio Mental"
+        var id: String { self.rawValue }
+    }
+    @State private var treeMode: TreeMode = .hierarchy
+    
     var body: some View {
         VStack(spacing: 0) {
             headerView
             
             if viewModel.layoutMode == .list {
+                // Selector de modo de árbol (Fase 5)
+                Picker("", selection: $treeMode) {
+                    ForEach(TreeMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                
                 ScrollView {
-                    VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: true)
-                        .padding(.vertical, 8)
+                    if treeMode == .hierarchy {
+                        VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: true)
+                            .padding(.vertical, 8)
+                    } else {
+                        SemanticTreeView(viewModel: viewModel)
+                            .padding(.vertical, 8)
+                    }
                 }
                 .background(EditorViewModel.macBackground)
             } else {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text("Explorar")
-                            .font(.caption).bold().opacity(0.5)
-                            .foregroundColor(EditorViewModel.macSecondaryText)
-                            .padding([.horizontal, .top])
-                            .padding(.bottom, 8)
+                        HStack {
+                            Text("Explorar")
+                                .font(.caption).bold().opacity(0.5)
+                                .foregroundColor(EditorViewModel.macSecondaryText)
+                            
+                            Spacer()
+                            
+                            Picker("", selection: $treeMode) {
+                                Text("📁").tag(TreeMode.hierarchy)
+                                Text("🧠").tag(TreeMode.semantic)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 80)
+                        }
+                        .padding([.horizontal, .top])
+                        .padding(.bottom, 8)
                         
                         ScrollView {
-                            VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
+                            if treeMode == .hierarchy {
+                                VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
+                            } else {
+                                SemanticTreeView(viewModel: viewModel)
+                            }
                         }
                     }
                     .frame(width: CGFloat(viewModel.tacticalSidebarWidth))
@@ -710,6 +747,7 @@ struct EditorAreaView: View {
                         const regex = new RegExp(`(?![^<]*>)(\\\\b${entity}\\\\b)`, 'gi');
                         html = html.replace(regex, `<span style='background-color: rgba(255, 165, 0, 0.4); border-bottom: 2px solid orange; padding: 0 2px; border-radius: 3px;' title='Concepto Validado'>$1</span>`);
                     }
+
                 });
                 
                 weakEntities.forEach(entity => {
@@ -725,5 +763,91 @@ struct EditorAreaView: View {
         }catch(e){document.getElementById('content').innerHTML="<div style='color:red'>Error: "+e.message+"</div>";}
         </script></body></html>
         """##
+    }
+}
+
+// FASE 5: Memory Palace / Árbol Semántico Mejorado
+struct SemanticTreeView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    
+    // Mapeo dummy para simular el exocórtex hasta que KMeans esté en Rust
+    var clusters: [(String, [NoteRecord])] {
+        var arq = [NoteRecord]()
+        var ia = [NoteRecord]()
+        var other = [NoteRecord]()
+        
+        for note in viewModel.allNotes {
+            let lower = note.title.lowercased()
+            if lower.contains("arq") || lower.contains("sys") || lower.contains("plan") || lower.contains("rust") || lower.contains("app") {
+                arq.append(note)
+            } else if lower.contains("ia") || lower.contains("brain") || lower.contains("model") || lower.contains("cog") {
+                ia.append(note)
+            } else {
+                other.append(note)
+            }
+        }
+        
+        return [
+            ("🧠 Exocórtex & IA", ia),
+            ("🏗️ Arquitectura de Sistemas", arq),
+            ("🌌 Dark Matter (Sin Clúster)", other)
+        ]
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(clusters, id: \.0) { cluster in
+                if !cluster.1.isEmpty {
+                    SemanticClusterRow(title: cluster.0, notes: cluster.1, viewModel: viewModel)
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+}
+
+struct SemanticClusterRow: View {
+    let title: String
+    let notes: [NoteRecord]
+    @ObservedObject var viewModel: EditorViewModel
+    @State private var isExpanded = true
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(EditorViewModel.macSecondaryText)
+                    .frame(width: 12, height: 12)
+                
+                Text(title)
+                    .font(.subheadline)
+                    .foregroundColor(EditorViewModel.macPrimaryText)
+                
+                Spacer()
+                Text("\(notes.count)")
+                    .font(.caption2)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.8))
+                    .cornerRadius(8)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(Color.white.opacity(0.001))
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+            }
+            
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(notes, id: \.path) { note in
+                        VaultTreeRow(item: note, viewModel: viewModel, locations: [], showNotes: true)
+                    }
+                }
+                .padding(.leading, 14)
+            }
+        }
     }
 }
