@@ -1,6 +1,7 @@
 use duckdb::{params, Connection, Result};
 use std::sync::Mutex;
 use std::time::Duration;
+use serde_json::{json, Value};
 use once_cell::sync::Lazy;
 use walkdir::WalkDir;
 use std::path::Path;
@@ -614,4 +615,127 @@ pub fn get_temporal_neighborhood(note_id: String, max_depth: u32) -> Vec<Tempora
     }
     
     result
+}
+
+// ------------------------------------------------------------------------------------------------
+// FASE 2.3: CAPA MCP SEGURA (Model Context Protocol)
+// Este es el único puente autorizado para IAs Externas (Claude, etc).
+// Las consultas MCP actúan SOLAMENTE sobre los metadatos sintéticos, NUNCA sobre la tabla notes.
+// ------------------------------------------------------------------------------------------------
+
+#[uniffi::export]
+pub fn mcp_handle_request(json_request: String) -> String {
+    let req: Value = match serde_json::from_str(&json_request) {
+        Ok(v) => v,
+        Err(_) => return json!({ "jsonrpc": "2.0", "error": { "code": -32700, "message": "Parse error" } }).to_string(),
+    };
+
+    let id = req.get("id").unwrap_or(&json!(null)).clone();
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+    match method {
+        "tools/list" => {
+            let tools = json!({
+                "tools": [
+                    {
+                        "name": "get_semantic_summary",
+                        "description": "Obtiene el resumen cognitivo generado por IA de una nota por su ID.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "note_id": { "type": "string" }
+                            },
+                            "required": ["note_id"]
+                        }
+                    },
+                    {
+                        "name": "search_semantic_summaries",
+                        "description": "Busca conceptos clave en la memoria sintética del Vault.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                ]
+            });
+            json!({ "jsonrpc": "2.0", "id": id, "result": tools }).to_string()
+        },
+        "tools/call" => {
+            let default_params = json!({});
+            let params = req.get("params").unwrap_or(&default_params);
+            let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let default_args = json!({});
+            let arguments = params.get("arguments").unwrap_or(&default_args);
+
+            let result_content = match name {
+                "get_semantic_summary" => {
+                    let note_id = arguments.get("note_id").and_then(|n| n.as_str()).unwrap_or("");
+                    let mut summary = String::from("No encontrado");
+                    
+                    let conn_guard = DB_CONN.lock().unwrap();
+                    if let Some(conn) = conn_guard.as_ref() {
+                        let mut stmt = match conn.prepare("SELECT synthetic_summary FROM semantic_summaries WHERE note_id = ?") {
+                            Ok(s) => s,
+                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "DB Error" } }).to_string(),
+                        };
+                        let mut rows = match stmt.query(params![note_id]) {
+                            Ok(r) => r,
+                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Query Error" } }).to_string(),
+                        };
+                        if let Ok(Some(row)) = rows.next() {
+                            if let Ok(sum) = row.get::<_, String>(0) {
+                                summary = sum;
+                            }
+                        }
+                    }
+                    
+                    summary
+                },
+                "search_semantic_summaries" => {
+                    let query = arguments.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                    let search_pattern = format!("%{}%", query);
+                    let mut results = Vec::new();
+                    
+                    let conn_guard = DB_CONN.lock().unwrap();
+                    if let Some(conn) = conn_guard.as_ref() {
+                        let mut stmt = match conn.prepare("SELECT note_id, synthetic_summary FROM semantic_summaries WHERE synthetic_summary LIKE ? LIMIT 5") {
+                            Ok(s) => s,
+                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "DB Error" } }).to_string(),
+                        };
+                        let mut rows = match stmt.query(params![search_pattern]) {
+                            Ok(r) => r,
+                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Query Error" } }).to_string(),
+                        };
+                        while let Ok(Some(row)) = rows.next() {
+                            if let (Ok(n_id), Ok(sum)) = (row.get::<_, String>(0), row.get::<_, String>(1)) {
+                                results.push(format!("ID: {} - {}", n_id, sum));
+                            }
+                        }
+                    }
+                    
+                    if results.is_empty() {
+                        "No se encontraron coincidencias en la memoria sintética.".to_string()
+                    } else {
+                        results.join("\n\n")
+                    }
+                },
+                _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
+            };
+
+            let call_result = json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": result_content
+                    }
+                ]
+            });
+            
+            json!({ "jsonrpc": "2.0", "id": id, "result": call_result }).to_string()
+        },
+        _ => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
+    }
 }
