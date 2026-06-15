@@ -393,12 +393,19 @@ struct DetailColumn: View {
                     }
                 }.background(EditorViewModel.macSidebar)
                 EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
-                    .toolbar {
-                        ToolbarItemGroup(placement: .primaryAction) {
-                            Button(action: { viewModel.saveActiveTab(locations: workspaceManager.locations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
-                            Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
-                        }
-                    }
+                
+                // FASE 5: Cognitive Radar
+                CognitiveRadarView(noteId: viewModel.tabs[index].id)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                    .padding(.top, 8)
+                    .background(EditorViewModel.macBackground)
+            }
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button(action: { viewModel.saveActiveTab(locations: workspaceManager.locations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
+                    Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
+                }
             }
         } else {
             ZStack {

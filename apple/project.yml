@@ -17,10 +17,26 @@ targets:
         LIBRARY_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/../target"
         LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=x86_64]: "$(inherited) $(PROJECT_DIR)/../target /usr/local/opt/duckdb/lib"
         LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=arm64]: "$(inherited) $(PROJECT_DIR)/../target /opt/homebrew/opt/duckdb/lib"
-        OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lduckdb_generated_extension_loader -lautocomplete_extension -lparquet_extension -ljson_extension -licu_extension -lcore_functions_extension -lduckdb_static -lc++"
+        OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lduckdb_generated_extension_loader -lautocomplete_extension -lparquet_extension -ljson_extension -licu_extension -lcore_functions_extension -lduckdb_static -lc++ -framework Accelerate -framework Metal -framework Foundation"
         ARCHS: "$(ARCHS_STANDARD)"
         ONLY_ACTIVE_ARCH: YES
         VALID_ARCHS: x86_64 arm64
+    dependencies:
+      - framework: ../target/apple_core.xcframework
+        embed: true
+  VaultSystem-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Shared
+      - path: ../core/bindings/vault_core.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.apple.vault.VaultSystem-iOS
+        SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/../core/bindings/vault_coreFFI.h"
+        OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lc++"
     dependencies:
       - framework: ../target/apple_core.xcframework
         embed: false
