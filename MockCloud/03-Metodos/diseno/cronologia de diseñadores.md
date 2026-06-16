@@ -1,4 +1,4 @@
-Cronología de influencias — Diseño mas Ingeniería (15 nodos)
+Cronología de influencias — Diseño + Ingeniería (15 nodos)
 
 ★ = entradas originales
 
