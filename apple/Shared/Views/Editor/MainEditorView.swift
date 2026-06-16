@@ -180,8 +180,19 @@ struct MainContentColumn: View {
                 }.pickerStyle(.segmented).frame(width: 80)
             }
             HStack {
-                TextField("Buscar en el vault...", text: $viewModel.searchText)
-                    .textFieldStyle(.roundedBorder)
+                ZStack(alignment: .trailing) {
+                    TextField("Buscar en el vault...", text: $viewModel.searchText)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    if !viewModel.searchText.isEmpty {
+                        Button(action: { viewModel.searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 8)
+                    }
+                }
                 
                 Menu {
                     Picker("Ordenar", selection: $viewModel.sortOption) { ForEach(SortOption.allCases) { Text($0.rawValue).tag($0) } }

@@ -116,7 +116,7 @@ pub fn init_knowledge_base() -> String {
             is_dir BOOLEAN DEFAULT false,
             created_at TIMESTAMP,
             tags VARCHAR[],
-            embedding FLOAT[]
+            embedding FLOAT[384]
         );
         CREATE TABLE IF NOT EXISTS links (
             source_id VARCHAR,
@@ -319,6 +319,13 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     // Aplicar filtros de ignorado
     for pattern in ignore_patterns {
         sql.push_str(&format!(" AND path NOT LIKE '%{}%'", pattern));
+    }
+
+    if let Some(ref term) = search_term {
+        if !term.is_empty() {
+            // Filtrado estricto por texto en título, contenido o ruta
+            sql.push_str(&format!(" AND (title ILIKE '%{}%' OR content ILIKE '%{}%' OR path ILIKE '%{}%')", term, term, term));
+        }
     }
 
     if is_semantic {

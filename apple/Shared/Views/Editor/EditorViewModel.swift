@@ -176,15 +176,19 @@ class EditorViewModel: ObservableObject {
         self.allNotes = allItems.filter { !$0.isDir }
         
         // Filtramos para mostrar SOLO lo que está en el currentPath (Finder Style)
+        let normalizedCurrentPath = currentPath.hasSuffix("/") && currentPath.count > 1 ? String(currentPath.dropLast()) : currentPath
         var results = allItems.filter { item in
             let itemURL = URL(fileURLWithPath: item.path)
-            let parentPath = itemURL.deletingLastPathComponent().path
+            var parentPath = itemURL.deletingLastPathComponent().path
+            if parentPath.hasSuffix("/") && parentPath.count > 1 {
+                parentPath = String(parentPath.dropLast())
+            }
             
             // Si hay búsqueda, mostramos todo lo que coincida
             if !searchText.isEmpty { return true }
             
             // Si no hay búsqueda, solo lo que cuelga directamente de currentPath
-            return parentPath == currentPath
+            return parentPath == normalizedCurrentPath
         }
         
         // Aplicar ordenamiento
