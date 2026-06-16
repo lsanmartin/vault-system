@@ -36,7 +36,7 @@ struct CognitiveRadarView: View {
         .onAppear {
             analyzeTemporalGraph()
         }
-        .onChange(of: noteId) { _ in
+        .onChange(of: noteId) {
             analyzeTemporalGraph()
         }
     }

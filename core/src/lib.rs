@@ -27,6 +27,29 @@ pub struct NoteRecord {
 static DB_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
 static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
+// --- COLA DE TELEMETRÍA ---
+static TELEMETRY_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+pub fn add_telemetry_log(log: String) {
+    if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
+        logs.push(log);
+        // Mantener un máximo de 500 logs en memoria para no desbordar
+        if logs.len() > 500 {
+            logs.remove(0);
+        }
+    }
+}
+
+#[uniffi::export]
+pub fn poll_telemetry_logs() -> Vec<String> {
+    if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
+        let extracted = logs.clone();
+        logs.clear();
+        return extracted;
+    }
+    Vec::new()
+}
+
 #[uniffi::export]
 pub fn get_last_sync_ts() -> u64 {
     *LAST_SYNC_TS.lock().unwrap()
@@ -369,9 +392,94 @@ pub fn save_note(path: String, content: String) -> String {
     match res {
         Ok(_) => {
             update_sync_ts();
+            
+            // Auto Git Commit implementation
+            let path_obj = std::path::Path::new(&path);
+            if let Some(parent) = path_obj.parent() {
+                if let Some(file_name) = path_obj.file_name() {
+                    if let Some(file_str) = file_name.to_str() {
+                        let _ = std::process::Command::new("git")
+                            .current_dir(parent)
+                            .args(["add", file_str])
+                            .output();
+                        
+                        let _ = std::process::Command::new("git")
+                            .current_dir(parent)
+                            .args(["commit", "-m", &format!("[Vault Auto-Save] {}", file_str)])
+                            .output();
+                    }
+                }
+            }
+
             "Nota guardada en disco.".to_string()
         },
         Err(e) => format!("Error al guardar: {}", e),
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct GitCommit {
+    pub hash: String,
+    pub date: String,
+    pub message: String,
+}
+
+#[uniffi::export]
+pub fn get_file_history(path: String) -> Vec<GitCommit> {
+    let path_obj = std::path::Path::new(&path);
+    let parent = match path_obj.parent() {
+        Some(p) => p,
+        None => return vec![],
+    };
+    let file_name = match path_obj.file_name() {
+        Some(f) => f.to_str().unwrap_or(""),
+        None => return vec![],
+    };
+
+    let output = std::process::Command::new("git")
+        .current_dir(parent)
+        .args(["log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name])
+        .output();
+
+    let mut commits = vec![];
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() == 3 {
+                commits.push(GitCommit {
+                    hash: parts[0].to_string(),
+                    date: parts[1].to_string(),
+                    message: parts[2].to_string(),
+                });
+            }
+        }
+    }
+    commits
+}
+
+#[uniffi::export]
+pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
+    let path_obj = std::path::Path::new(&path);
+    let parent = match path_obj.parent() {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let file_name = match path_obj.file_name() {
+        Some(f) => f.to_str().unwrap_or(""),
+        None => return String::new(),
+    };
+
+    let spec = format!("{}:./{}", commit_hash, file_name);
+    let output = std::process::Command::new("git")
+        .current_dir(parent)
+        .args(["show", &spec])
+        .output();
+
+    if let Ok(out) = output {
+        String::from_utf8_lossy(&out.stdout).to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -663,6 +771,7 @@ pub fn mcp_handle_request(json_request: String) -> String {
             "".to_string()
         },
         "initialize" => {
+            crate::add_telemetry_log(format!("Handshake MCP: Cliente Inicializado (ID: {})", id));
             let result = json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
@@ -679,25 +788,48 @@ pub fn mcp_handle_request(json_request: String) -> String {
             let tools = json!({
                 "tools": [
                     {
-                        "name": "get_semantic_summary",
-                        "description": "Obtiene el resumen cognitivo generado por IA de una nota por su ID.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "note_id": { "type": "string" }
-                            },
-                            "required": ["note_id"]
-                        }
-                    },
-                    {
-                        "name": "search_semantic_summaries",
-                        "description": "Busca conceptos clave en la memoria sintética del Vault.",
+                        "name": "vault_search",
+                        "description": "Busca notas en todo el Vault. Usa texto o palabras clave.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "query": { "type": "string" }
                             },
                             "required": ["query"]
+                        }
+                    },
+                    {
+                        "name": "vault_read",
+                        "description": "Lee el contenido crudo completo de una nota en el Vault.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "vault_write",
+                        "description": "Crea o sobrescribe una nota markdown en el Vault.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta absoluta donde crear o guardar la nota." },
+                                "content": { "type": "string", "description": "Contenido de la nota en formato markdown." }
+                            },
+                            "required": ["path", "content"]
+                        }
+                    },
+                    {
+                        "name": "vault_create_folder",
+                        "description": "Crea una nueva carpeta o directorio en el Vault.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta absoluta de la nueva carpeta." }
+                            },
+                            "required": ["path"]
                         }
                     }
                 ]
@@ -711,56 +843,49 @@ pub fn mcp_handle_request(json_request: String) -> String {
             let default_args = json!({});
             let arguments = params.get("arguments").unwrap_or(&default_args);
 
+            crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
+
             let result_content = match name {
-                "get_semantic_summary" => {
-                    let note_id = arguments.get("note_id").and_then(|n| n.as_str()).unwrap_or("");
-                    let mut summary = String::from("No encontrado");
-                    
-                    let conn_guard = DB_CONN.lock().unwrap();
-                    if let Some(conn) = conn_guard.as_ref() {
-                        let mut stmt = match conn.prepare("SELECT synthetic_summary FROM semantic_summaries WHERE note_id = ?") {
-                            Ok(s) => s,
-                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "DB Error" } }).to_string(),
-                        };
-                        let mut rows = match stmt.query(params![note_id]) {
-                            Ok(r) => r,
-                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Query Error" } }).to_string(),
-                        };
-                        if let Ok(Some(row)) = rows.next() {
-                            if let Ok(sum) = row.get::<_, String>(0) {
-                                summary = sum;
-                            }
-                        }
-                    }
-                    
-                    summary
-                },
-                "search_semantic_summaries" => {
+                "vault_search" => {
                     let query = arguments.get("query").and_then(|q| q.as_str()).unwrap_or("");
-                    let search_pattern = format!("%{}%", query);
-                    let mut results = Vec::new();
+                    let exclude_metadata = arguments.get("exclude_metadata").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let exclude_system = arguments.get("exclude_system").and_then(|v| v.as_bool()).unwrap_or(false);
                     
-                    let conn_guard = DB_CONN.lock().unwrap();
-                    if let Some(conn) = conn_guard.as_ref() {
-                        let mut stmt = match conn.prepare("SELECT note_id, synthetic_summary FROM semantic_summaries WHERE synthetic_summary LIKE ? LIMIT 5") {
-                            Ok(s) => s,
-                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "DB Error" } }).to_string(),
-                        };
-                        let mut rows = match stmt.query(params![search_pattern]) {
-                            Ok(r) => r,
-                            Err(_) => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Query Error" } }).to_string(),
-                        };
-                        while let Ok(Some(row)) = rows.next() {
-                            if let (Ok(n_id), Ok(sum)) = (row.get::<_, String>(0), row.get::<_, String>(1)) {
-                                results.push(format!("ID: {} - {}", n_id, sum));
-                            }
-                        }
+                    let mut ignore_patterns = vec![];
+                    if exclude_metadata {
+                        ignore_patterns.push("/_".to_string());
                     }
-                    
+                    if exclude_system {
+                        ignore_patterns.push("/00-Sistema".to_string());
+                        ignore_patterns.push("GEMINI.md".to_string());
+                        ignore_patterns.push("agentes.md".to_string());
+                    }
+
+                    let results = crate::query_notes(Some(query.to_string()), None, ignore_patterns);
                     if results.is_empty() {
-                        "No se encontraron coincidencias en la memoria sintética.".to_string()
+                        "No se encontraron resultados.".to_string()
                     } else {
-                        results.join("\n\n")
+                        results.into_iter().map(|r| format!("Ruta: {}\nTipo: {}\nTítulo: {}\nContenido:\n{}\n---", r.path, if r.is_dir { "Carpeta" } else { "Archivo" }, r.title, r.content)).collect::<Vec<String>>().join("\n\n")
+                    }
+                },
+                "vault_read" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => content,
+                        Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                    }
+                },
+                "vault_write" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    let content = arguments.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    crate::save_note(path.to_string(), content.to_string())
+                },
+                "vault_create_folder" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if crate::create_item(path.to_string(), true) {
+                        format!("Carpeta creada en: {}", path)
+                    } else {
+                        format!("Error al crear la carpeta en: {}", path)
                     }
                 },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
@@ -783,21 +908,49 @@ pub fn mcp_handle_request(json_request: String) -> String {
 
 #[uniffi::export]
 pub fn start_ipc_server() -> String {
-    thread::spawn(|| {
+    use std::fs;
+    // Generar Token de Autenticación IPC para seguridad de la bóveda
+    let ipc_token = uuid::Uuid::new_v4().to_string();
+    let _ = fs::write("/tmp/vault_ipc.token", &ipc_token);
+    
+    thread::spawn(move || {
         let listener = TcpListener::bind("127.0.0.1:49152").unwrap();
         println!("Vault IPC Server listening on 127.0.0.1:49152");
 
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
+                    let expected_token = ipc_token.clone();
                     thread::spawn(move || {
                         let reader = BufReader::new(stream.try_clone().unwrap());
                         for line in reader.lines() {
                             if let Ok(req) = line {
                                 if req.trim().is_empty() { continue; }
-                                let response = mcp_handle_request(req);
-                                if !response.is_empty() {
-                                    let _ = writeln!(stream, "{}", response);
+                                
+                                // Validación de Seguridad IPC Token
+                                if let Ok(mut json_req) = serde_json::from_str::<serde_json::Value>(&req) {
+                                    let req_token = json_req.get("ipc_token").and_then(|t| t.as_str()).unwrap_or("");
+                                    if req_token != expected_token {
+                                        let err_resp = json!({
+                                            "jsonrpc": "2.0",
+                                            "error": { "code": -32001, "message": "Acceso Denegado al Servidor IPC: IPC Token Inválido o Faltante." }
+                                        }).to_string();
+                                        let _ = writeln!(stream, "{}", err_resp);
+                                        continue;
+                                    }
+                                    
+                                    // Limpiar el token antes de procesar para no afectar logs
+                                    if let Some(obj) = json_req.as_object_mut() {
+                                        obj.remove("ipc_token");
+                                    }
+                                    
+                                    let clean_req = serde_json::to_string(&json_req).unwrap();
+                                    let response = mcp_handle_request(clean_req);
+                                    if !response.is_empty() {
+                                        let _ = writeln!(stream, "{}", response);
+                                    }
+                                } else {
+                                    let _ = writeln!(stream, "{}", json!({ "jsonrpc": "2.0", "error": { "code": -32700, "message": "Parse error" } }).to_string());
                                 }
                             } else {
                                 break;
@@ -809,6 +962,6 @@ pub fn start_ipc_server() -> String {
             }
         }
     });
-    "IPC Server Iniciado en puerto 49152".to_string()
+    "IPC Server Iniciado con Token de Seguridad.".to_string()
 }
 

@@ -123,6 +123,8 @@ class EditorViewModel: ObservableObject {
     private var lastSyncTs: UInt64 = 0
     private var timer: Timer?
 
+    @Published var telemetryLogs: [String] = []
+    
     init() {
         _ = initKnowledgeBase()
         _ = startIpcServer()
@@ -144,10 +146,25 @@ class EditorViewModel: ObservableObject {
     }
 
     private func startPolling() {
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            // Refrescar notas si hay cambios en el file watcher
             let currentTs = getLastSyncTs()
-            if currentTs > self?.lastSyncTs ?? 0 { 
+            if let last = self?.lastSyncTs, currentTs > last {
+                if let locs = self?.currentLocations {
+                    self?.refreshNotes(locations: locs)
+                }
                 self?.lastSyncTs = currentTs
+            }
+            
+            // Refrescar logs de telemetría
+            let newLogs = pollTelemetryLogs()
+            if !newLogs.isEmpty {
+                DispatchQueue.main.async {
+                    self?.telemetryLogs.append(contentsOf: newLogs)
+                    if (self?.telemetryLogs.count ?? 0) > 100 {
+                        self?.telemetryLogs.removeFirst((self?.telemetryLogs.count ?? 0) - 100)
+                    }
+                }
             }
         }
     }

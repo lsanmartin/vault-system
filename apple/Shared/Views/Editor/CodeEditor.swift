@@ -3,6 +3,7 @@ import AppKit
 
 struct CodeEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var triggerSearch: Bool
     let language: String
     let theme: AppTheme
     
@@ -17,6 +18,10 @@ struct CodeEditor: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         
+        // Habilitar barra de búsqueda (Command+F)
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
+        
         // Agregar espacio interno (Padding)
         textView.textContainerInset = NSSize(width: 20, height: 20)
         textView.textContainer?.lineFragmentPadding = 5
@@ -30,6 +35,16 @@ struct CodeEditor: NSViewRepresentable {
         // Evitar bucles de actualización y pérdida de cursor
         if textView.string != text {
             textView.string = text
+        }
+        
+        if triggerSearch {
+            DispatchQueue.main.async {
+                triggerSearch = false
+                nsView.window?.makeFirstResponder(textView)
+                let item = NSMenuItem(title: "Find", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
+                item.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+                textView.performFindPanelAction(item)
+            }
         }
         
         // Aplicar colores de fondo y base según el tema

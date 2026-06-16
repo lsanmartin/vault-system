@@ -2,6 +2,8 @@ import SwiftUI
 import WebKit
 
 class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    var lastLoadedHTML: String? = nil
+    
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "consoleLog", let logStr = message.body as? String {
             Telemetry.shared.log("WebView", eventType: "JSConsole", message: logStr)
@@ -12,6 +14,7 @@ class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
 struct WebView: NSViewRepresentable {
     let htmlContent: String
     let baseURL: URL?
+    @Binding var triggerSearch: Bool
     
     func makeCoordinator() -> WebViewModel { WebViewModel() }
     
@@ -31,10 +34,29 @@ struct WebView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         if #available(macOS 13.3, *) { webView.isInspectable = true }
+        
         return webView
     }
     
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        nsView.loadHTMLString(htmlContent, baseURL: baseURL)
+        if context.coordinator.lastLoadedHTML != htmlContent {
+            context.coordinator.lastLoadedHTML = htmlContent
+            nsView.loadHTMLString(htmlContent, baseURL: baseURL)
+        }
+        
+        if triggerSearch {
+            DispatchQueue.main.async {
+                triggerSearch = false
+                let action = NSSelectorFromString("performFindPanelAction:")
+                if nsView.responds(to: action) {
+                    nsView.window?.makeFirstResponder(nsView)
+                    let item = NSMenuItem(title: "Find", action: action, keyEquivalent: "f")
+                    item.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+                    NSApp.sendAction(action, to: nsView, from: item)
+                } else {
+                    print("WebView no soporta performFindPanelAction nativamente en AppKit")
+                }
+            }
+        }
     }
 }

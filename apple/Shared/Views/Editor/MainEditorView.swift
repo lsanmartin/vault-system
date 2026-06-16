@@ -415,14 +415,44 @@ struct DetailColumn: View {
 struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @State private var showTelemetry = false
     
     var body: some View {
-        NavigationSplitView {
-            SidebarColumn(viewModel: viewModel)
-        } content: {
-            MainContentColumn(viewModel: viewModel)
-        } detail: {
-            DetailColumn(viewModel: viewModel)
+        ZStack(alignment: .bottom) {
+            NavigationSplitView {
+                SidebarColumn(viewModel: viewModel)
+            } content: {
+                MainContentColumn(viewModel: viewModel)
+            } detail: {
+                DetailColumn(viewModel: viewModel)
+            }
+            
+            // Botón flotante para abrir telemetría
+            if !showTelemetry {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            withAnimation { showTelemetry = true }
+                        } label: {
+                            Image(systemName: "terminal.fill")
+                                .padding(12)
+                                .background(Color.green)
+                                .foregroundColor(.black)
+                                .clipShape(Circle())
+                                .shadow(radius: 4)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(20)
+                    }
+                }
+            }
+            
+            if showTelemetry {
+                TelemetryView(viewModel: viewModel, isPresented: $showTelemetry)
+                    .transition(.move(edge: .bottom))
+            }
         }
         .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
         .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
@@ -546,34 +576,73 @@ struct EditorAreaView: View {
     @ObservedObject var viewModel: EditorViewModel
     
     @State private var isHeatmapActive: Bool = false
+    @State private var triggerSearch: Bool = false
+    @State private var isHistoryActive: Bool = false
     
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Spacer()
-                
-                // FASE 5: Semantic Heatmap Toggle
-                Toggle(isOn: $isHeatmapActive) {
-                    Label("Heat Map", systemImage: "flame.fill")
-                        .font(.caption)
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    
+                    Button {
+                        isHistoryActive.toggle()
+                    } label: {
+                        Label("Historial", systemImage: "clock.arrow.circlepath")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(isHistoryActive ? .accentColor : .secondary)
+                    
+                    // FASE 5: Semantic Heatmap Toggle
+                    Toggle(isOn: $isHeatmapActive) {
+                        Label("Heat Map", systemImage: "flame.fill")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.button)
+                    .tint(.orange)
+                    
+                    if !tab.isPreviewMode {
+                    Button {
+                        triggerSearch = true
+                    } label: {
+                        Label("Buscar", systemImage: "magnifyingglass")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .keyboardShortcut("f", modifiers: .command)
                 }
-                .toggleStyle(.button)
-                .tint(.orange)
                 
-                Button(tab.isPreviewMode ? "Editar" : "Ver") { tab.isPreviewMode.toggle() }.buttonStyle(.bordered)
+                Button(tab.isPreviewMode ? "Editar" : "Ver") { 
+                    tab.isPreviewMode.toggle() 
+                    if tab.isPreviewMode {
+                        _ = saveNote(path: tab.id, content: tab.content)
+                        Telemetry.shared.log("Editor", eventType: "AutoSave", message: "Guardada: \(tab.title)")
+                        if let locations = viewModel.currentLocations {
+                            viewModel.refreshNotes(locations: locations)
+                        }
+                    }
+                }.buttonStyle(.bordered)
             }.padding(8)
             
             if tab.isPreviewMode {
-                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent())
+                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(), triggerSearch: $triggerSearch)
                     .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
-                CodeEditor(text: $tab.content, language: tab.language, theme: selectedTheme)
+                CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
                     .padding(.vertical, 16)
                     .background(viewModel.macBackground) 
             }
+            }
+            .background(viewModel.macBackground)
+            
+            if isHistoryActive {
+                Divider()
+                GitHistorySidebar(noteId: tab.id, content: $tab.content, isPresented: $isHistoryActive)
+                    .transition(.move(edge: .trailing))
+            }
         }
-        .background(viewModel.macBackground)
     }
     
     private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode, isHeatmapActive: Bool, noteId: String) -> String {
@@ -816,6 +885,83 @@ struct SemanticClusterRow: View {
                 }
                 .padding(.leading, 14)
             }
+        }
+    }
+}
+
+struct GitHistorySidebar: View {
+    let noteId: String
+    @Binding var content: String
+    @Binding var isPresented: Bool
+    
+    @State private var commits: [GitCommit] = []
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("HISTORIAL DE CAMBIOS")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            
+            Divider()
+            
+            if commits.isEmpty {
+                Text("Cargando o sin historial...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding()
+            } else {
+                List(commits, id: \.hash) { commit in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(commit.date)
+                            .font(.caption2)
+                            .foregroundColor(.accentColor)
+                        
+                        Text(commit.message)
+                            .font(.subheadline)
+                            .lineLimit(2)
+                        
+                        HStack {
+                            Text(String(commit.hash.prefix(7)))
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Button("Restaurar") {
+                                let oldContent = getFileContentAtCommit(path: noteId, commitHash: commit.hash)
+                                if !oldContent.isEmpty {
+                                    content = oldContent
+                                    _ = saveNote(path: noteId, content: content)
+                                    isPresented = false
+                                }
+                            }
+                            .font(.caption2)
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .frame(width: 300)
+        .background(Color(NSColor.windowBackgroundColor))
+        .onAppear {
+            commits = getFileHistory(path: noteId)
+        }
+        .onChange(of: noteId) {
+            commits = getFileHistory(path: noteId)
         }
     }
 }
