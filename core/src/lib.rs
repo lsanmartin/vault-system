@@ -6,6 +6,8 @@ use once_cell::sync::Lazy;
 use walkdir::WalkDir;
 use std::path::Path;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use notify::{Watcher, RecursiveMode, Config, RecommendedWatcher};
 use std::sync::mpsc::channel;
 use std::thread;
@@ -657,6 +659,22 @@ pub fn mcp_handle_request(json_request: String) -> String {
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
     match method {
+        "notifications/initialized" | "initialized" => {
+            "".to_string()
+        },
+        "initialize" => {
+            let result = json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "VaultSystem",
+                    "version": "0.1.0"
+                }
+            });
+            json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+        },
         "tools/list" => {
             let tools = json!({
                 "tools": [
@@ -762,3 +780,35 @@ pub fn mcp_handle_request(json_request: String) -> String {
         _ => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
     }
 }
+
+#[uniffi::export]
+pub fn start_ipc_server() -> String {
+    thread::spawn(|| {
+        let listener = TcpListener::bind("127.0.0.1:49152").unwrap();
+        println!("Vault IPC Server listening on 127.0.0.1:49152");
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    thread::spawn(move || {
+                        let reader = BufReader::new(stream.try_clone().unwrap());
+                        for line in reader.lines() {
+                            if let Ok(req) = line {
+                                if req.trim().is_empty() { continue; }
+                                let response = mcp_handle_request(req);
+                                if !response.is_empty() {
+                                    let _ = writeln!(stream, "{}", response);
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+    });
+    "IPC Server Iniciado en puerto 49152".to_string()
+}
+

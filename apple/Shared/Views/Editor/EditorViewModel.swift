@@ -125,6 +125,7 @@ class EditorViewModel: ObservableObject {
 
     init() {
         _ = initKnowledgeBase()
+        _ = startIpcServer()
         
         // Restaurar última ubicación seleccionada
         if let savedId = UserDefaults.standard.string(forKey: "vault_last_selected_location"),
