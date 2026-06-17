@@ -486,38 +486,37 @@ struct MainEditorView: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var showTelemetry = false
     @State private var isNoteHidden = false
+    @State private var isSidebarHidden = false
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            NavigationSplitView {
+            NavigationStack {
                 HSplitView {
-                    SidebarColumn(viewModel: viewModel)
-                        .frame(minWidth: 150, idealWidth: 200, maxWidth: 350)
-                    
-                    MainContentColumn(viewModel: viewModel)
-                        .frame(minWidth: 250, idealWidth: 350, maxWidth: .infinity)
-                }
-            } detail: {
-                if !isNoteHidden {
-                    DetailColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
-                } else {
-                    ZStack {
-                        viewModel.macBackground.ignoresSafeArea()
-                        VStack(spacing: 16) {
-                            Image(systemName: "square.grid.2x2")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("Modo Explorador")
-                                .font(.title2)
-                                .foregroundColor(.secondary)
-                            Button("Abrir Nota") { 
-                                withAnimation { isNoteHidden = false }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
+                    if !isSidebarHidden {
+                        HSplitView {
+                            SidebarColumn(viewModel: viewModel)
+                                .frame(minWidth: 150, idealWidth: 200, maxWidth: 350)
+                            
+                            MainContentColumn(viewModel: viewModel)
+                                .frame(minWidth: 250, idealWidth: 350, maxWidth: .infinity)
                         }
                     }
-                    .toolbar {
+                    
+                    if !isNoteHidden {
+                        DetailColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
+                            .frame(minWidth: 300, idealWidth: 600, maxWidth: .infinity)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        Button(action: { withAnimation { isSidebarHidden.toggle() } }) {
+                            Image(systemName: "sidebar.left")
+                        }
+                        .keyboardShortcut("f", modifiers: [.command, .shift])
+                        .help("Ocultar paneles (Cmd+Shift+F)")
+                    }
+                    
+                    if isNoteHidden {
                         ToolbarItemGroup(placement: .primaryAction) {
                             Button(action: {
                                 withAnimation { isNoteHidden.toggle() }
