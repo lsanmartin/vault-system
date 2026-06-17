@@ -427,57 +427,62 @@ struct DetailColumn: View {
     @Binding var isNoteHidden: Bool
     
     var body: some View {
-        if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
-            VStack(spacing: 0) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        ForEach(viewModel.tabs) { tab in
-                            TabHeaderView(tab: tab, isActive: tab.id == activeId, viewModel: viewModel) {
-                                viewModel.activeTabId = tab.id
-                            } onClose: {
-                                if let idx = viewModel.tabs.firstIndex(where: { $0.id == tab.id }) { viewModel.closeTab(at: IndexSet(integer: idx)) }
+        ZStack {
+            if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
+                VStack(spacing: 0) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 0) {
+                            ForEach(viewModel.tabs) { tab in
+                                TabHeaderView(tab: tab, isActive: tab.id == activeId, viewModel: viewModel) {
+                                    viewModel.activeTabId = tab.id
+                                } onClose: {
+                                    if let idx = viewModel.tabs.firstIndex(where: { $0.id == tab.id }) { viewModel.closeTab(at: IndexSet(integer: idx)) }
+                                }
                             }
                         }
                     }
-                }.background(viewModel.macSidebar)
-                EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
-                
-                // FASE 5: Cognitive Radar
-                CognitiveRadarView(noteId: viewModel.tabs[index].id)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-                    .padding(.top, 8)
-                    .background(viewModel.macBackground)
-            }
-            .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: {
-                        withAnimation { isNoteHidden.toggle() }
-                    }) {
-                        Label("Ocultar Nota", systemImage: "uiwindow.split.2x1")
-                    }
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
-                    .help("Ocultar Nota (Cmd+Shift+E)")
-
-                    Button(action: {
-                        NSApp.keyWindow?.toggleFullScreen(nil)
-                    }) {
-                        Label("Pantalla Completa", systemImage: "arrow.up.backward.and.arrow.down.forward")
-                    }
-                    .keyboardShortcut("f", modifiers: [.control, .command])
-                    .help("Pantalla Completa Nativa (Ctrl+Cmd+F)")
+                    .background(viewModel.macSidebar)
                     
-                    Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
-                    Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
+                    EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
+                    
+                    // FASE 5: Cognitive Radar
+                    CognitiveRadarView(noteId: viewModel.tabs[index].id)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
+                        .padding(.top, 8)
+                        .background(viewModel.macBackground)
+                }
+                .toolbar {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button(action: {
+                            withAnimation { isNoteHidden.toggle() }
+                        }) {
+                            Label("Ocultar Nota", systemImage: "uiwindow.split.2x1")
+                        }
+                        .keyboardShortcut("e", modifiers: [.command, .shift])
+                        .help("Ocultar Nota (Cmd+Shift+E)")
+
+                        Button(action: {
+                            NSApp.keyWindow?.toggleFullScreen(nil)
+                        }) {
+                            Label("Pantalla Completa", systemImage: "arrow.up.backward.and.arrow.down.forward")
+                        }
+                        .keyboardShortcut("f", modifiers: [.control, .command])
+                        .help("Pantalla Completa Nativa (Ctrl+Cmd+F)")
+                        
+                        Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
+                        Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
+                    }
+                }
+            } else {
+                ZStack {
+                    viewModel.macBackground.ignoresSafeArea()
+                    ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
+                        .opacity(0.5)
                 }
             }
-        } else {
-            ZStack {
-                viewModel.macBackground.ignoresSafeArea()
-                ContentUnavailableView("Selecciona una nota", systemImage: "text.document")
-                    .opacity(0.5)
-            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -495,16 +500,17 @@ struct MainEditorView: View {
                     if !isSidebarHidden {
                         HSplitView {
                             SidebarColumn(viewModel: viewModel)
-                                .frame(minWidth: 150, idealWidth: 200, maxWidth: 350)
+                                .frame(minWidth: 200, idealWidth: 400, maxWidth: 600)
                             
                             MainContentColumn(viewModel: viewModel)
-                                .frame(minWidth: 250, idealWidth: 350, maxWidth: .infinity)
+                                .frame(minWidth: 200, idealWidth: 240, maxWidth: .infinity)
                         }
                     }
                     
                     if !isNoteHidden {
                         DetailColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
-                            .frame(minWidth: 300, idealWidth: 600, maxWidth: .infinity)
+                            .frame(minWidth: 300, maxWidth: .infinity)
+                            .layoutPriority(1)
                     }
                 }
                 .toolbar {
