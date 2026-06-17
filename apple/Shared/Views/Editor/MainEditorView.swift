@@ -253,7 +253,7 @@ struct MainContentColumn: View {
                         .focused($isSearchFocused)
                     
                     if !viewModel.searchText.isEmpty {
-                        Button(action: { viewModel.searchText = "" }) {
+                        Button(action: { viewModel.clearSearch() }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
                         }
@@ -592,7 +592,7 @@ struct MainEditorView: View {
         .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
         .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
-        .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
+        .onChange(of: viewModel.debouncedSearchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onAppear {
             viewModel.syncAll(locations: workspaceManager.allLocations)
@@ -763,7 +763,7 @@ struct EditorAreaView: View {
             
             if tab.isPreviewMode {
                 WebView(
-                    htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id, searchText: viewModel.searchText),
+                    htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id, searchText: viewModel.debouncedSearchText),
                     baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(),
                     triggerSearch: $triggerSearch,
                     onNavigate: { url in

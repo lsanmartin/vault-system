@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 // Extender el modelo generado para que SwiftUI pueda identificarlo sin especificar el ID en cada ForEach
 extension NoteRecord: Identifiable {}
@@ -87,6 +88,8 @@ class EditorViewModel: ObservableObject {
     @Published var allFolders: [NoteRecord] = [] // Todas las carpetas (Árbol Sidebar)
     @Published var allNotes: [NoteRecord] = [] // Todas las notas (para árbol completo)
     @Published var searchText: String = ""
+    @Published var debouncedSearchText: String = ""
+    private var cancellables = Set<AnyCancellable>()
     @Published var selectedItemIds: Set<String> = []
     @Published var expandedPaths: Set<String> = []
     @Published var childrenByParent: [String: [NoteRecord]] = [:]
@@ -143,6 +146,12 @@ class EditorViewModel: ObservableObject {
         _ = initKnowledgeBase()
         _ = startIpcServer()
         
+        $searchText
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .removeDuplicates()
+            .assign(to: \.debouncedSearchText, on: self)
+            .store(in: &cancellables)
+        
         // Restaurar última ubicación seleccionada
         if let savedId = UserDefaults.standard.string(forKey: "vault_last_selected_location"),
            let uuid = UUID(uuidString: savedId) {
@@ -192,7 +201,7 @@ class EditorViewModel: ObservableObject {
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
         
         // Obtenemos todo de la DB
-        let rawItems = queryNotes(searchTerm: searchText, pathFilter: nil, ignorePatterns: ignorePatterns)
+        let rawItems = queryNotes(searchTerm: debouncedSearchText, pathFilter: nil, ignorePatterns: ignorePatterns)
         
         // Aplicar filtro de sesión GLOBAL (para el árbol y para la lista)
         let allItems = rawItems.filter { item in
@@ -204,7 +213,7 @@ class EditorViewModel: ObservableObject {
         }
         
         // Guardamos todo para el árbol jerárquico
-        if searchText.isEmpty {
+        if debouncedSearchText.isEmpty {
             self.allFolders = allItems.filter { $0.isDir }
             self.allNotes = allItems.filter { !$0.isDir }
         } else {
@@ -255,7 +264,7 @@ class EditorViewModel: ObservableObject {
         
         var results: [NoteRecord] = []
         
-        if !searchText.isEmpty {
+        if !debouncedSearchText.isEmpty {
             var uniqueItems = [String: NoteRecord]()
             for item in allItems { uniqueItems[item.path] = item }
             results = Array(uniqueItems.values)
@@ -287,7 +296,7 @@ class EditorViewModel: ObservableObject {
         // Si estábamos en modo búsqueda y el usuario entra a una carpeta,
         // limpiamos la búsqueda para mostrar el contenido real de la carpeta.
         // El cambio de searchText disparará refreshNotes automáticamente.
-        if !searchText.isEmpty {
+        if !debouncedSearchText.isEmpty {
             // Colapsamos todo el árbol para evitar que las carpetas que se 
             // auto-expandieron durante la búsqueda sigan abiertas y saturen la vista.
             expandedPaths.removeAll()
@@ -301,7 +310,7 @@ class EditorViewModel: ObservableObject {
                 current = parent
             }
             
-            searchText = ""
+            clearSearch()
         } else {
             // Pura navegación en memoria sin tocar DuckDB
             updateGridForCurrentPath()
@@ -343,7 +352,7 @@ class EditorViewModel: ObservableObject {
         var flattened: [NoteRecord] = []
         
         // Determinar qué lista usar según el modo
-        if layoutMode == .tactical && !searchText.isEmpty {
+        if layoutMode == .tactical && !debouncedSearchText.isEmpty {
             return folders + notes
         }
         
@@ -375,6 +384,10 @@ class EditorViewModel: ObservableObject {
         } else {
             expandedPaths.insert(path)
         }
+    }
+    func clearSearch() {
+        searchText = ""
+        debouncedSearchText = ""
     }
     
     func navigateBack() {
