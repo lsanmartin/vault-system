@@ -424,7 +424,7 @@ struct VaultTreeRow: View {
 struct DetailColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
-    @Binding var columnVisibility: NavigationSplitViewVisibility
+    @Binding var isZenMode: Bool
     
     var body: some View {
         if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
@@ -453,14 +453,10 @@ struct DetailColumn: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: {
                         withAnimation {
-                            if columnVisibility == .detailOnly {
-                                columnVisibility = .all
-                            } else {
-                                columnVisibility = .detailOnly
-                            }
+                            isZenMode.toggle()
                         }
                     }) { 
-                        Label("Modo Zen", systemImage: columnVisibility == .detailOnly ? "sidebar.squares.left" : "rectangle.expand.vertical")
+                        Label("Modo Zen", systemImage: isZenMode ? "sidebar.squares.left" : "rectangle.expand.vertical")
                     }
                     .keyboardShortcut("f", modifiers: [.command, .shift])
                     .help("Modo Zen (Cmd+Shift+F)")
@@ -491,16 +487,20 @@ struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var showTelemetry = false
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isZenMode = false
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                SidebarColumn(viewModel: viewModel)
+            NavigationSplitView {
+                if !isZenMode {
+                    SidebarColumn(viewModel: viewModel)
+                }
             } content: {
-                MainContentColumn(viewModel: viewModel)
+                if !isZenMode {
+                    MainContentColumn(viewModel: viewModel)
+                }
             } detail: {
-                DetailColumn(viewModel: viewModel, columnVisibility: $columnVisibility)
+                DetailColumn(viewModel: viewModel, isZenMode: $isZenMode)
             }
             
             // Botón flotante para abrir telemetría
