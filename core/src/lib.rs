@@ -799,7 +799,8 @@ pub fn mcp_handle_request(json_request: String) -> String {
             let result = json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "tools": {}
+                    "tools": {},
+                    "prompts": {}
                 },
                 "serverInfo": {
                     "name": "VaultSystem",
@@ -807,6 +808,58 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 }
             });
             json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+        },
+        "prompts/list" => {
+            let result = json!({
+                "prompts": [
+                    {
+                        "name": "system_context",
+                        "description": "Devuelve las configuraciones de sistema, reglas y contexto maestro que gobiernan a este agente.",
+                        "arguments": []
+                    }
+                ]
+            });
+            json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+        },
+        "prompts/get" => {
+            let empty = json!({}); let params = req.get("params").unwrap_or(&empty);
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name == "system_context" {
+                let sys_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".vault_system").join("system_workspace");
+                let mut context_text = String::new();
+                if let Ok(entries) = std::fs::read_dir(sys_dir) {
+                    let mut files = Vec::new();
+                    for entry in entries.flatten() {
+                        if let Ok(ft) = entry.file_type() {
+                            if ft.is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                                files.push(entry);
+                            }
+                        }
+                    }
+                    files.sort_by_key(|a| a.file_name());
+                    for entry in files {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            context_text.push_str(&format!("\n\n--- Archivo: {} ---\n\n{}", entry.file_name().to_string_lossy(), content));
+                        }
+                    }
+                }
+                
+                let result = json!({
+                    "description": "Contexto y Reglas del Sistema Vault",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": context_text
+                            }
+                        }
+                    ]
+                });
+                json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+            } else {
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "Prompt not found" } }).to_string()
+            }
         },
         "tools/list" => {
             let tools = json!({
