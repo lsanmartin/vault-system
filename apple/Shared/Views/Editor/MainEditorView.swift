@@ -130,7 +130,6 @@ struct SidebarColumn: View {
 struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
-    @Binding var isNoteHidden: Bool
     @FocusState private var isSearchFocused: Bool
     
     var body: some View {
@@ -230,13 +229,6 @@ struct MainContentColumn: View {
                     Image(systemName: "list.bullet").tag(LayoutMode.list)
                     Image(systemName: "square.grid.2x2").tag(LayoutMode.tactical)
                 }.pickerStyle(.segmented).frame(width: 80)
-                
-                Button(action: { withAnimation { isNoteHidden.toggle() } }) {
-                    Image(systemName: isNoteHidden ? "uiwindow.split.2x1" : "macwindow")
-                        .foregroundColor(viewModel.macControlIcon)
-                }
-                .buttonStyle(.borderless)
-                .help("Modo Explorador (Ocultar Nota)")
             }
             HStack {
                 ZStack(alignment: .trailing) {
@@ -432,6 +424,7 @@ struct VaultTreeRow: View {
 struct DetailColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @Binding var isNoteHidden: Bool
     
     var body: some View {
         if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
@@ -459,12 +452,12 @@ struct DetailColumn: View {
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: {
-                        NSApp.keyWindow?.firstResponder?.tryToPerform(#selector(NSSplitViewController.toggleSidebar(_:)), with: nil)
-                    }) { 
-                        Label("Modo Zen", systemImage: "sidebar.squares.left")
+                        withAnimation { isNoteHidden.toggle() }
+                    }) {
+                        Label("Ocultar Nota", systemImage: "uiwindow.split.2x1")
                     }
-                    .keyboardShortcut("f", modifiers: [.command, .shift])
-                    .help("Ocultar paneles (Cmd+Shift+F)")
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .help("Ocultar Nota (Cmd+Shift+E)")
 
                     Button(action: {
                         NSApp.keyWindow?.toggleFullScreen(nil)
@@ -501,12 +494,12 @@ struct MainEditorView: View {
                     SidebarColumn(viewModel: viewModel)
                         .frame(minWidth: 150, idealWidth: 200, maxWidth: 350)
                     
-                    MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
+                    MainContentColumn(viewModel: viewModel)
                         .frame(minWidth: 250, idealWidth: 350, maxWidth: .infinity)
                 }
             } detail: {
                 if !isNoteHidden {
-                    DetailColumn(viewModel: viewModel)
+                    DetailColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
                 } else {
                     ZStack {
                         viewModel.macBackground.ignoresSafeArea()
@@ -522,6 +515,25 @@ struct MainEditorView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
+                        }
+                    }
+                    .toolbar {
+                        ToolbarItemGroup(placement: .primaryAction) {
+                            Button(action: {
+                                withAnimation { isNoteHidden.toggle() }
+                            }) {
+                                Label("Mostrar Nota", systemImage: "macwindow")
+                            }
+                            .keyboardShortcut("e", modifiers: [.command, .shift])
+                            .help("Mostrar Nota (Cmd+Shift+E)")
+
+                            Button(action: {
+                                NSApp.keyWindow?.toggleFullScreen(nil)
+                            }) {
+                                Label("Pantalla Completa", systemImage: "arrow.up.backward.and.arrow.down.forward")
+                            }
+                            .keyboardShortcut("f", modifiers: [.control, .command])
+                            .help("Pantalla Completa Nativa (Ctrl+Cmd+F)")
                         }
                     }
                 }
