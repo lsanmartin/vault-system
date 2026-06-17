@@ -3,11 +3,21 @@ import WebKit
 
 class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     var lastLoadedHTML: String? = nil
+    var onNavigate: ((URL) -> Void)? = nil
     
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "consoleLog", let logStr = message.body as? String {
             Telemetry.shared.log("WebView", eventType: "JSConsole", message: logStr)
         }
+    }
+    
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            onNavigate?(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
     }
 }
 
@@ -15,6 +25,7 @@ struct WebView: NSViewRepresentable {
     let htmlContent: String
     let baseURL: URL?
     @Binding var triggerSearch: Bool
+    var onNavigate: ((URL) -> Void)? = nil
     
     func makeCoordinator() -> WebViewModel { WebViewModel() }
     
@@ -39,6 +50,7 @@ struct WebView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        context.coordinator.onNavigate = onNavigate
         if context.coordinator.lastLoadedHTML != htmlContent {
             context.coordinator.lastLoadedHTML = htmlContent
             nsView.loadHTMLString(htmlContent, baseURL: baseURL)

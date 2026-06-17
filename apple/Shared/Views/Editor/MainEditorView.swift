@@ -744,8 +744,15 @@ struct EditorAreaView: View {
             }.padding(8)
             
             if tab.isPreviewMode {
-                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id, searchText: viewModel.searchText), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(), triggerSearch: $triggerSearch)
-                    .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
+                WebView(
+                    htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id, searchText: viewModel.searchText),
+                    baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(),
+                    triggerSearch: $triggerSearch,
+                    onNavigate: { url in
+                        handleNavigation(url)
+                    }
+                )
+                .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
                 CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
                     .padding(.horizontal, 32)
@@ -759,6 +766,31 @@ struct EditorAreaView: View {
                 Divider()
                 GitHistorySidebar(noteId: tab.id, content: $tab.content, isPresented: $isHistoryActive)
                     .transition(.move(edge: .trailing))
+            }
+        }
+    }
+    
+    private func handleNavigation(_ url: URL) {
+        if url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto" {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        
+        if url.isFileURL {
+            let path = url.path
+            if let note = viewModel.allNotes.first(where: { $0.path == path }) {
+                viewModel.openNote(note)
+                return
+            }
+            
+            let fileName = url.lastPathComponent
+            let decodedName = fileName.removingPercentEncoding ?? fileName
+            let titleWithoutExt = decodedName.replacingOccurrences(of: ".md", with: "")
+            
+            if let matchingNote = viewModel.allNotes.first(where: { $0.title == titleWithoutExt || $0.title == decodedName }) {
+                viewModel.openNote(matchingNote)
+            } else {
+                print("VaultSystem: Note not found for path \(path) or title \(decodedName)")
             }
         }
     }
