@@ -8,30 +8,23 @@ struct CognitiveRadarView: View {
     @State private var relatedEntities: Int = 0
     
     var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text("COGNITIVE RADAR")
-                    .font(.caption2)
-                    .fontWeight(.heavy)
-                    .foregroundColor(.secondary)
-                Spacer()
-                Image(systemName: "sensor.tag.radiowaves.forward")
-                    .foregroundColor(.accentColor)
-                    .font(.caption)
-            }
-            .padding(.bottom, 4)
+        HStack(spacing: 12) {
+            Image(systemName: "sensor.tag.radiowaves.forward")
+                .foregroundColor(.accentColor)
+                .font(.system(size: 10, weight: .bold))
             
-            HStack(spacing: 15) {
-                RadarMetricView(title: "Novedad", value: noveltyScore, color: .purple)
-                RadarMetricView(title: "Carga Cognitiva", value: loadScore, color: .orange)
-                RadarMetricView(title: "Entidades", value: Double(relatedEntities) / 100.0, displayValue: "\(relatedEntities)", color: .blue)
-            }
+            Divider().frame(height: 10)
+            
+            CompactRadarMetricView(title: "NOV", value: noveltyScore, color: .purple)
+            CompactRadarMetricView(title: "CARGA", value: loadScore, color: .orange)
+            CompactRadarMetricView(title: "ENT", value: Double(relatedEntities) / 100.0, displayValue: "\(relatedEntities)", color: .blue)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(.windowBackgroundColor)))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(Color(.windowBackgroundColor)))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            Capsule()
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
         )
         .onAppear {
             analyzeTemporalGraph()
@@ -42,48 +35,49 @@ struct CognitiveRadarView: View {
     }
     
     private func analyzeTemporalGraph() {
-        // Obtenemos la vecindad del grafo (Fase 3)
-        let edges = getTemporalNeighborhood(noteId: noteId, maxDepth: 2)
-        
-        // Simulación de heurística
-        self.relatedEntities = edges.count
-        self.noveltyScore = min(1.0, Double(edges.count) * 0.05 + 0.2)
-        self.loadScore = min(1.0, noveltyScore * 0.8 + 0.1)
+        // Ejecutar la consulta pesada a DuckDB en background
+        DispatchQueue.global(qos: .userInitiated).async {
+            let edges = getTemporalNeighborhood(noteId: noteId, maxDepth: 2)
+            
+            DispatchQueue.main.async {
+                // Simulación de heurística
+                self.relatedEntities = edges.count
+                self.noveltyScore = min(1.0, Double(edges.count) * 0.05 + 0.2)
+                self.loadScore = min(1.0, self.noveltyScore * 0.8 + 0.1)
+            }
+        }
     }
 }
 
-struct RadarMetricView: View {
+struct CompactRadarMetricView: View {
     let title: String
     let value: Double
     var displayValue: String? = nil
     let color: Color
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 9, weight: .heavy))
                 .foregroundColor(.secondary)
             
-            HStack {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(color.opacity(0.2))
-                            .frame(height: 6)
-                        Capsule()
-                            .fill(color)
-                            .frame(width: geo.size.width * value, height: 6)
-                    }
-                }
-                .frame(height: 6)
-                
-                if let disp = displayValue {
-                    Text(disp)
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                } else {
-                    Text("\(Int(value * 100))%")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                }
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(color.opacity(0.2))
+                    .frame(width: 32, height: 4)
+                Capsule()
+                    .fill(color)
+                    .frame(width: 32 * value, height: 4)
+            }
+            
+            if let disp = displayValue {
+                Text(disp)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(color)
+            } else {
+                Text("\(Int(value * 100))%")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(color)
             }
         }
     }

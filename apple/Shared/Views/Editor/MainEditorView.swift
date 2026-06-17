@@ -33,12 +33,14 @@ struct NoteCard: View {
                 .font(.headline)
                 .lineLimit(2)
                 .foregroundColor(viewModel.macPrimaryText)
+                .textSelection(.enabled)
             
             Spacer(minLength: 4)
             Text(displayPath)
                 .font(.system(size: 9, design: .monospaced))
                 .lineLimit(1)
                 .foregroundColor(viewModel.macSecondaryText)
+                .textSelection(.enabled)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor)) 
@@ -49,6 +51,7 @@ struct NoteCard: View {
         )
         .contentShape(Rectangle())
         .onTapGesture {
+            NSApp.keyWindow?.makeFirstResponder(nil)
             let extend = NSEvent.modifierFlags.contains(.shift)
             let toggle = NSEvent.modifierFlags.contains(.command)
             viewModel.selectItem(note, extend: extend, toggle: toggle)
@@ -87,6 +90,12 @@ struct SidebarColumn: View {
     var body: some View {
         List(selection: $viewModel.selectedLocationId) {
             Section("Workspaces") {
+                if let sysLoc = workspaceManager.systemLocation {
+                    NavigationLink(value: sysLoc.id) {
+                        Label(sysLoc.name, systemImage: "gearshape.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
                 ForEach(workspaceManager.locations) { location in
                     NavigationLink(value: location.id) {
                         Label(location.name, systemImage: "folder.fill")
@@ -106,7 +115,7 @@ struct SidebarColumn: View {
                 } label: { Label("Modo", systemImage: "magnifyingglass") }
                 
                 if viewModel.treeMode == .hierarchy {
-                    VaultTreeView(viewModel: viewModel, locations: workspaceManager.locations, showNotes: false)
+                    VaultTreeView(viewModel: viewModel, locations: workspaceManager.allLocations, showNotes: false)
                 } else {
                     SemanticTreeView(viewModel: viewModel)
                 }
@@ -121,18 +130,26 @@ struct SidebarColumn: View {
 struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @FocusState private var isSearchFocused: Bool
     
     var body: some View {
         VStack(spacing: 0) {
             headerView
+                .contentShape(Rectangle())
+                .onTapGesture { 
+                    isSearchFocused = false
+                    NSApp.keyWindow?.makeFirstResponder(nil) 
+                }
             
             if viewModel.layoutMode == .list {
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         ForEach(viewModel.notes, id: \.path) { note in
-                            FileRowView(item: note, viewModel: viewModel, locations: workspaceManager.locations)
+                            FileRowView(item: note, viewModel: viewModel, locations: workspaceManager.allLocations)
                                 .padding(.horizontal, 8)
                                 .onTapGesture {
+                                    isSearchFocused = false
+                                    NSApp.keyWindow?.makeFirstResponder(nil)
                                     let extend = NSEvent.modifierFlags.contains(.shift)
                                     let toggle = NSEvent.modifierFlags.contains(.command)
                                     viewModel.selectItem(note, extend: extend, toggle: toggle)
@@ -140,28 +157,62 @@ struct MainContentColumn: View {
                         }
                     }
                     .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isSearchFocused = false
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                        viewModel.selectedItemIds.removeAll()
+                    }
                 }
-                .background(viewModel.macBackground)
+                .simultaneousGesture(TapGesture().onEnded { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) })
+                .background(
+                    viewModel.macBackground
+                        .contentShape(Rectangle())
+                        .onTapGesture { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+                )
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
                         ForEach(viewModel.notes, id: \.path) { note in
-                            NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.locations.first?.path, locations: workspaceManager.locations, viewModel: viewModel)
+                            NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.allLocations.first?.path, locations: workspaceManager.allLocations, viewModel: viewModel)
                         }
-                    }.padding()
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isSearchFocused = false
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                        viewModel.selectedItemIds.removeAll()
+                    }
                 }
+                .simultaneousGesture(TapGesture().onEnded { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) })
                 .frame(maxWidth: .infinity)
-                .background(viewModel.macBackground)
+                .background(
+                    viewModel.macBackground
+                        .contentShape(Rectangle())
+                        .onTapGesture { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+                )
             }
         }
         .navigationTitle("Notas")
         .background(viewModel.macBackground)
+        .onChange(of: viewModel.selectedItemIds) { _ in isSearchFocused = false }
+        .onChange(of: viewModel.selectedLocationId) { _ in isSearchFocused = false }
+        .background(
+            Button(action: {
+                isSearchFocused = true
+            }) { EmptyView() }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0)
+        )
     }
     
     private var headerView: some View {
         VStack(spacing: 12) {
             HStack {
-                if let workspace = workspaceManager.locations.first(where: { $0.id == viewModel.selectedLocationId }) {
+                if let workspace = workspaceManager.allLocations.first(where: { $0.id == viewModel.selectedLocationId }) {
                     Button(action: { viewModel.navigateBack() }) { 
                         Image(systemName: "chevron.left")
                             .foregroundColor(viewModel.macControlIcon)
@@ -183,6 +234,7 @@ struct MainContentColumn: View {
                 ZStack(alignment: .trailing) {
                     TextField("Buscar en el vault...", text: $viewModel.searchText)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isSearchFocused)
                     
                     if !viewModel.searchText.isEmpty {
                         Button(action: { viewModel.searchText = "" }) {
@@ -202,18 +254,18 @@ struct MainContentColumn: View {
                 }
                 .menuStyle(.borderlessButton).fixedSize()
                 
-                Button(action: { viewModel.createNewNote(locations: workspaceManager.locations) }) { 
+                Button(action: { viewModel.createNewNote(locations: workspaceManager.allLocations) }) { 
                     Image(systemName: "note.text.badge.plus")
                         .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
                 
-                Button(action: { viewModel.createNewFolder(locations: workspaceManager.locations) }) { 
+                Button(action: { viewModel.createNewFolder(locations: workspaceManager.allLocations) }) { 
                     Image(systemName: "folder.badge.plus")
                         .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
                 
                 if !viewModel.selectedItemIds.isEmpty {
-                    Button(role: .destructive, action: { viewModel.deleteSelectedItems(locations: workspaceManager.locations) }) {
+                    Button(role: .destructive, action: { viewModel.deleteSelectedItems(locations: workspaceManager.allLocations) }) {
                         Image(systemName: "trash")
                             .foregroundColor(.red.opacity(0.8))
                     }.buttonStyle(.borderless)
@@ -398,7 +450,7 @@ struct DetailColumn: View {
             }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: { viewModel.saveActiveTab(locations: workspaceManager.locations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
+                    Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
                     Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
                 }
             }
@@ -455,14 +507,14 @@ struct MainEditorView: View {
             }
         }
         .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
-        .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
-        .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
-        .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
-        .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.locations) }
+        .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
+        .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
+        .onChange(of: viewModel.searchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
+        .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onAppear {
-            viewModel.syncAll(locations: workspaceManager.locations)
-            if viewModel.selectedLocationId == nil, let first = workspaceManager.locations.first { viewModel.selectedLocationId = first.id }
-            viewModel.launchWatcher(paths: workspaceManager.locations.map { $0.path }, ignorePatterns: [])
+            viewModel.syncAll(locations: workspaceManager.allLocations)
+            if viewModel.selectedLocationId == nil, let first = workspaceManager.allLocations.first { viewModel.selectedLocationId = first.id }
+            viewModel.launchWatcher(paths: workspaceManager.allLocations.map { $0.path }, ignorePatterns: [])
         }
     }
     
@@ -490,15 +542,16 @@ struct FileRowView: View {
                 .font(.system(size: 14))
             
             VStack(alignment: .leading) {
-                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText)
+                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText).textSelection(.enabled)
                 if !viewModel.searchText.isEmpty { 
-                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText) 
+                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText).textSelection(.enabled)
                 }
             }
             if item.isDir { Spacer(); Image(systemName: "chevron.right").font(.system(size: 10)).opacity(0.3) }
         }
         .contentShape(Rectangle())
         .onTapGesture { 
+            NSApp.keyWindow?.makeFirstResponder(nil)
             let extend = NSEvent.modifierFlags.contains(.shift)
             let toggle = NSEvent.modifierFlags.contains(.command)
             
@@ -626,7 +679,7 @@ struct EditorAreaView: View {
             }.padding(8)
             
             if tab.isPreviewMode {
-                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(), triggerSearch: $triggerSearch)
+                WebView(htmlContent: generateSafeHTML(tab.content, theme: selectedTheme, mode: tab.renderMode, isHeatmapActive: isHeatmapActive, noteId: tab.id, searchText: viewModel.searchText), baseURL: URL(fileURLWithPath: tab.id).deletingLastPathComponent(), triggerSearch: $triggerSearch)
                     .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
                 CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
@@ -645,7 +698,7 @@ struct EditorAreaView: View {
         }
     }
     
-    private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode, isHeatmapActive: Bool, noteId: String) -> String {
+    private func generateSafeHTML(_ content: String, theme: AppTheme, mode: RenderMode, isHeatmapActive: Bool, noteId: String, searchText: String) -> String {
         let base64Content = Data(content.utf8).base64EncodedString()
         var themeCSS = ""
         switch theme {
@@ -690,8 +743,10 @@ struct EditorAreaView: View {
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/mark.js/8.11.1/mark.min.js"></script>
         <style>\##(themeCSS) body { font-family: -apple-system, system-ui, sans-serif; padding: 2rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; }
         img { max-width: 100%; height: auto; border-radius: 8px; } pre { background: rgba(128,128,128,0.1); padding: 1rem; border-radius: 8px; overflow: auto; }
+        mark.search-highlight { background-color: rgba(255, 215, 0, 0.4); color: inherit; border-radius: 2px; padding: 0 2px; box-shadow: 0 0 4px rgba(255,215,0,0.5); }
         blockquote { border-left: 4px solid var(--accent); margin: 1.5rem 0; padding: 0.5rem 1rem; background: rgba(128,128,128,0.05); font-style: italic; color: var(--text); opacity: 0.9; }
         table { border-collapse: collapse; width: 100%; margin: 1rem 0; } th, td { border: 1px solid rgba(128,128,128,0.3); padding: 8px; text-align: left; }
         .katex { font-size: 1.1em; color: inherit !important; }</style></head><body><div id="content">Cargando...</div><script>
@@ -745,6 +800,7 @@ struct EditorAreaView: View {
                 }
                 
                 document.getElementById('content').innerHTML = finalHTML;
+                
                 renderMathInElement(document.getElementById('content'), {
                     delimiters: [
                         {left: '$$', right: '$$', display: true}, {left: '$', right: '$', display: false},
@@ -795,6 +851,19 @@ struct EditorAreaView: View {
                 });
                 
                 document.getElementById('content').innerHTML = html;
+            }
+            
+            const searchStr = "\##(searchText)";
+            if (searchStr.trim().length > 0) {
+                const terms = searchStr.split(" ").filter(t => t.trim().length > 0);
+                const instance = new Mark(document.getElementById('content'));
+                instance.mark(terms, {
+                    "element": "mark",
+                    "className": "search-highlight",
+                    "accuracy": "partially",
+                    "diacritics": true,
+                    "caseSensitive": false
+                });
             }
             
         }catch(e){document.getElementById('content').innerHTML="<div style='color:red'>Error: "+e.message+"</div>";}

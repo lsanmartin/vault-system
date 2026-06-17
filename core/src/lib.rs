@@ -305,6 +305,26 @@ pub fn delete_item(path: String) -> bool {
         fs::remove_file(target).is_ok()
     }
 }
+fn make_accent_insensitive_regex(word: &str) -> String {
+    let mut regex = String::new();
+    for c in word.chars() {
+        if c >= '\u{0300}' && c <= '\u{036F}' { continue; }
+        match c.to_lowercase().next().unwrap() {
+            'a' | 'á' | 'ä' => regex.push_str("[aáäAÁÄ]\\p{M}*"),
+            'e' | 'é' | 'ë' => regex.push_str("[eéëEÉË]\\p{M}*"),
+            'i' | 'í' | 'ï' => regex.push_str("[iíïIÍÏ]\\p{M}*"),
+            'o' | 'ó' | 'ö' => regex.push_str("[oóöOÓÖ]\\p{M}*"),
+            'u' | 'ú' | 'ü' => regex.push_str("[uúüUÚÜ]\\p{M}*"),
+            'n' | 'ñ' => regex.push_str("[nñNÑ]\\p{M}*"),
+            other => {
+                if ".*+?^${}()|[]\\".contains(other) { regex.push('\\'); }
+                regex.push(other);
+                regex.push_str("\\p{M}*");
+            }
+        }
+    }
+    regex
+}
 
 #[uniffi::export]
 pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ignore_patterns: Vec<String>) -> Vec<NoteRecord> {
@@ -348,8 +368,12 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
 
     if let Some(ref term) = search_term {
         if !term.is_empty() {
-            // Filtrado estricto por texto en título, contenido o ruta
-            sql.push_str(&format!(" AND (title ILIKE '%{}%' OR content ILIKE '%{}%' OR path ILIKE '%{}%')", term, term, term));
+            // Filtrado estricto por palabras: Intersección (AND) de todos los tokens con soporte para acentos y NFD
+            for word in term.split_whitespace() {
+                let safe_word = word.replace("'", "''"); // Evitar inyección
+                let regex_pattern = format!("(?i){}", make_accent_insensitive_regex(&safe_word));
+                sql.push_str(&format!(" AND (regexp_matches(title, '{}') OR regexp_matches(content, '{}') OR regexp_matches(path, '{}'))", regex_pattern, regex_pattern, regex_pattern));
+            }
         }
     }
 
@@ -965,3 +989,74 @@ pub fn start_ipc_server() -> String {
     "IPC Server Iniciado con Token de Seguridad.".to_string()
 }
 
+use serde::{Deserialize, Serialize};
+
+#[derive(uniffi::Record, Serialize, Deserialize, Clone)]
+pub struct McpTokenRecord {
+    pub token_id: String,
+    pub client_name: String,
+    pub workspaces: Vec<String>,
+    pub can_write: bool,
+    pub allow_metadata: bool,
+    pub allow_system: bool,
+}
+
+static MCP_TOKENS: Lazy<Mutex<Vec<McpTokenRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[uniffi::export]
+pub fn load_mcp_tokens_from_json(json_str: String) -> bool {
+    if let Ok(tokens) = serde_json::from_str::<Vec<McpTokenRecord>>(&json_str) {
+        if let Ok(mut guard) = MCP_TOKENS.lock() {
+            *guard = tokens;
+            return true;
+        }
+    }
+    false
+}
+
+#[uniffi::export]
+pub fn export_mcp_tokens_to_json() -> String {
+    if let Ok(guard) = MCP_TOKENS.lock() {
+        if let Ok(json) = serde_json::to_string_pretty(&*guard) {
+            return json;
+        }
+    }
+    "[]".to_string()
+}
+
+#[uniffi::export]
+pub fn get_mcp_tokens() -> Vec<McpTokenRecord> {
+    if let Ok(guard) = MCP_TOKENS.lock() {
+        return guard.clone();
+    }
+    vec![]
+}
+
+#[uniffi::export]
+pub fn create_mcp_token(client_name: String, workspaces: Vec<String>, can_write: bool, allow_metadata: bool, allow_system: bool) -> String {
+    let token_id = uuid::Uuid::new_v4().to_string();
+    let record = McpTokenRecord {
+        token_id: token_id.clone(),
+        client_name,
+        workspaces,
+        can_write,
+        allow_metadata,
+        allow_system,
+    };
+    
+    if let Ok(mut guard) = MCP_TOKENS.lock() {
+        guard.push(record);
+    }
+    
+    token_id
+}
+
+#[uniffi::export]
+pub fn revoke_mcp_token(token_id: String) -> bool {
+    if let Ok(mut guard) = MCP_TOKENS.lock() {
+        let initial_len = guard.len();
+        guard.retain(|t| t.token_id != token_id);
+        return guard.len() < initial_len;
+    }
+    false
+}

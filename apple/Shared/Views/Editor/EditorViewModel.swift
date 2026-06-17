@@ -89,9 +89,15 @@ class EditorViewModel: ObservableObject {
         didSet {
             if let id = selectedLocationId {
                 UserDefaults.standard.set(id.uuidString, forKey: "vault_last_selected_location")
-                // Al cambiar de workspace, ir a la raíz
+                // Al cambiar de workspace, ir a la raíz y limpiar selección
                 if let location = currentLocations?.first(where: { $0.id == id }) {
-                    currentPath = location.path
+                    DispatchQueue.main.async { [weak self] in
+                        self?.selectedItemIds.removeAll()
+                        self?.currentPath = location.path
+                        if let locs = self?.currentLocations {
+                            self?.refreshNotes(locations: locs)
+                        }
+                    }
                 }
             }
         }
@@ -190,19 +196,59 @@ class EditorViewModel: ObservableObject {
         }
         
         // Guardamos todo para el árbol jerárquico
-        self.allFolders = allItems.filter { $0.isDir }
-        self.allNotes = allItems.filter { !$0.isDir }
+        if searchText.isEmpty {
+            self.allFolders = allItems.filter { $0.isDir }
+            self.allNotes = allItems.filter { !$0.isDir }
+        } else {
+            // Reconstruir la jerarquía de folders SOLO para las carpetas que hicieron match
+            // (Ignoramos las notas, porque ellas ya se muestran en la vista principal)
+            var validPaths = Set<String>()
+            for item in allItems where item.isDir {
+                var current = item.path
+                while current.count > 1 {
+                    validPaths.insert(current)
+                    let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
+                    if parent == current { break }
+                    current = parent
+                }
+            }
+            
+            // Traemos todos los folders del workspace para filtrar los que están en la ruta
+            let allRawFolders = queryNotes(searchTerm: "", pathFilter: nil, ignorePatterns: ignorePatterns).filter { $0.isDir }
+            self.allFolders = allRawFolders.filter { validPaths.contains($0.path) }
+            self.allNotes = allItems.filter { !$0.isDir }
+            
+            // Auto-expandimos SOLO si los resultados son manejables para no colapsar SwiftUI
+            if validPaths.count < 100 {
+                for path in validPaths {
+                    self.expandedPaths.insert(path)
+                }
+            }
+        }
         
-        // Filtramos para mostrar SOLO lo que está en el currentPath (Finder Style)
+        updateGridForCurrentPath()
+    }
+    
+    func updateGridForCurrentPath() {
+        // Obtenemos la lista plana base desde allFolders y allNotes (que ya están filtrados por la búsqueda)
+        let allItems = self.allFolders + self.allNotes
+        
         let normalizedCurrentPath = currentPath.hasSuffix("/") && currentPath.count > 1 ? String(currentPath.dropLast()) : currentPath
-        var results = allItems.filter { item in
+        
+        // Evitamos procesar duplicados en caso de búsqueda
+        var uniqueItems = [String: NoteRecord]()
+        for item in allItems {
+            uniqueItems[item.path] = item
+        }
+        
+        var results = uniqueItems.values.filter { item in
             let itemURL = URL(fileURLWithPath: item.path)
             var parentPath = itemURL.deletingLastPathComponent().path
             if parentPath.hasSuffix("/") && parentPath.count > 1 {
                 parentPath = String(parentPath.dropLast())
             }
             
-            // Si hay búsqueda, mostramos todo lo que coincida
+            // Si hay búsqueda, mostramos todo lo que coincida de allItems (es decir, lo que arrojó DuckDB)
             if !searchText.isEmpty { return true }
             
             // Si no hay búsqueda, solo lo que cuelga directamente de currentPath
@@ -229,8 +275,28 @@ class EditorViewModel: ObservableObject {
         currentPath = path
         // Al navegar, limpiamos selección por defecto para evitar confusiones de contexto
         selectedItemIds = [path] 
-        if let locs = currentLocations {
-            refreshNotes(locations: locs)
+        
+        // Si estábamos en modo búsqueda y el usuario entra a una carpeta,
+        // limpiamos la búsqueda para mostrar el contenido real de la carpeta.
+        // El cambio de searchText disparará refreshNotes automáticamente.
+        if !searchText.isEmpty {
+            // Colapsamos todo el árbol para evitar que las carpetas que se 
+            // auto-expandieron durante la búsqueda sigan abiertas y saturen la vista.
+            expandedPaths.removeAll()
+            
+            // Expandimos solo el camino hacia la carpeta actual
+            var current = path
+            while current.count > 1 {
+                expandedPaths.insert(current)
+                let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
+                if parent == current { break }
+                current = parent
+            }
+            
+            searchText = ""
+        } else {
+            // Pura navegación en memoria sin tocar DuckDB
+            updateGridForCurrentPath()
         }
     }
     
@@ -322,25 +388,58 @@ class EditorViewModel: ObservableObject {
     }
     
     func createNewNote(locations: [VaultLocation]) {
-        if currentPath.isEmpty { return }
+        var targetPath = currentPath
+        
+        // Priorizar el último elemento seleccionado (carpeta o archivo)
+        if let lastId = lastSelectedId ?? selectedItemIds.first {
+            let allItems = allFolders + allNotes
+            if let selectedItem = allItems.first(where: { $0.path == lastId }) {
+                if selectedItem.isDir {
+                    targetPath = selectedItem.path
+                } else {
+                    targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+                }
+            }
+        } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
+            targetPath = location.path
+        }
+        
+        if targetPath.isEmpty { return }
 
         let fileName = "Nueva Nota \(Int(Date().timeIntervalSince1970)).md"
-        let fullPath = URL(fileURLWithPath: currentPath).appendingPathComponent(fileName).path
+        let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(fileName).path
         
         if createItem(path: fullPath, isDir: false) {
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
             syncAll(locations: locations)
-            if let newNote = notes.first(where: { $0.path == fullPath }) {
+            if let newNote = notes.first(where: { $0.path == fullPath }) ?? allNotes.first(where: { $0.path == fullPath }) {
                 openNote(newNote)
+                selectItem(newNote)
             }
         }
     }
     
     func createNewFolder(locations: [VaultLocation]) {
-        if currentPath.isEmpty { return }
+        var targetPath = currentPath
+        
+        // Priorizar el último elemento seleccionado (carpeta o archivo)
+        if let lastId = lastSelectedId ?? selectedItemIds.first {
+            let allItems = allFolders + allNotes
+            if let selectedItem = allItems.first(where: { $0.path == lastId }) {
+                if selectedItem.isDir {
+                    targetPath = selectedItem.path
+                } else {
+                    targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+                }
+            }
+        } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
+            targetPath = location.path
+        }
+        
+        if targetPath.isEmpty { return }
 
         let folderName = "Nueva Carpeta \(Int(Date().timeIntervalSince1970))"
-        let fullPath = URL(fileURLWithPath: currentPath).appendingPathComponent(folderName).path
+        let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(folderName).path
         
         if createItem(path: fullPath, isDir: true) {
             syncAll(locations: locations)

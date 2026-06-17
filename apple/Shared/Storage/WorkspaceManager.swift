@@ -19,13 +19,53 @@ struct VaultLocation: Identifiable, Codable {
 /// Gestiona los permisos de acceso seguro (Security-Scoped Bookmarks) requeridos por el App Sandbox de macOS.
 class WorkspaceManager: ObservableObject {
     @Published var locations: [VaultLocation] = []
+    @Published var systemLocation: VaultLocation?
     @Published var isAuthorized: Bool = false
+    
+    var allLocations: [VaultLocation] {
+        if let sys = systemLocation {
+            return locations + [sys]
+        }
+        return locations
+    }
     
     private let logger = Logger(subsystem: "com.apple.vault.VaultSystem", category: "WorkspaceManager")
     private let locationsKey = "com.apple.vault.vaultLocations"
     
     init() {
         restoreLocations()
+        initializeSystemWorkspace()
+    }
+    
+    private func initializeSystemWorkspace() {
+        let systemVaultURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vault_system/system_workspace")
+        
+        if !FileManager.default.fileExists(atPath: systemVaultURL.path) {
+            try? FileManager.default.createDirectory(at: systemVaultURL, withIntermediateDirectories: true)
+                let contextURL = systemVaultURL.appendingPathComponent("Contexto.md")
+                let defaultContext = """
+                # Sistema Operativo Cognitivo
+                
+                Taxonomía del VaultSystem (Tres Capas):
+                1. Capa de Contenido (Base): Archivos crudos de Markdown.
+                2. Capa Semántica (Metadatos): Carpetas '_', archivos _metadata.md y _memory.md. Aquí se almacenan los índices conceptuales.
+                3. Capa de Telemetría y Sistema: El sistema ya no se guarda en `00-Sistema/` dentro de los workspaces de contenido. Ahora vive globalmente en su propio entorno aislado (`~/.vault_system/system_workspace`).
+
+                Importante: 
+                - Tu alcance como IA a estas capas está restringido por los permisos de tu Token MCP. 
+                - Puedes (y debes) invocar la herramienta `vault_list_workspaces` apenas te conectes para descubrir dinámicamente las rutas absolutas autorizadas para ti.
+                - Cuando necesites registrar logs de telemetría o configurar al agente, hazlo dentro del workspace de sistema indicado por esa lista.
+                """
+                try? defaultContext.write(to: contextURL, atomically: true, encoding: .utf8)
+            }
+            
+            let mockBookmark = Data()
+            self.systemLocation = VaultLocation(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000000") ?? UUID(),
+                name: "Contexto de Sistema",
+                bookmarkData: mockBookmark,
+                path: systemVaultURL.path
+            )
     }
     
     /// Presenta el panel nativo de macOS para que el usuario seleccione carpetas adicionales.

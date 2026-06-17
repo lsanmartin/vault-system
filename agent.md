@@ -10,6 +10,15 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación de seguridad estricta para MCP (RBAC de 3 capas), panel de telemetría y buscador de texto nativo en la UI.
 - **Cambios Realizados**:
+  - **[2026-06-16 19:00] Motor de Búsqueda Unicode & Zero-Delay Navigation**:
+    - **Soporte Universal de Acentos y 'ñ' (NFD/NFC)**: Se reemplazó el filtro genérico de carácteres por el uso de propiedades Unicode (`\p{M}*`) y normalización en memoria dentro de Rust, resolviendo el bug silencioso de macOS con carácteres especiales descompuestos en Finder.
+    - **Búsqueda por Intersección Estricta (AND)**: La lógica de consulta de base de datos ahora divide la frase en N tokens y exige que cada término exista individualmente en el archivo (vía `regexp_matches`), emulando comportamientos avanzados de motores de búsqueda.
+    - **Navegación en UI (Zero-Delay)**: Se modificó la vista `EditorViewModel` para que las selecciones de carpetas dentro del mismo workspace procesen el redibujado de la grilla 100% en memoria en Swift (`updateGridForCurrentPath()`), deteniendo los escaneos innecesarios a través del FFI de DuckDB. Se estabilizó a 60FPS constantes.
+    - **Recuperación Fallback MCP**: Se reintegró el pipeline de tokens (`McpTokenRecord`) de la CLI que había colapsado durante el refactor del core.
+  - **[2026-06-16 23:30] Depuración de Búsqueda UI y Sandbox**:
+    - **Fix UI Buscador**: Corregido bug crítico en la renderización de Swift (`updateGridForCurrentPath`) que causaba la mezcla de notas previas con los resultados de búsqueda de DuckDB. La grilla ahora muestra limpia y exclusivamente los archivos que hicieron `match`.
+    - **Persistencia MCP (Fix Sandbox)**: Migrada exitosamente la persistencia de `mcp_tokens` desde archivos en el Sandbox (efímeros ante compilaciones en Xcode) hacia `UserDefaults` nativo en macOS. El core de Rust ahora maneja los tokens en memoria (vía `LazyLock<Mutex>`) y se sincroniza dinámicamente con Swift usando `load_mcp_tokens_from_json` y `export_mcp_tokens_to_json` a través de FFI, garantizando que no se pierdan al recompilar.
+    - **Highlights en Vista**: Se inyectó `mark.js` usando escapado de interpolaciones dinámicas para resaltar el texto buscado directamente dentro del WebKit WebView.
   - **RBAC en Daemon (Rust)**: Implementadas banderas modulares (`--read-only`, `--allow-metadata`, `--allow-system`) en el proxy CLI para validar el acceso al filesystem antes de enviar JSON-RPC a la App.
   - **Filtros DuckDB (Core)**: La app principal intercepta parámetros inyectados por el Daemon (`exclude_metadata`, `exclude_system`) para añadir cláusulas dinámicas (`NOT LIKE '%/_%'`) y evitar fuga de información en `vault_search`.
   - **Panel de Telemetría**: Añadida vista `TelemetryView` en SwiftUI con estilo terminal hacker, que hace polling a un buffer seguro (`Mutex<Vec<String>>`) mantenido por Rust.

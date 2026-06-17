@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var dbStatus: String = "DB No inicializada"
     @State private var isHydrating: Bool = false
     @State private var isDBReady: Bool = false
+    @State private var showMCPConfig: Bool = false
     
     // Patrones del "Anillo de Inteligencia" y "Flujo" a ignorar por defecto
     private let defaultIgnorePatterns = [
@@ -53,8 +54,61 @@ struct ContentView: View {
             .frame(width: 550)
         } else {
             // El Editor principal ocupa todo el espacio disponible
-            MainEditorView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZStack {
+                ZStack(alignment: .bottomLeading) {
+                    MainEditorView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    
+                    Button(action: { 
+                        withAnimation { showMCPConfig = true } 
+                    }) {
+                        Image(systemName: "network.badge.shield.half.filled")
+                            .font(.title2)
+                            .padding(12)
+                            .background(Color.accentColor.opacity(0.8))
+                            .foregroundColor(.white)
+                            .clipShape(Circle())
+                            .shadow(radius: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(20)
+                }
+                
+                if showMCPConfig {
+                    ZStack {
+                        Color.black.opacity(0.8)
+                            .ignoresSafeArea()
+                        
+                        VStack(spacing: 0) {
+                            HStack {
+                                Spacer()
+                                Button(action: {
+                                    withAnimation { showMCPConfig = false }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 28))
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .padding()
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            
+                            MCPAccessView()
+                                .environmentObject(workspaceManager)
+                                .padding()
+                                .frame(width: 800, height: 650)
+                                .background(Color(NSColor.windowBackgroundColor))
+                                .cornerRadius(16)
+                                .shadow(color: .black.opacity(0.5), radius: 30, x: 0, y: 10)
+                            
+                            Spacer()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .zIndex(100)
+                    .transition(.opacity)
+                }
+            }
         }
     }
 }
