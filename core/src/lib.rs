@@ -865,6 +865,11 @@ pub fn mcp_handle_request(json_request: String) -> String {
             let tools = json!({
                 "tools": [
                     {
+                        "name": "vault_list_workspaces",
+                        "description": "Lista todos los directorios o workspaces a los que tienes acceso.",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
                         "name": "vault_search",
                         "description": "Busca notas en todo el Vault. Usa texto o palabras clave.",
                         "inputSchema": {
@@ -920,9 +925,50 @@ pub fn mcp_handle_request(json_request: String) -> String {
             let default_args = json!({});
             let arguments = params.get("arguments").unwrap_or(&default_args);
 
+            let mcp_client_token = req.get("mcp_client_token").and_then(|t| t.as_str()).unwrap_or("");
+            let token_record = {
+                if let Ok(guard) = MCP_TOKENS.lock() {
+                    guard.iter().find(|t| t.token_id == mcp_client_token).cloned()
+                } else {
+                    None
+                }
+            };
+
+            let is_path_allowed = |p: &str, record: &Option<McpTokenRecord>| -> bool {
+                if let Some(r) = record {
+                    let mut allowed = false;
+                    for w in &r.workspaces {
+                        if p.starts_with(w) { allowed = true; break; }
+                    }
+                    if r.allow_system {
+                        let home = std::env::var("HOME").unwrap_or("/".to_string());
+                        let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
+                        if p.starts_with(sys_dir.to_str().unwrap_or("")) { allowed = true; }
+                    }
+                    allowed
+                } else {
+                    false
+                }
+            };
+
+            let can_write = token_record.as_ref().map(|r| r.can_write).unwrap_or(false);
+
             crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
 
             let result_content = match name {
+                "vault_list_workspaces" => {
+                    if let Some(r) = &token_record {
+                        let mut resp = format!("Workspaces permitidos:\n{}", r.workspaces.join("\n"));
+                        if r.allow_system {
+                            let home = std::env::var("HOME").unwrap_or("/".to_string());
+                            let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
+                            resp.push_str(&format!("\n{}", sys_dir.to_string_lossy()));
+                        }
+                        resp
+                    } else {
+                        "Token no válido o sin acceso a workspaces.".to_string()
+                    }
+                },
                 "vault_search" => {
                     let query = arguments.get("query").and_then(|q| q.as_str()).unwrap_or("");
                     let exclude_metadata = arguments.get("exclude_metadata").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -938,7 +984,8 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         ignore_patterns.push("agentes.md".to_string());
                     }
 
-                    let results = crate::query_notes(Some(query.to_string()), None, ignore_patterns);
+                    let mut results = crate::query_notes(Some(query.to_string()), None, ignore_patterns);
+                    results.retain(|r| is_path_allowed(&r.path, &token_record));
                     if results.is_empty() {
                         "No se encontraron resultados.".to_string()
                     } else {
@@ -947,22 +994,38 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 },
                 "vault_read" => {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => content,
-                        Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                    if !is_path_allowed(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
+                    } else {
+                        match std::fs::read_to_string(path) {
+                            Ok(content) => content,
+                            Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                        }
                     }
                 },
                 "vault_write" => {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
                     let content = arguments.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    crate::save_note(path.to_string(), content.to_string())
+                    if !can_write {
+                        "Error de Seguridad: El token actual no tiene permisos de escritura (can_write=false).".to_string()
+                    } else if !is_path_allowed(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
+                    } else {
+                        crate::save_note(path.to_string(), content.to_string())
+                    }
                 },
                 "vault_create_folder" => {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                    if crate::create_item(path.to_string(), true) {
-                        format!("Carpeta creada en: {}", path)
+                    if !can_write {
+                        "Error de Seguridad: El token actual no tiene permisos de escritura (can_write=false).".to_string()
+                    } else if !is_path_allowed(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
                     } else {
-                        format!("Error al crear la carpeta en: {}", path)
+                        if crate::create_item(path.to_string(), true) {
+                            format!("Carpeta creada en: {}", path)
+                        } else {
+                            format!("Error al crear la carpeta en: {}", path)
+                        }
                     }
                 },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
