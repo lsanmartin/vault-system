@@ -305,8 +305,9 @@ struct VaultTreeView: View {
     }
     
     var rootItems: [NoteRecord] {
-        let folders = viewModel.allFolders.filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == rootPath }
-        let notes = showNotes ? viewModel.allNotes.filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == rootPath } : []
+        let allRoot = viewModel.childrenByParent[rootPath] ?? []
+        let folders = allRoot.filter { $0.isDir }
+        let notes = showNotes ? allRoot.filter { !$0.isDir } : []
         return (folders + notes).sorted { $0.title.lowercased() < $1.title.lowercased() }
     }
     
@@ -339,8 +340,9 @@ struct VaultTreeRow: View {
     
     var children: [NoteRecord] {
         guard item.isDir else { return [] }
-        let subfolders = viewModel.allFolders.filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == item.path }
-        let subnotes = showNotes ? viewModel.allNotes.filter { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == item.path } : []
+        let allChildren = viewModel.childrenByParent[item.path] ?? []
+        let subfolders = allChildren.filter { $0.isDir }
+        let subnotes = showNotes ? allChildren.filter { !$0.isDir } : []
         return (subfolders + subnotes).sorted { $0.title.lowercased() < $1.title.lowercased() }
     }
     

@@ -71,7 +71,7 @@ enum TreeMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
-fileprivate func fastParentPath(for path: String) -> String {
+func fastParentPath(for path: String) -> String {
     let normalized = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
     guard let lastSlash = normalized.lastIndex(of: "/") else { return "" }
     if lastSlash == normalized.startIndex { return "/" }
@@ -89,6 +89,7 @@ class EditorViewModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var selectedItemIds: Set<String> = []
     @Published var expandedPaths: Set<String> = []
+    @Published var childrenByParent: [String: [NoteRecord]] = [:]
     @Published var deletedPathsThisSession: Set<String> = []
     private var lastSelectedId: String? = nil
     
@@ -233,7 +234,17 @@ class EditorViewModel: ObservableObject {
             }
         }
         
+        rebuildChildrenByParent()
         updateGridForCurrentPath()
+    }
+    
+    private func rebuildChildrenByParent() {
+        var map: [String: [NoteRecord]] = [:]
+        for item in allFolders + allNotes {
+            let parent = fastParentPath(for: item.path)
+            map[parent, default: []].append(item)
+        }
+        self.childrenByParent = map
     }
     
     func updateGridForCurrentPath() {
@@ -336,17 +347,9 @@ class EditorViewModel: ObservableObject {
             return folders + notes
         }
         
-        // En modo lista o táctico (sidebar), el orden lo dicta el árbol
-        let allItems = allFolders + allNotes
-        var childrenByParent: [String: [NoteRecord]] = [:]
-        for item in allItems {
-            let parent = fastParentPath(for: item.path)
-            childrenByParent[parent, default: []].append(item)
-        }
-        
         if let rootId = selectedLocationId, 
            let root = currentLocations?.first(where: { $0.id == rootId }) {
-            appendChildrenFast(of: root.path, childrenByParent: childrenByParent, to: &flattened)
+            appendChildrenFast(of: root.path, childrenByParent: self.childrenByParent, to: &flattened)
         }
         
         return flattened
