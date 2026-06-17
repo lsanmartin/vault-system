@@ -27,20 +27,27 @@ struct NoteCard: View {
                     .foregroundColor(viewModel.macControlIcon)
                     .font(.system(size: 12))
                 Spacer()
-                Circle().fill(viewModel.macAccent).frame(width: 4, height: 4)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(note.title, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .foregroundColor(viewModel.macControlIcon.opacity(0.8))
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .help("Copiar título")
             }
             Text(note.title)
                 .font(.headline)
                 .lineLimit(2)
                 .foregroundColor(viewModel.macPrimaryText)
-                .textSelection(.enabled)
             
             Spacer(minLength: 4)
             Text(displayPath)
                 .font(.system(size: 9, design: .monospaced))
                 .lineLimit(1)
                 .foregroundColor(viewModel.macSecondaryText)
-                .textSelection(.enabled)
         }
         .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor)) 
@@ -614,9 +621,9 @@ struct FileRowView: View {
                 .font(.system(size: 14))
             
             VStack(alignment: .leading) {
-                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText).textSelection(.enabled)
+                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText)
                 if !viewModel.searchText.isEmpty { 
-                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText).textSelection(.enabled)
+                    Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText)
                 }
             }
             if item.isDir { Spacer(); Image(systemName: "chevron.right").font(.system(size: 10)).opacity(0.3) }
