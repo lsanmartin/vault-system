@@ -936,14 +936,24 @@ pub fn mcp_handle_request(json_request: String) -> String {
 
             let is_path_allowed = |p: &str, record: &Option<McpTokenRecord>| -> bool {
                 if let Some(r) = record {
+                    let mut cleaned = std::path::PathBuf::new();
+                    for component in std::path::Path::new(p).components() {
+                        match component {
+                            std::path::Component::ParentDir => { cleaned.pop(); },
+                            std::path::Component::CurDir => {},
+                            _ => cleaned.push(component),
+                        }
+                    }
+                    let cleaned_str = cleaned.to_string_lossy().to_string();
+                    
                     let mut allowed = false;
                     for w in &r.workspaces {
-                        if p.starts_with(w) { allowed = true; break; }
+                        if cleaned_str.starts_with(w) { allowed = true; break; }
                     }
                     if r.allow_system {
                         let home = std::env::var("HOME").unwrap_or("/".to_string());
                         let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
-                        if p.starts_with(sys_dir.to_str().unwrap_or("")) { allowed = true; }
+                        if cleaned_str.starts_with(sys_dir.to_str().unwrap_or("")) { allowed = true; }
                     }
                     allowed
                 } else {
