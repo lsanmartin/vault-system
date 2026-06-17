@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-15 22:15]
+Última actualización: [2026-06-16 22:55]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas (`DragGesture`), y navegación jerárquica (`VaultTreeView`).
@@ -19,6 +19,11 @@
     - **Fix UI Buscador**: Corregido bug crítico en la renderización de Swift (`updateGridForCurrentPath`) que causaba la mezcla de notas previas con los resultados de búsqueda de DuckDB. La grilla ahora muestra limpia y exclusivamente los archivos que hicieron `match`.
     - **Persistencia MCP (Fix Sandbox)**: Migrada exitosamente la persistencia de `mcp_tokens` desde archivos en el Sandbox (efímeros ante compilaciones en Xcode) hacia `UserDefaults` nativo en macOS. El core de Rust ahora maneja los tokens en memoria (vía `LazyLock<Mutex>`) y se sincroniza dinámicamente con Swift usando `load_mcp_tokens_from_json` y `export_mcp_tokens_to_json` a través de FFI, garantizando que no se pierdan al recompilar.
     - **Highlights en Vista**: Se inyectó `mark.js` usando escapado de interpolaciones dinámicas para resaltar el texto buscado directamente dentro del WebKit WebView.
+  - **[2026-06-16 22:50] Hardening y Seguridad Estricta MCP**:
+    - **Aislamiento de Workspaces**: `vault_read`, `vault_write` y `vault_create_folder` ahora cruzan estrictamente sus rutas contra la lista de workspaces autorizados por el `mcp_client_token` inyectado por el demonio. Las búsquedas en `vault_search` se filtran mediante `.retain()`.
+    - **Prevención de Path Traversal (`../`)**: Implementada una limpieza lógica robusta con `.components()` para resolver directorios padre y evaluar la ruta final antes de hacer el cruce de prefijos.
+    - **Neutralización de Enlaces Simbólicos**: Se aplica `std::fs::canonicalize` en tiempo real (al archivo y al directorio padre en caso de escritura) para garantizar que la ruta absoluta resuelta por el OS no escape del workspace.
+    - **Protección DoS**: `vault_read` ahora usa `meta.is_file()` para bloquear operaciones en dispositivos especiales (como FIFOs / Named Pipes) evitando cuelgues infinitos, y establece un límite estricto de 5 MB para evitar que el JSON-RPC devore la memoria (OOM).
   - **RBAC en Daemon (Rust)**: Implementadas banderas modulares (`--read-only`, `--allow-metadata`, `--allow-system`) en el proxy CLI para validar el acceso al filesystem antes de enviar JSON-RPC a la App.
   - **Filtros DuckDB (Core)**: La app principal intercepta parámetros inyectados por el Daemon (`exclude_metadata`, `exclude_system`) para añadir cláusulas dinámicas (`NOT LIKE '%/_%'`) y evitar fuga de información en `vault_search`.
   - **Panel de Telemetría**: Añadida vista `TelemetryView` en SwiftUI con estilo terminal hacker, que hace polling a un buffer seguro (`Mutex<Vec<String>>`) mantenido por Rust.
