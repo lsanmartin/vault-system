@@ -1026,7 +1026,9 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         if !is_path_allowed(&canon_path.to_string_lossy(), &token_record) {
                             "Error de Seguridad: Acceso denegado. El enlace simbólico apunta fuera del workspace.".to_string()
                         } else if let Ok(meta) = std::fs::metadata(&canon_path) {
-                            if meta.len() > 5 * 1024 * 1024 {
+                            if !meta.is_file() {
+                                "Error de Seguridad: Solo se permiten archivos regulares (no FIFOs, directorios ni dispositivos especiales).".to_string()
+                            } else if meta.len() > 5 * 1024 * 1024 {
                                 "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
                             } else {
                                 match std::fs::read_to_string(&canon_path) {
@@ -1039,11 +1041,19 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     } else if !is_path_allowed(path, &token_record) {
                         "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
-                    } else {
-                        match std::fs::read_to_string(path) {
-                            Ok(content) => content,
-                            Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                    } else if let Ok(meta) = std::fs::metadata(path) {
+                        if !meta.is_file() {
+                            "Error de Seguridad: Solo se permiten archivos regulares (no FIFOs, directorios ni dispositivos especiales).".to_string()
+                        } else if meta.len() > 5 * 1024 * 1024 {
+                            "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
+                        } else {
+                            match std::fs::read_to_string(path) {
+                                Ok(content) => content,
+                                Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                            }
                         }
+                    } else {
+                        "Error al leer metadatos del archivo.".to_string()
                     }
                 },
                 "vault_write" => {
