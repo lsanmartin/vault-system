@@ -961,6 +961,24 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 }
             };
 
+            let is_path_safe_for_write = |p: &str, record: &Option<McpTokenRecord>| -> bool {
+                let path_obj = std::path::Path::new(p);
+                let canon = if path_obj.exists() {
+                    std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
+                } else if let Some(parent) = path_obj.parent() {
+                    if parent.exists() {
+                        let mut cp = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                        if let Some(name) = path_obj.file_name() { cp.push(name); }
+                        cp
+                    } else {
+                        path_obj.to_path_buf()
+                    }
+                } else {
+                    path_obj.to_path_buf()
+                };
+                is_path_allowed(&canon.to_string_lossy(), record)
+            };
+
             let can_write = token_record.as_ref().map(|r| r.can_write).unwrap_or(false);
 
             crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
@@ -1004,7 +1022,22 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 },
                 "vault_read" => {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                    if !is_path_allowed(path, &token_record) {
+                    if let Ok(canon_path) = std::fs::canonicalize(path) {
+                        if !is_path_allowed(&canon_path.to_string_lossy(), &token_record) {
+                            "Error de Seguridad: Acceso denegado. El enlace simbólico apunta fuera del workspace.".to_string()
+                        } else if let Ok(meta) = std::fs::metadata(&canon_path) {
+                            if meta.len() > 5 * 1024 * 1024 {
+                                "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
+                            } else {
+                                match std::fs::read_to_string(&canon_path) {
+                                    Ok(content) => content,
+                                    Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                                }
+                            }
+                        } else {
+                            "Error al leer metadatos del archivo.".to_string()
+                        }
+                    } else if !is_path_allowed(path, &token_record) {
                         "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
                     } else {
                         match std::fs::read_to_string(path) {
@@ -1018,8 +1051,8 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     let content = arguments.get("content").and_then(|c| c.as_str()).unwrap_or("");
                     if !can_write {
                         "Error de Seguridad: El token actual no tiene permisos de escritura (can_write=false).".to_string()
-                    } else if !is_path_allowed(path, &token_record) {
-                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
+                    } else if !is_path_safe_for_write(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio (o enlace simbólico) no pertenece a un workspace permitido.".to_string()
                     } else {
                         crate::save_note(path.to_string(), content.to_string())
                     }
@@ -1028,8 +1061,8 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
                     if !can_write {
                         "Error de Seguridad: El token actual no tiene permisos de escritura (can_write=false).".to_string()
-                    } else if !is_path_allowed(path, &token_record) {
-                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
+                    } else if !is_path_safe_for_write(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio (o enlace simbólico) no pertenece a un workspace permitido.".to_string()
                     } else {
                         if crate::create_item(path.to_string(), true) {
                             format!("Carpeta creada en: {}", path)
