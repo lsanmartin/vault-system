@@ -130,6 +130,7 @@ struct SidebarColumn: View {
 struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @Binding var isNoteHidden: Bool
     @FocusState private var isSearchFocused: Bool
     
     var body: some View {
@@ -229,6 +230,13 @@ struct MainContentColumn: View {
                     Image(systemName: "list.bullet").tag(LayoutMode.list)
                     Image(systemName: "square.grid.2x2").tag(LayoutMode.tactical)
                 }.pickerStyle(.segmented).frame(width: 80)
+                
+                Button(action: { withAnimation { isNoteHidden.toggle() } }) {
+                    Image(systemName: isNoteHidden ? "uiwindow.split.2x1" : "macwindow")
+                        .foregroundColor(viewModel.macControlIcon)
+                }
+                .buttonStyle(.borderless)
+                .help("Modo Explorador (Ocultar Nota)")
             }
             HStack {
                 ZStack(alignment: .trailing) {
@@ -424,7 +432,6 @@ struct VaultTreeRow: View {
 struct DetailColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
-    @Binding var isZenMode: Bool
     
     var body: some View {
         if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
@@ -452,14 +459,12 @@ struct DetailColumn: View {
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: {
-                        withAnimation {
-                            isZenMode.toggle()
-                        }
+                        NSApp.keyWindow?.firstResponder?.tryToPerform(#selector(NSSplitViewController.toggleSidebar(_:)), with: nil)
                     }) { 
-                        Label("Modo Zen", systemImage: isZenMode ? "sidebar.squares.left" : "rectangle.expand.vertical")
+                        Label("Modo Zen", systemImage: "sidebar.squares.left")
                     }
                     .keyboardShortcut("f", modifiers: [.command, .shift])
-                    .help("Modo Zen (Cmd+Shift+F)")
+                    .help("Ocultar paneles (Cmd+Shift+F)")
 
                     Button(action: {
                         NSApp.keyWindow?.toggleFullScreen(nil)
@@ -487,20 +492,39 @@ struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var showTelemetry = false
-    @State private var isZenMode = false
+    @State private var isNoteHidden = false
     
     var body: some View {
         ZStack(alignment: .bottom) {
             NavigationSplitView {
-                if !isZenMode {
+                HSplitView {
                     SidebarColumn(viewModel: viewModel)
-                }
-            } content: {
-                if !isZenMode {
-                    MainContentColumn(viewModel: viewModel)
+                        .frame(minWidth: 150, idealWidth: 200, maxWidth: 350)
+                    
+                    MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
+                        .frame(minWidth: 250, idealWidth: 350, maxWidth: .infinity)
                 }
             } detail: {
-                DetailColumn(viewModel: viewModel, isZenMode: $isZenMode)
+                if !isNoteHidden {
+                    DetailColumn(viewModel: viewModel)
+                } else {
+                    ZStack {
+                        viewModel.macBackground.ignoresSafeArea()
+                        VStack(spacing: 16) {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("Modo Explorador")
+                                .font(.title2)
+                                .foregroundColor(.secondary)
+                            Button("Abrir Nota") { 
+                                withAnimation { isNoteHidden = false }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        }
+                    }
+                }
             }
             
             // Botón flotante para abrir telemetría
