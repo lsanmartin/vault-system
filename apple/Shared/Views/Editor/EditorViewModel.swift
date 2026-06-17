@@ -71,6 +71,13 @@ enum TreeMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+fileprivate func fastParentPath(for path: String) -> String {
+    let normalized = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+    guard let lastSlash = normalized.lastIndex(of: "/") else { return "" }
+    if lastSlash == normalized.startIndex { return "/" }
+    return String(normalized[..<lastSlash])
+}
+
 class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String?
@@ -207,8 +214,8 @@ class EditorViewModel: ObservableObject {
                 var current = item.path
                 while current.count > 1 {
                     validPaths.insert(current)
-                    let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
-                    if parent == current { break }
+                    let parent = fastParentPath(for: current)
+                    if parent == current || parent.isEmpty { break }
                     current = parent
                 }
             }
@@ -235,24 +242,14 @@ class EditorViewModel: ObservableObject {
         
         let normalizedCurrentPath = currentPath.hasSuffix("/") && currentPath.count > 1 ? String(currentPath.dropLast()) : currentPath
         
-        // Evitamos procesar duplicados en caso de búsqueda
-        var uniqueItems = [String: NoteRecord]()
-        for item in allItems {
-            uniqueItems[item.path] = item
-        }
+        var results: [NoteRecord] = []
         
-        var results = uniqueItems.values.filter { item in
-            let itemURL = URL(fileURLWithPath: item.path)
-            var parentPath = itemURL.deletingLastPathComponent().path
-            if parentPath.hasSuffix("/") && parentPath.count > 1 {
-                parentPath = String(parentPath.dropLast())
-            }
-            
-            // Si hay búsqueda, mostramos todo lo que coincida de allItems (es decir, lo que arrojó DuckDB)
-            if !searchText.isEmpty { return true }
-            
-            // Si no hay búsqueda, solo lo que cuelga directamente de currentPath
-            return parentPath == normalizedCurrentPath
+        if !searchText.isEmpty {
+            var uniqueItems = [String: NoteRecord]()
+            for item in allItems { uniqueItems[item.path] = item }
+            results = Array(uniqueItems.values)
+        } else {
+            results = allItems.filter { fastParentPath(for: $0.path) == normalizedCurrentPath }
         }
         
         // Aplicar ordenamiento
@@ -340,23 +337,31 @@ class EditorViewModel: ObservableObject {
         }
         
         // En modo lista o táctico (sidebar), el orden lo dicta el árbol
+        let allItems = allFolders + allNotes
+        var childrenByParent: [String: [NoteRecord]] = [:]
+        for item in allItems {
+            let parent = fastParentPath(for: item.path)
+            childrenByParent[parent, default: []].append(item)
+        }
+        
         if let rootId = selectedLocationId, 
            let root = currentLocations?.first(where: { $0.id == rootId }) {
-            appendChildren(of: root.path, to: &flattened)
+            appendChildrenFast(of: root.path, childrenByParent: childrenByParent, to: &flattened)
         }
         
         return flattened
     }
     
-    private func appendChildren(of path: String, to list: inout [NoteRecord]) {
-        let children = (allFolders + allNotes).filter { 
-            URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == path 
-        }.sorted { $0.title.lowercased() < $1.title.lowercased() }
+    private func appendChildrenFast(of path: String, childrenByParent: [String: [NoteRecord]], to list: inout [NoteRecord]) {
+        let normalizedPath = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+        guard let children = childrenByParent[normalizedPath] else { return }
         
-        for child in children {
+        let sortedChildren = children.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        
+        for child in sortedChildren {
             list.append(child)
             if child.isDir && expandedPaths.contains(child.path) {
-                appendChildren(of: child.path, to: &list)
+                appendChildrenFast(of: child.path, childrenByParent: childrenByParent, to: &list)
             }
         }
     }
