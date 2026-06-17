@@ -131,6 +131,7 @@ struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @FocusState private var isSearchFocused: Bool
+    @Binding var isNoteHidden: Bool
     
     var body: some View {
         VStack(spacing: 0) {
@@ -147,6 +148,9 @@ struct MainContentColumn: View {
                         ForEach(viewModel.notes, id: \.path) { note in
                             FileRowView(item: note, viewModel: viewModel, locations: workspaceManager.allLocations)
                                 .padding(.horizontal, 8)
+                                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    if isNoteHidden { withAnimation { isNoteHidden = false } }
+                                })
                                 .onTapGesture {
                                     isSearchFocused = false
                                     NSApp.keyWindow?.makeFirstResponder(nil)
@@ -176,6 +180,9 @@ struct MainContentColumn: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
                         ForEach(viewModel.notes, id: \.path) { note in
                             NoteCard(note: note, isSelected: viewModel.selectedItemIds.contains(note.path), selectedTheme: viewModel.selectedTheme, workspacePath: workspaceManager.allLocations.first?.path, locations: workspaceManager.allLocations, viewModel: viewModel)
+                                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    if isNoteHidden { withAnimation { isNoteHidden = false } }
+                                })
                         }
                     }
                     .padding()
@@ -502,7 +509,7 @@ struct MainEditorView: View {
                             SidebarColumn(viewModel: viewModel)
                                 .frame(minWidth: 200, idealWidth: 400, maxWidth: 600)
                             
-                            MainContentColumn(viewModel: viewModel)
+                            MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
                                 .frame(minWidth: 200, idealWidth: 240, maxWidth: .infinity)
                         }
                     }
