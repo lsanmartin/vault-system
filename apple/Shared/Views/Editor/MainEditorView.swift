@@ -40,7 +40,9 @@ struct NoteCard: View {
             }
             Text(note.title)
                 .font(.headline)
-                .lineLimit(2)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundColor(viewModel.macPrimaryText)
             
             Spacer(minLength: 4)
@@ -49,7 +51,7 @@ struct NoteCard: View {
                 .lineLimit(1)
                 .foregroundColor(viewModel.macSecondaryText)
         }
-        .padding(12).frame(height: 110).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12).frame(minHeight: 110).frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor)) 
         .cornerRadius(12)
         .overlay(
