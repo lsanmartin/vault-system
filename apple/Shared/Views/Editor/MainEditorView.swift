@@ -424,6 +424,7 @@ struct VaultTreeRow: View {
 struct DetailColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @Binding var columnVisibility: NavigationSplitViewVisibility
     
     var body: some View {
         if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
@@ -450,6 +451,28 @@ struct DetailColumn: View {
             }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button(action: {
+                        withAnimation {
+                            if columnVisibility == .detailOnly {
+                                columnVisibility = .all
+                            } else {
+                                columnVisibility = .detailOnly
+                            }
+                        }
+                    }) { 
+                        Label("Modo Zen", systemImage: columnVisibility == .detailOnly ? "sidebar.squares.left" : "rectangle.expand.vertical")
+                    }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                    .help("Modo Zen (Cmd+Shift+F)")
+
+                    Button(action: {
+                        NSApp.keyWindow?.toggleFullScreen(nil)
+                    }) {
+                        Label("Pantalla Completa", systemImage: "arrow.up.backward.and.arrow.down.forward")
+                    }
+                    .keyboardShortcut("f", modifiers: [.control, .command])
+                    .help("Pantalla Completa Nativa (Ctrl+Cmd+F)")
+                    
                     Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
                     Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
                 }
@@ -468,15 +491,16 @@ struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @State private var showTelemetry = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
                 SidebarColumn(viewModel: viewModel)
             } content: {
                 MainContentColumn(viewModel: viewModel)
             } detail: {
-                DetailColumn(viewModel: viewModel)
+                DetailColumn(viewModel: viewModel, columnVisibility: $columnVisibility)
             }
             
             // Botón flotante para abrir telemetría
