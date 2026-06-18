@@ -4,14 +4,14 @@
 <dict>
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>
-		<string>iCloud.com.apple.vault</string>
+		<string>iCloud.cl.nicelio.vault</string>
 	</array>
 	<key>com.apple.developer.icloud-services</key>
 	<array>
 		<string>CloudDocuments</string>
 	</array>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
-	<string>$(TeamIdentifierPrefix)com.apple.vault</string>
+	<string>$(TeamIdentifierPrefix)cl.nicelio.vault</string>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
 	<key>com.apple.security.files.user-selected.read-write</key>
@@ -20,7 +20,5 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-        <key>com.apple.security.get-task-allow</key>
-        <true/>
 </dict>
 </plist>

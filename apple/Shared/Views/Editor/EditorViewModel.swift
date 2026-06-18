@@ -69,6 +69,7 @@ enum LayoutMode: String, CaseIterable, Identifiable {
 enum TreeMode: String, CaseIterable, Identifiable {
     case hierarchy = "Carpetas"
     case semantic = "Palacio Mental"
+    case heatmap  = "Actividad"
     var id: String { self.rawValue }
 }
 
@@ -162,10 +163,12 @@ class EditorViewModel: ObservableObject {
     }
     
     func launchWatcher(paths: [String], ignorePatterns: [String]) {
-        for path in paths {
-            _ = scanVault(path: path, ignorePatterns: ignorePatterns)
+        DispatchQueue.global(qos: .userInitiated).async {
+            for path in paths {
+                _ = scanVault(path: path, ignorePatterns: ignorePatterns)
+            }
+            _ = startWatcher(paths: paths, ignorePatterns: ignorePatterns)
         }
-        _ = startWatcher(paths: paths, ignorePatterns: ignorePatterns)
     }
 
     private func startPolling() {
@@ -404,7 +407,8 @@ class EditorViewModel: ObservableObject {
     
     func syncAll(locations: [VaultLocation]) {
         self.currentLocations = locations
-        for location in locations { _ = scanVault(path: location.path, ignorePatterns: []) }
+        // El scan sincrónico ha sido removido de syncAll para evitar colgar la UI.
+        // refreshNotes lee desde DuckDB instantáneamente sin bloquear.
         refreshNotes(locations: locations)
     }
     

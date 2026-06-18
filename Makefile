@@ -10,7 +10,14 @@ export LIBCLANG_PATH = /Applications/Xcode.app/Contents/Developer/Toolchains/Xco
 
 XCFRAMEWORK_DIR = target/apple_core.xcframework
 
-.PHONY: all clean build-x86_64 build-aarch64 build-universal
+# --- App Config ---
+APP_NAME = VaultSystem
+XCODE_PROJECT = apple/VaultSystem.xcodeproj
+XCODE_SCHEME = VaultSystem
+ARCHIVE_PATH = apple/build/$(APP_NAME).xcarchive
+APP_BUNDLE = $(ARCHIVE_PATH)/Products/Applications/$(APP_NAME).app
+
+.PHONY: all clean build-x86_64 build-aarch64 build-universal xcode-build deploy release
 
 all: build-universal
 
@@ -41,3 +48,37 @@ build-universal: build-aarch64
 clean:
 	cargo clean
 	rm -rf target/
+	rm -rf $(ARCHIVE_PATH)
+
+xcode-build:
+	@echo "--- Archivando $(APP_NAME) (Release) ---"
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme $(XCODE_SCHEME) \
+		-configuration Release \
+		-archivePath $(ARCHIVE_PATH) \
+		-arch arm64 \
+		archive \
+		ONLY_ACTIVE_ARCH=YES \
+		CODE_SIGN_IDENTITY="-" \
+		CODE_SIGNING_ALLOWED=YES \
+		CODE_SIGNING_REQUIRED=NO
+	@echo "--- Archive generado en $(ARCHIVE_PATH) ---"
+
+deploy: xcode-build
+	@echo "--- Desplegando a /Applications ---"
+	@mkdir -p ~/.vault_system
+	@if [ -d "/Applications/$(APP_NAME).app" ]; then \
+		echo "Eliminando versión anterior..."; \
+		rm -rf "/Applications/$(APP_NAME).app"; \
+	fi
+	cp -R "$(APP_BUNDLE)" /Applications/
+	@echo "✅ $(APP_NAME) v0.1.0 instalado en /Applications/"
+	@echo "   Ejecutar con: open /Applications/$(APP_NAME).app"
+
+release: build-universal xcode-build deploy
+	@echo "=== Release Pipeline Completo ==="
+	@echo "  ✅ Rust Core compilado"
+	@echo "  ✅ XCFramework empaquetado"
+	@echo "  ✅ App archivada y desplegada"
+	@echo "  → /Applications/$(APP_NAME).app"
+

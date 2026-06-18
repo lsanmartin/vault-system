@@ -1,6 +1,6 @@
 name: VaultSystem
 options:
-  bundleIdPrefix: com.apple.vault
+  bundleIdPrefix: cl.nicelio.vault
 targets:
   VaultSystem:
     type: application
@@ -12,7 +12,9 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.apple.vault.VaultSystem
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        PRODUCT_BUNDLE_IDENTIFIER: cl.nicelio.vault.VaultSystem
         SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/../core/bindings/vault_coreFFI.h"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/../target"
         LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=x86_64]: "$(inherited) $(PROJECT_DIR)/../target /usr/local/opt/duckdb/lib"
@@ -34,7 +36,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.apple.vault.VaultSystem-iOS
+        PRODUCT_BUNDLE_IDENTIFIER: cl.nicelio.vault.VaultSystem-iOS
         SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/../core/bindings/vault_coreFFI.h"
         OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lc++"
     dependencies:

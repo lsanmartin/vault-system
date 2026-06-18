@@ -98,16 +98,56 @@ struct SidebarColumn: View {
     
     var body: some View {
         List(selection: $viewModel.selectedLocationId) {
-            Section("Workspaces") {
+            Section(header: HStack {
+                Text("Workspaces")
+                Spacer()
+                Button(action: { workspaceManager.triggerScanAll() }) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Re-indexar todos los workspaces")
+            }) {
                 if let sysLoc = workspaceManager.systemLocation {
                     NavigationLink(value: sysLoc.id) {
                         Label(sysLoc.name, systemImage: "gearshape.fill")
                             .foregroundColor(.orange)
                     }
+                    .simultaneousGesture(TapGesture().onEnded {
+                        viewModel.navigateTo(path: sysLoc.path)
+                    })
                 }
                 ForEach(workspaceManager.locations) { location in
-                    NavigationLink(value: location.id) {
-                        Label(location.name, systemImage: "folder.fill")
+                    HStack {
+                        NavigationLink(value: location.id) {
+                            HStack {
+                                Label(location.name, systemImage: "folder.fill")
+                                Spacer()
+                                if let progress = workspaceManager.scanProgress[location.path] {
+                                    Text("\(Int(progress))%")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    ProgressView(value: progress, total: 100.0)
+                                        .progressViewStyle(.circular)
+                                        .controlSize(.small)
+                                        .scaleEffect(0.6)
+                                        .frame(width: 12, height: 12)
+                                }
+                            }
+                        }
+                        .simultaneousGesture(TapGesture().onEnded {
+                            viewModel.navigateTo(path: location.path)
+                        })
+                        
+                        Button(action: { workspaceManager.triggerScan(for: location.path) }) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 4)
+                        .help("Re-indexar este workspace")
                     }
                 }
             }
@@ -122,11 +162,14 @@ struct SidebarColumn: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 } label: { Label("Modo", systemImage: "magnifyingglass") }
-                
-                if viewModel.treeMode == .hierarchy {
+
+                switch viewModel.treeMode {
+                case .hierarchy:
                     VaultTreeView(viewModel: viewModel, locations: workspaceManager.allLocations, showNotes: false)
-                } else {
+                case .semantic:
                     SemanticTreeView(viewModel: viewModel)
+                case .heatmap:
+                    HeatmapView(viewModel: viewModel)
                 }
             }
         }
@@ -359,7 +402,7 @@ struct VaultTreeRow: View {
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .foregroundColor(viewModel.macSecondaryText)
                         .frame(width: 12)
-                        .onTapGesture { withAnimation { viewModel.toggleExpansion(path: item.path) } }
+                        .onTapGesture { viewModel.toggleExpansion(path: item.path) }
                 } else {
                     Spacer().frame(width: 12)
                 }
@@ -385,11 +428,10 @@ struct VaultTreeRow: View {
                 .onTapGesture {
                     let extend = NSEvent.modifierFlags.contains(.shift)
                     let toggle = NSEvent.modifierFlags.contains(.command)
-                    
                     if item.isDir {
                         if !extend && !toggle {
                             viewModel.navigateTo(path: item.path)
-                            withAnimation { viewModel.toggleExpansion(path: item.path) } 
+                            viewModel.toggleExpansion(path: item.path) 
                         } else {
                             viewModel.selectItem(item, extend: extend, toggle: toggle)
                         }
@@ -463,8 +505,11 @@ struct DetailColumn: View {
                     
                     EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
                     
-                    // FASE 5: Cognitive Radar
-                    CognitiveRadarView(noteId: viewModel.tabs[index].id)
+                    // FASE 5: Cognitive Radar (métricas reales vía Rust/DuckDB)
+                    CognitiveRadarView(
+                        noteId: viewModel.tabs[index].id,
+                        workspacePath: workspaceManager.allLocations.first(where: { $0.id == viewModel.selectedLocationId })?.path ?? ""
+                    )
                         .padding(.horizontal, 16)
                         .padding(.bottom, 12)
                         .padding(.top, 8)
@@ -1062,40 +1107,146 @@ struct EditorAreaView: View {
 // FASE 5: Memory Palace / Árbol Semántico Mejorado
 struct SemanticTreeView: View {
     @ObservedObject var viewModel: EditorViewModel
-    
-    // Mapeo dummy para simular el exocórtex hasta que KMeans esté en Rust
-    var clusters: [(String, [NoteRecord])] {
-        var arq = [NoteRecord]()
-        var ia = [NoteRecord]()
-        var other = [NoteRecord]()
-        
-        for note in viewModel.allNotes {
-            let lower = note.title.lowercased()
-            if lower.contains("arq") || lower.contains("sys") || lower.contains("plan") || lower.contains("rust") || lower.contains("app") {
-                arq.append(note)
-            } else if lower.contains("ia") || lower.contains("brain") || lower.contains("model") || lower.contains("cog") {
-                ia.append(note)
-            } else {
-                other.append(note)
-            }
-        }
-        
-        return [
-            ("🧠 Exocórtex & IA", ia),
-            ("🏗️ Arquitectura de Sistemas", arq),
-            ("🌌 Dark Matter (Sin Clúster)", other)
-        ]
+    @EnvironmentObject var workspaceManager: WorkspaceManager
+
+    @State private var semanticClusters: [(String, [NoteRecord])] = []
+    @State private var isLoading: Bool = false
+    @State private var activeNoteTitle: String = ""
+
+    // Workspace activo seleccionado por el usuario
+    private var currentWorkspace: VaultLocation? {
+        workspaceManager.allLocations.first(where: { $0.id == viewModel.selectedLocationId })
     }
-    
+
+    // Notas del workspace actual únicamente (fix de aislamiento)
+    private var workspaceNotes: [NoteRecord] {
+        guard let wsPath = currentWorkspace?.path else { return [] }
+        return viewModel.allNotes.filter { $0.path.hasPrefix(wsPath) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(clusters, id: \.0) { cluster in
-                if !cluster.1.isEmpty {
-                    SemanticClusterRow(title: cluster.0, notes: cluster.1, viewModel: viewModel)
+            // Header contextual
+            if !activeNoteTitle.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.purple.opacity(0.8))
+                    Text("Vecindad: \(activeNoteTitle)")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
+            }
+
+            if isLoading {
+                HStack(spacing: 8) {
+                    ProgressView().scaleEffect(0.55)
+                    Text("Calculando vecindad semántica…")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            } else if semanticClusters.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Palacio Mental", systemImage: "brain.head.profile")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("Abre una nota del workspace para ver su vecindad semántica real.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            } else {
+                ForEach(semanticClusters, id: \.0) { cluster in
+                    if !cluster.1.isEmpty {
+                        SemanticClusterRow(title: cluster.0, notes: cluster.1, viewModel: viewModel)
+                    }
                 }
             }
         }
         .padding(.horizontal, 8)
+        .onChange(of: viewModel.activeTabId) { _, newId in
+            loadSemanticNeighbors(for: newId)
+        }
+        .onChange(of: viewModel.selectedLocationId) { _, _ in
+            // Al cambiar workspace, resetear y recargar para la nota activa
+            semanticClusters = []
+            activeNoteTitle = ""
+            loadSemanticNeighbors(for: viewModel.activeTabId)
+        }
+        .onAppear {
+            loadSemanticNeighbors(for: viewModel.activeTabId)
+        }
+    }
+
+    private func loadSemanticNeighbors(for noteId: String?) {
+        guard let noteId = noteId, !noteId.isEmpty,
+              let wsPath = currentWorkspace?.path else {
+            semanticClusters = []
+            activeNoteTitle = ""
+            return
+        }
+
+        // Verificar que la nota pertenece al workspace actual
+        guard noteId.hasPrefix(wsPath) else {
+            semanticClusters = []
+            activeNoteTitle = ""
+            return
+        }
+
+        isLoading = true
+        activeNoteTitle = URL(fileURLWithPath: noteId).deletingPathExtension().lastPathComponent
+
+        // Snapshot del índice de notas antes de entrar al hilo de background
+        let noteIndex = Dictionary(uniqueKeysWithValues: workspaceNotes.map { ($0.path, $0) })
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let neighbors = getSemanticNeighbors(noteId: noteId, workspacePath: wsPath, limit: 40)
+
+            // Agrupar en 3 anillos de proximidad semántica
+            var nucleus: [NoteRecord] = []   // score > 0.80 — hablan de lo mismo
+            var resonance: [NoteRecord] = [] // score 0.65–0.80 — relacionados
+            var periphery: [NoteRecord] = [] // score 0.45–0.65 — conectados tangencialmente
+
+            for neighbor in neighbors {
+                guard let record = noteIndex[neighbor.path] else { continue }
+                if neighbor.score > 0.80 {
+                    nucleus.append(record)
+                } else if neighbor.score > 0.65 {
+                    resonance.append(record)
+                } else {
+                    periphery.append(record)
+                }
+            }
+
+            // Fallback si el embedding aún no existe: agrupar workspace por carpeta
+            let hasSemantic = !nucleus.isEmpty || !resonance.isEmpty || !periphery.isEmpty
+            var clusters: [(String, [NoteRecord])]
+
+            if hasSemantic {
+                clusters = [
+                    ("🔗 Núcleo Semántico  >80%", nucleus),
+                    ("🌐 Zona de Resonancia  65–80%", resonance),
+                    ("🌌 Periferia  45–65%", periphery),
+                ].filter { !$0.1.isEmpty }
+            } else {
+                // Sin embeddings: fallback con todas las notas del workspace
+                let allWsNotes = Array(noteIndex.values).sorted { $0.title < $1.title }
+                clusters = allWsNotes.isEmpty ? [] : [("📁 Workspace (sin embeddings)", allWsNotes)]
+            }
+
+            DispatchQueue.main.async {
+                self.semanticClusters = clusters
+                self.isLoading = false
+            }
+        }
     }
 }
 
@@ -1104,26 +1255,27 @@ struct SemanticClusterRow: View {
     let notes: [NoteRecord]
     @ObservedObject var viewModel: EditorViewModel
     @State private var isExpanded = true
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Header del cluster
             HStack {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(viewModel.macSecondaryText)
                     .frame(width: 12, height: 12)
-                
+
                 Text(title)
                     .font(.subheadline)
                     .foregroundColor(viewModel.macPrimaryText)
-                
+
                 Spacer()
                 Text("\(notes.count)")
                     .font(.caption2)
                     .foregroundColor(.white)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.8))
+                    .background(Color.purple.opacity(0.75))
                     .cornerRadius(8)
             }
             .padding(.vertical, 4)
@@ -1132,7 +1284,7 @@ struct SemanticClusterRow: View {
             .onTapGesture {
                 withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
             }
-            
+
             if isExpanded {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(notes, id: \.path) { note in
@@ -1144,6 +1296,8 @@ struct SemanticClusterRow: View {
         }
     }
 }
+
+
 
 struct GitHistorySidebar: View {
     let noteId: String

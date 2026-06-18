@@ -29,6 +29,16 @@ static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
 // --- COLA DE TELEMETRÍA ---
 static TELEMETRY_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static SCAN_PROGRESS: Lazy<Mutex<std::collections::HashMap<String, f32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+static MLX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[uniffi::export]
+pub fn get_scan_progress(path: String) -> f32 {
+    if let Ok(progress) = SCAN_PROGRESS.lock() {
+        return *progress.get(&path).unwrap_or(&0.0);
+    }
+    0.0
+}
 
 pub fn add_telemetry_log(log: String) {
     if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
@@ -70,6 +80,10 @@ fn generate_embedding(text: &str) -> Vec<f32> {
     if text.is_empty() {
         return vec![0.0f32; 384];
     }
+    
+    // El acceso concurrente a la evaluación en GPU de MLX desde múltiples hilos puede causar SIGABRT
+    // Forzamos un bloqueo secuencial para prevenir colisiones de memoria en Metal.
+    let _guard = MLX_LOCK.lock().unwrap();
     
     // FASE 1: Aceleración MLX (Nativo M2 Pro)
     // 1. Convertimos el texto en una semilla numérica para el tokenizer simulado.
@@ -125,8 +139,13 @@ fn vector_to_sql_array(vec: &[f32]) -> String {
 pub fn init_knowledge_base() -> String {
     let mut conn_guard = DB_CONN.lock().unwrap();
     
-    // Abrir conexión en memoria
-    let conn = match Connection::open_in_memory() {
+    // Abrir conexión persistente
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let db_dir = format!("{}/.vault_system", home);
+    let _ = std::fs::create_dir_all(&db_dir);
+    let db_path = format!("{}/vault.duckdb", db_dir);
+
+    let conn = match Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
@@ -178,13 +197,34 @@ pub fn init_knowledge_base() -> String {
             relation_type VARCHAR,
             discovered_at TIMESTAMP DEFAULT now(),
             FOREIGN KEY (note_id) REFERENCES notes(id)
+        );
+        CREATE TABLE IF NOT EXISTS _schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT now()
         );"
     );
 
     match schema_res {
         Ok(_) => {
+            // Schema versioning
+            let current_version: u32 = conn.query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM _schema_version", [], |r| r.get(0)
+            ).unwrap_or(0);
+
+            if current_version < 1 {
+                let _ = conn.execute(
+                    "INSERT INTO _schema_version (version) VALUES (1)", []
+                );
+            }
+
+            // Future migrations go here:
+            // if current_version < 2 {
+            //     conn.execute("ALTER TABLE notes ADD COLUMN last_modified TIMESTAMP", [])?;
+            //     conn.execute("INSERT INTO _schema_version (version) VALUES (2)", [])?;
+            // }
+
             *conn_guard = Some(conn);
-            "Knowledge Base inicializada (DuckDB in-memory)".to_string()
+            "Knowledge Base inicializada (DuckDB persistente)".to_string()
         },
         Err(e) => format!("Error de Esquema: {}", e),
     }
@@ -192,25 +232,29 @@ pub fn init_knowledge_base() -> String {
 
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
-    let mut conn_guard = DB_CONN.lock().unwrap();
-    
-    let conn = match conn_guard.as_mut() {
-        Some(c) => c,
-        None => return "Error: La base de datos no ha sido inicializada.".to_string(),
-    };
+    // Inicializar el progreso en 0%
+    if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+        progress.insert(path.clone(), 0.0);
+    }
 
     // Limpiar registros antiguos para evitar huérfanos antes de re-escanear
-    // Usamos un patrón que incluya el directorio raíz y todos sus hijos
     let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
-    let _ = conn.execute(
-        "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-        params![path, format!("{}%", clean_path)],
-    );
+    {
+        let mut conn_guard = DB_CONN.lock().unwrap();
+        if let Some(conn) = conn_guard.as_mut() {
+            let _ = conn.execute(
+                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+                params![path, format!("{}%", clean_path)],
+            );
+        } else {
+            return "Error: La base de datos no ha sido inicializada.".to_string();
+        }
+    }
 
-    let mut count = 0;
     let vault_path = Path::new(&path);
 
-    // Iterar recursivamente sobre el directorio
+    // Primera pasada: recolectar y contar todas las entradas válidas
+    let mut entries = Vec::new();
     for entry in WalkDir::new(vault_path)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -218,42 +262,106 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         let file_path = entry.path();
         let full_path_str = file_path.to_str().unwrap_or("");
 
-        // Aplicar filtrado híbrido: ignorar si la ruta contiene algún patrón de la lista blanca negativa
         if ignore_patterns.iter().any(|p| full_path_str.contains(p)) {
             continue;
         }
+
+        if file_path.is_dir() || (file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md")) {
+            entries.push(entry);
+        }
+    }
+
+    let total_entries = entries.len();
+    let mut count = 0;
+
+    // Segunda pasada: procesar e insertar actualizando el progreso
+    for (idx, entry) in entries.into_iter().enumerate() {
+        let file_path = entry.path();
+        let full_path_str = file_path.to_str().unwrap_or("");
         
         // Procesar directorios y archivos
         if file_path.is_dir() {
             let title = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
-            let sql = "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())";
-            let _ = conn.execute(sql, params![full_path_str, title, full_path_str, ""]);
+            let mut conn_guard = DB_CONN.lock().unwrap();
+            if let Some(conn) = conn_guard.as_mut() {
+                let sql = "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())";
+                let _ = conn.execute(sql, params![full_path_str, title, full_path_str, ""]);
+            }
         } else if file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md") {
             let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
-
-            // Leer contenido del archivo
             let content = fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
-
-            // Generar embedding
+            
+            // Generar embedding (esto NO bloquea la base de datos)
             let emb = generate_embedding(&content);
             let sql = format!(
                 "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding) VALUES (?, ?, ?, ?, false, now(), {})",
                 vector_to_sql_array(&emb)
             );
 
-            // Insertar en la tabla de notas incluyendo el contenido y embedding
-            let insert_res = conn.execute(
-                &sql,
-                params![full_path_str, title, full_path_str, content],
-            );
+            let mut conn_guard = DB_CONN.lock().unwrap();
+            if let Some(conn) = conn_guard.as_mut() {
+                let insert_res = conn.execute(
+                    &sql,
+                    params![full_path_str, title, full_path_str, content]
+                );
+                
+                if insert_res.is_ok() {
+                    count += 1;
+                }
+            }
+        }
 
-            if insert_res.is_ok() {
-                count += 1;
+        // Actualizar progreso
+        if total_entries > 0 {
+            let pct = ((idx + 1) as f32 / total_entries as f32) * 100.0;
+            if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+                progress.insert(path.clone(), pct);
             }
         }
     }
 
+    // Asegurar 100% al finalizar
+    if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+        progress.insert(path.clone(), 100.0);
+    }
+
+    update_sync_ts();
     format!("Escaneado completado: {} notas procesadas con contenido y embeddings.", count)
+}
+
+#[uniffi::export]
+pub fn remove_vault_path(path: String) -> String {
+    let mut conn_guard = DB_CONN.lock().unwrap();
+    if let Some(conn) = conn_guard.as_mut() {
+        let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
+        
+        // Limpieza completa en cascada manual
+        let _ = conn.execute(
+            "DELETE FROM semantic_summaries WHERE note_id = ? OR note_id LIKE ?",
+            params![path, format!("{}%", clean_path)],
+        );
+        let _ = conn.execute(
+            "DELETE FROM entity_graphs WHERE note_id = ? OR note_id LIKE ?",
+            params![path, format!("{}%", clean_path)],
+        );
+        let _ = conn.execute(
+            "DELETE FROM links WHERE source_id = ? OR source_id LIKE ? OR target_id = ? OR target_id LIKE ?",
+            params![path, format!("{}%", clean_path), path, format!("{}%", clean_path)],
+        );
+        let _ = conn.execute(
+            "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+            params![path, format!("{}%", clean_path)],
+        );
+
+        // Remover del mapa de progreso si existe
+        if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+            progress.remove(&path);
+        }
+
+        "Directorio eliminado de la base de datos por completo (Cascada Semántica)".to_string()
+    } else {
+        "Error: La base de datos no ha sido inicializada".to_string()
+    }
 }
 
 #[uniffi::export]
@@ -819,6 +927,262 @@ pub fn get_temporal_neighborhood(note_id: String, max_depth: u32) -> Vec<Tempora
     }
     
     result
+}
+
+// ------------------------------------------------------------------------------------------------
+// PALACIO MENTAL — Vecinos Semánticos por Cosine Similarity (DuckDB FLOAT[384])
+// Filtra por workspace_path para aislar el contexto del proyecto activo.
+// note_id == path del archivo (PRIMARY KEY en DuckDB).
+// ------------------------------------------------------------------------------------------------
+
+#[derive(uniffi::Record)]
+pub struct SemanticNeighbor {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub score: f32,
+}
+
+#[uniffi::export]
+pub fn get_semantic_neighbors(note_id: String, workspace_path: String, limit: u32) -> Vec<SemanticNeighbor> {
+    let conn_guard = DB_CONN.lock().unwrap();
+    let conn = match conn_guard.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    // Escapar paths para evitar inyección SQL (los paths pueden tener comillas simples)
+    let safe_note_id = note_id.replace('\'', "''");
+    let safe_ws_path = workspace_path.replace('\'', "''");
+
+    // Consulta: para cada nota del workspace, calcula cosine similarity contra el embedding
+    // del nodo origen. Excluye directorios, excluye la nota origen, requiere embedding no nulo.
+    // El LIKE filtra estrictamente al workspace activo.
+    let query = format!(
+        "
+        SELECT n.id, n.title, n.path,
+               array_cosine_similarity(n.embedding, src.embedding)::FLOAT as score
+        FROM notes n,
+             (SELECT embedding FROM notes WHERE id = '{}' AND embedding IS NOT NULL LIMIT 1) src
+        WHERE n.id != '{}'
+          AND n.is_dir = false
+          AND n.embedding IS NOT NULL
+          AND n.path LIKE '{}%'
+          AND array_cosine_similarity(n.embedding, src.embedding) > 0.35
+        ORDER BY score DESC
+        LIMIT {}
+        ",
+        safe_note_id, safe_note_id, safe_ws_path, limit
+    );
+
+    let mut stmt = match conn.prepare(&query) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[PalacioMental] Error preparando query: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let mut result = Vec::new();
+    if let Ok(iter) = stmt.query_map([], |row| {
+        Ok(SemanticNeighbor {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            path: row.get(2)?,
+            score: row.get(3)?,
+        })
+    }) {
+        for item in iter.flatten() {
+            result.push(item);
+        }
+    }
+    result
+}
+
+// ------------------------------------------------------------------------------------------------
+// CARGA COGNITIVA — Métricas reales para el CognitiveRadar
+// Un solo lock de DuckDB para las 3 métricas (evita deadlock por re-entrar al mutex).
+//   ENT   = edges reales en tabla `links` (vecindad temporal del nodo)
+//   CARGA = diversidad de directorios padre en el grafo → indicador de context-switching
+//   NOV   = aislamiento semántico: 1 - best cosine_similarity en el workspace
+// ------------------------------------------------------------------------------------------------
+
+#[derive(uniffi::Record)]
+pub struct CognitiveMetrics {
+    pub entity_count: u32,   // ENT: nodos conectados en el grafo de links
+    pub novelty_score: f32,  // NOV: [0,1] — 1 = nota muy nueva/aislada, 0 = bien integrada
+    pub load_score: f32,     // CARGA: [0,1] — 1 = cruzando muchos proyectos a la vez
+}
+
+#[uniffi::export]
+pub fn get_cognitive_metrics(note_id: String, workspace_path: String) -> CognitiveMetrics {
+    let conn_guard = DB_CONN.lock().unwrap();
+    let conn = match conn_guard.as_ref() {
+        Some(c) => c,
+        None => return CognitiveMetrics { entity_count: 0, novelty_score: 0.5, load_score: 0.0 },
+    };
+
+    let safe_id  = note_id.replace('\'', "''");
+    let safe_ws  = workspace_path.replace('\'', "''");
+
+    // ── 1. ENT + CARGA: leer edges del grafo de links (depth 1) ─────────────────────────────
+    let edge_query = format!(
+        "SELECT source_id, target_id FROM links \
+         WHERE source_id = '{}' OR target_id = '{}' LIMIT 200",
+        safe_id, safe_id
+    );
+
+    let mut entity_count: u32 = 0;
+    let mut unique_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Ok(mut stmt) = conn.prepare(&edge_query) {
+        if let Ok(iter) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for item in iter.flatten() {
+                entity_count += 1;
+                // El otro extremo del edge = nodo vecino
+                let other = if item.0 == note_id { item.1 } else { item.0 };
+                // Extraer directorio padre para medir diversidad de contexto
+                if let Some(slash) = other.rfind('/') {
+                    unique_dirs.insert(other[..slash].to_string());
+                }
+            }
+        }
+    }
+
+    // CARGA = unique_dirs / sqrt(entity_count)  →  normalizado a [0, 1]
+    // sqrt amortigua el efecto de notas muy conectadas donde la diversidad sería artificialmente alta
+    let load_score: f32 = if entity_count == 0 {
+        0.0
+    } else {
+        (unique_dirs.len() as f32 / (entity_count as f32).sqrt()).min(1.0)
+    };
+
+    // ── 2. NOV: aislamiento semántico (1 - best cosine similarity en workspace) ─────────────
+    // Si el vecino más cercano tiene score alto → nota bien integrada → NOV baja
+    // Si no hay vecinos semánticos → nota nueva/aislada → NOV alta
+    let novelty_query = format!(
+        "SELECT array_cosine_similarity(n.embedding, src.embedding)::FLOAT as score \
+         FROM notes n, \
+              (SELECT embedding FROM notes WHERE id = '{}' AND embedding IS NOT NULL LIMIT 1) src \
+         WHERE n.id != '{}' \
+           AND n.is_dir = false \
+           AND n.embedding IS NOT NULL \
+           AND n.path LIKE '{}%' \
+         ORDER BY score DESC \
+         LIMIT 1",
+        safe_id, safe_id, safe_ws
+    );
+
+    let mut novelty_score: f32 = 0.5; // default: sin datos suficientes
+    if let Ok(mut stmt) = conn.prepare(&novelty_query) {
+        if let Ok(mut rows) = stmt.query([]) {
+            if let Ok(Some(row)) = rows.next() {
+                if let Ok(best) = row.get::<_, f32>(0) {
+                    novelty_score = (1.0_f32 - best).max(0.0).min(1.0);
+                }
+            }
+        }
+    }
+
+    CognitiveMetrics { entity_count, novelty_score, load_score }
+}
+
+// ------------------------------------------------------------------------------------------------
+// HEATMAP — Actividad Temporal por Workspace
+// Usa mtime del filesystem (sin DuckDB) para máxima velocidad.
+// Devuelve notas modificadas en los últimos `days_back` días, ordenadas por recencia.
+// heat = [0,1] — 1.0 = modificado hoy, 0.0 = al límite del período.
+// ------------------------------------------------------------------------------------------------
+
+#[derive(uniffi::Record)]
+pub struct NoteActivity {
+    pub path: String,
+    pub title: String,
+    pub modified_secs: u64,  // Unix timestamp de última modificación
+    pub days_ago: u32,       // 0=hoy, 1=ayer, etc.
+    pub heat: f32,           // [0,1] recencia normalizada
+}
+
+#[uniffi::export]
+pub fn get_workspace_activity(workspace_path: String, days_back: u32) -> Vec<NoteActivity> {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let period_secs = (days_back as u64) * 86_400;
+    let cutoff_secs = now_secs.saturating_sub(period_secs);
+
+    let mut activities: Vec<NoteActivity> = Vec::new();
+
+    for entry in WalkDir::new(&workspace_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let file_path = entry.path();
+
+        // Solo archivos .md
+        if !file_path.is_file() {
+            continue;
+        }
+        if file_path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        // Ignorar archivos ocultos
+        if file_path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with('.'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        // Leer mtime del filesystem
+        let modified_secs = match file_path.metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(|_| std::io::Error::from(std::io::ErrorKind::Other)))
+        {
+            Ok(d) => d.as_secs(),
+            Err(_) => continue,
+        };
+
+        if modified_secs < cutoff_secs {
+            continue;
+        }
+
+        let elapsed = now_secs.saturating_sub(modified_secs);
+        let days_ago = (elapsed / 86_400) as u32;
+
+        // heat: 1.0 en el momento actual, decae linealmente hasta 0 en `days_back` días
+        let heat = if period_secs == 0 {
+            1.0
+        } else {
+            (1.0_f32 - (elapsed as f32 / period_secs as f32)).max(0.0)
+        };
+
+        let title = file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Sin título")
+            .to_string();
+
+        let path_str = file_path.to_str().unwrap_or("").to_string();
+
+        activities.push(NoteActivity {
+            path: path_str,
+            title,
+            modified_secs,
+            days_ago,
+            heat,
+        });
+    }
+
+    // Más reciente primero
+    activities.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs));
+    activities
 }
 
 // ------------------------------------------------------------------------------------------------

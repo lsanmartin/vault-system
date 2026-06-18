@@ -5,7 +5,7 @@ class CloudWorkspacePresenter: NSObject, NSFilePresenter, ObservableObject {
     var presentedItemURL: URL?
     var presentedItemOperationQueue: OperationQueue = .main
     
-    private let logger = Logger(subsystem: "com.apple.vault.VaultSystem", category: "CloudSync")
+    private let logger = Logger(subsystem: "cl.nicelio.vault.VaultSystem", category: "CloudSync")
 
     init(containerURL: URL) {
         self.presentedItemURL = containerURL

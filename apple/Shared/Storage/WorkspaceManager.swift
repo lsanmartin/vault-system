@@ -11,7 +11,15 @@ struct VaultLocation: Identifiable, Codable {
     
     var url: URL? {
         var isStale = false
-        return try? URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale)
+        guard let url = try? URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale) else { return nil }
+        if isStale {
+            // Regenerar bookmark si es posible
+            if let fresh = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                // Se notificará al manager para persistir el bookmark renovado
+                NotificationCenter.default.post(name: Notification.Name("BookmarkBecameStale"), object: nil, userInfo: ["path": url.path, "newBookmark": fresh])
+            }
+        }
+        return url
     }
 }
 
@@ -21,6 +29,8 @@ class WorkspaceManager: ObservableObject {
     @Published var locations: [VaultLocation] = []
     @Published var systemLocation: VaultLocation?
     @Published var isAuthorized: Bool = false
+    @Published var scanProgress: [String: Double] = [:]
+    private var progressTimers: [String: Timer] = [:]
     
     var allLocations: [VaultLocation] {
         if let sys = systemLocation {
@@ -29,10 +39,16 @@ class WorkspaceManager: ObservableObject {
         return locations
     }
     
-    private let logger = Logger(subsystem: "com.apple.vault.VaultSystem", category: "WorkspaceManager")
-    private let locationsKey = "com.apple.vault.vaultLocations"
+    private let logger = Logger(subsystem: "cl.nicelio.vault.VaultSystem", category: "WorkspaceManager")
+    private let locationsKey = "cl.nicelio.vault.vaultLocations"
     
     init() {
+        // Migración de Bundle ID: com.apple.vault → cl.nicelio.vault
+        if UserDefaults.standard.data(forKey: locationsKey) == nil,
+           let oldData = UserDefaults.standard.data(forKey: "com.apple.vault.vaultLocations") {
+            UserDefaults.standard.set(oldData, forKey: locationsKey)
+            UserDefaults.standard.removeObject(forKey: "com.apple.vault.vaultLocations")
+        }
         restoreLocations()
         initializeSystemWorkspace()
     }
@@ -118,6 +134,7 @@ class WorkspaceManager: ObservableObject {
         if let encoded = try? JSONEncoder().encode(locations) {
             UserDefaults.standard.set(encoded, forKey: locationsKey)
         }
+        exportConfigBackup()
     }
     
     /// Restaura todas las ubicaciones guardadas y activa su acceso seguro.
@@ -169,11 +186,42 @@ class WorkspaceManager: ObservableObject {
         logger.info("Hidratación completada.")
     }
     
+    func triggerScan(for path: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = scanVault(path: path, ignorePatterns: ["/.git", "/.obsidian", "/_documentar", "/05-IA-Drafts/gemini"])
+        }
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.scanProgress[path] = 0.0
+            self?.progressTimers[path]?.invalidate()
+            
+            self?.progressTimers[path] = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+                let currentProgress = Double(getScanProgress(path: path))
+                self?.scanProgress[path] = currentProgress
+                if currentProgress >= 100.0 {
+                    timer.invalidate()
+                    self?.progressTimers.removeValue(forKey: path)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self?.scanProgress.removeValue(forKey: path)
+                    }
+                }
+            }
+        }
+    }
+    
+    func triggerScanAll() {
+        for loc in allLocations {
+            triggerScan(for: loc.path)
+        }
+    }
+
     /// Elimina una ubicación y libera su recurso.
     func removeLocation(at offsets: IndexSet) {
         for index in offsets {
             let location = locations[index]
             location.url?.stopAccessingSecurityScopedResource()
+            _ = removeVaultPath(path: location.path)
+            NotificationCenter.default.post(name: Notification.Name("WorkspaceRemoved"), object: nil, userInfo: ["path": location.path])
         }
         locations.remove(atOffsets: offsets)
         saveToDisk()
@@ -183,6 +231,23 @@ class WorkspaceManager: ObservableObject {
     func stopAccess() {
         for location in locations {
             location.url?.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    /// Exporta la configuración a un archivo JSON de respaldo fuera del sandbox.
+    func exportConfigBackup() {
+        let backupURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vault_system/config_backup.json")
+        
+        let backup: [String: Any] = [
+            "version": "0.1.0",
+            "locations": locations.map { ["name": $0.name, "path": $0.path] },
+            "exportDate": ISO8601DateFormatter().string(from: Date())
+        ]
+        
+        if let data = try? JSONSerialization.data(withJSONObject: backup, options: .prettyPrinted) {
+            try? data.write(to: backupURL)
+            logger.info("Config backup exportado a: \(backupURL.path)")
         }
     }
 }
