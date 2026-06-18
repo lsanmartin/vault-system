@@ -214,8 +214,8 @@ struct MainContentColumn: View {
         }
         .navigationTitle("Notas")
         .background(viewModel.macBackground)
-        .onChange(of: viewModel.selectedItemIds) { _ in isSearchFocused = false }
-        .onChange(of: viewModel.selectedLocationId) { _ in isSearchFocused = false }
+        .onChange(of: viewModel.selectedItemIds) { isSearchFocused = false }
+        .onChange(of: viewModel.selectedLocationId) { isSearchFocused = false }
         .background(
             Button(action: {
                 isSearchFocused = true
@@ -488,8 +488,8 @@ struct DetailColumn: View {
                         .keyboardShortcut("f", modifiers: [.control, .command])
                         .help("Pantalla Completa Nativa (Ctrl+Cmd+F)")
                         
-                        Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
-                        Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
+                        // Button(action: { viewModel.saveActiveTab(locations: workspaceManager.allLocations) }) { Label("Save", systemImage: "checkmark.circle") }.keyboardShortcut("s", modifiers: .command)
+                        // Button(action: { viewModel.togglePreview() }) { Label("Preview", systemImage: "eye") }.keyboardShortcut("r", modifiers: .command)
                     }
                 }
             } else {
@@ -516,13 +516,11 @@ struct MainEditorView: View {
             NavigationStack {
                 HSplitView {
                     if !isSidebarHidden {
-                        HSplitView {
-                            SidebarColumn(viewModel: viewModel)
-                                .frame(minWidth: 200, idealWidth: 400, maxWidth: 600)
-                            
-                            MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
-                                .frame(minWidth: 200, idealWidth: 240, maxWidth: .infinity)
-                        }
+                        SidebarColumn(viewModel: viewModel)
+                            .frame(minWidth: 250, idealWidth: 400, maxWidth: 600)
+                        
+                        MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
+                            .frame(minWidth: 250, idealWidth: 300, maxWidth: .infinity)
                     }
                     
                     if !isNoteHidden {
@@ -710,10 +708,39 @@ struct EditorAreaView: View {
     @Binding var tab: TabItem
     let selectedTheme: AppTheme
     @ObservedObject var viewModel: EditorViewModel
+    @EnvironmentObject var workspaceManager: WorkspaceManager
     
     @State private var isHeatmapActive: Bool = false
     @State private var triggerSearch: Bool = false
     @State private var isHistoryActive: Bool = false
+    @State private var showSyntaxHelp: Bool = false
+    
+    private let syntaxHelp = """
+    # Guía de Sintaxis
+    
+    ## Markdown
+    Soporte estándar: **negrita**, *itálica*, [enlaces](url) y tablas.
+    
+    ## HTML
+    Puedes insertar etiquetas HTML directamente:
+    `<div style="color: red;">Texto rojo</div>`
+    
+    ## LaTeX (Matemáticas)
+    Usa $ para bloques centrados o $ para inline:
+    
+    **Ejemplo bloque:**
+    $ e^{i\\pi} + 1 = 0 $
+    
+    **Ejemplo inline:** La fórmula $E = mc^2$ es famosa.
+    
+    **Matrices:**
+    $
+    \\begin{pmatrix}
+    a & b \\\\
+    c & d
+    \\end{pmatrix}
+    $
+    """
     
     var body: some View {
         HStack(spacing: 0) {
@@ -730,6 +757,29 @@ struct EditorAreaView: View {
                     .buttonStyle(.bordered)
                     .tint(isHistoryActive ? .accentColor : .secondary)
                     
+                    Button {
+                        showSyntaxHelp.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Ayuda de Sintaxis")
+                    .popover(isPresented: $showSyntaxHelp) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Sintaxis Soportada")
+                                .font(.headline)
+                                .padding([.top, .horizontal])
+                            Divider()
+                            ScrollView {
+                                Text(syntaxHelp)
+                                    .font(.system(.body, design: .monospaced))
+                                    .padding()
+                            }
+                        }
+                        .frame(width: 350, height: 450)
+                    }
+                    
                     // FASE 5: Semantic Heatmap Toggle
                     Toggle(isOn: $isHeatmapActive) {
                         Label("Heat Map", systemImage: "flame.fill")
@@ -739,27 +789,23 @@ struct EditorAreaView: View {
                     .tint(.orange)
                     
                     if !tab.isPreviewMode {
-                    Button {
-                        triggerSearch = true
-                    } label: {
-                        Label("Buscar", systemImage: "magnifyingglass")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut("f", modifiers: .command)
-                }
-                
-                Button(tab.isPreviewMode ? "Editar" : "Ver") { 
-                    tab.isPreviewMode.toggle() 
-                    if tab.isPreviewMode {
-                        _ = saveNote(path: tab.id, content: tab.content)
-                        Telemetry.shared.log("Editor", eventType: "AutoSave", message: "Guardada: \(tab.title)")
-                        if let locations = viewModel.currentLocations {
-                            viewModel.refreshNotes(locations: locations)
+                        Button {
+                            triggerSearch = true
+                        } label: {
+                            Label("Buscar", systemImage: "magnifyingglass")
+                                .font(.caption)
                         }
+                        .buttonStyle(.bordered)
                     }
-                }.buttonStyle(.bordered)
-            }.padding(8)
+                    
+                    Button(tab.isPreviewMode ? "Editar" : "Ver") { 
+                        tab.isPreviewMode.toggle() 
+                        if tab.isPreviewMode {
+                            viewModel.saveActiveTab(locations: workspaceManager.allLocations)
+                        }
+                    }.buttonStyle(.bordered)
+                }
+                .padding(8)
             
             if tab.isPreviewMode {
                 WebView(
@@ -773,12 +819,38 @@ struct EditorAreaView: View {
                 .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
                 CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
-                    .padding(.horizontal, 32)
+                    .frame(maxWidth: 850)
+                    .cornerRadius(15)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 16)
                     .background(viewModel.macBackground) 
             }
             }
             .background(viewModel.macBackground)
+            .background(
+                Group {
+                    Button("") {
+                        if let activeId = viewModel.activeTabId, let index = viewModel.tabs.firstIndex(where: { $0.id == activeId }) {
+                            viewModel.tabs[index].isPreviewMode.toggle()
+                            if viewModel.tabs[index].isPreviewMode {
+                                viewModel.saveActiveTab(locations: workspaceManager.allLocations)
+                            }
+                        }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    
+                    Button("") {
+                        viewModel.saveActiveTab(locations: workspaceManager.allLocations)
+                    }
+                    .keyboardShortcut("s", modifiers: .command)
+                    
+                    Button("") {
+                        triggerSearch = true
+                    }
+                    .keyboardShortcut("f", modifiers: .command)
+                }
+                .opacity(0)
+            )
             
             if isHistoryActive {
                 Divider()
@@ -1101,10 +1173,20 @@ struct GitHistorySidebar: View {
             Divider()
             
             if commits.isEmpty {
-                Text("Cargando o sin historial...")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding()
+                VStack(spacing: 12) {
+                    Text("Sin historial de cambios")
+                        .font(.headline)
+                    Text("El historial se genera automáticamente al guardar cambios (Cmd+R o botón Ver).")
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.secondary)
+                    
+                    Button("Refrescar") {
+                        commits = getFileHistory(path: noteId)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
             } else {
                 List(commits, id: \.hash) { commit in
                     VStack(alignment: .leading, spacing: 4) {

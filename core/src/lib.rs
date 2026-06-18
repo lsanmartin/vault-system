@@ -416,21 +416,53 @@ pub fn save_note(path: String, content: String) -> String {
     match res {
         Ok(_) => {
             update_sync_ts();
+            crate::add_telemetry_log(format!("Git: Iniciando auto-commit para {}", path));
             
             // Auto Git Commit implementation
             let path_obj = std::path::Path::new(&path);
             if let Some(parent) = path_obj.parent() {
                 if let Some(file_name) = path_obj.file_name() {
                     if let Some(file_str) = file_name.to_str() {
-                        let _ = std::process::Command::new("git")
+                        // 1. Git Add
+                        let add_out = std::process::Command::new("/usr/bin/git")
                             .current_dir(parent)
                             .args(["add", file_str])
                             .output();
                         
-                        let _ = std::process::Command::new("git")
+                        match add_out {
+                            Ok(o) if !o.status.success() => {
+                                let err = String::from_utf8_lossy(&o.stderr);
+                                crate::add_telemetry_log(format!("Git Add Error: {}", err));
+                            },
+                            Err(e) => {
+                                crate::add_telemetry_log(format!("Git Add Failed to start: {}", e));
+                            },
+                            _ => {}
+                        }
+                        
+                        // 2. Git Commit
+                        let commit_out = std::process::Command::new("/usr/bin/git")
                             .current_dir(parent)
                             .args(["commit", "-m", &format!("[Vault Auto-Save] {}", file_str)])
                             .output();
+
+                        match commit_out {
+                            Ok(o) => {
+                                if o.status.success() {
+                                    crate::add_telemetry_log(format!("Git: Commit exitoso para {}", file_str));
+                                } else {
+                                    let err = String::from_utf8_lossy(&o.stderr);
+                                    if err.contains("nothing to commit") || err.contains("no cambios") {
+                                        crate::add_telemetry_log("Git: Sin cambios detectados para commit".to_string());
+                                    } else {
+                                        crate::add_telemetry_log(format!("Git Commit Error: {}", err));
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                crate::add_telemetry_log(format!("Git Commit Failed to start: {}", e));
+                            }
+                        }
                     }
                 }
             }
@@ -450,23 +482,34 @@ pub struct GitCommit {
 
 #[uniffi::export]
 pub fn get_file_history(path: String) -> Vec<GitCommit> {
+    crate::add_telemetry_log(format!("Git: Recuperando historial para {}", path));
     let path_obj = std::path::Path::new(&path);
     let parent = match path_obj.parent() {
         Some(p) => p,
-        None => return vec![],
+        None => {
+            crate::add_telemetry_log("Git: Error - No se pudo determinar el padre del archivo".to_string());
+            return vec![];
+        }
     };
     let file_name = match path_obj.file_name() {
         Some(f) => f.to_str().unwrap_or(""),
-        None => return vec![],
+        None => {
+            crate::add_telemetry_log("Git: Error - No se pudo determinar el nombre del archivo".to_string());
+            return vec![];
+        }
     };
 
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new("/usr/bin/git")
         .current_dir(parent)
         .args(["log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name])
         .output();
 
     let mut commits = vec![];
     if let Ok(out) = output {
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            crate::add_telemetry_log(format!("Git: Error en comando log - {}", err));
+        }
         let stdout = String::from_utf8_lossy(&out.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.splitn(3, '|').collect();
@@ -478,7 +521,11 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
                 });
             }
         }
+    } else {
+        crate::add_telemetry_log("Git: Fallo crítico al ejecutar comando git log".to_string());
     }
+    
+    crate::add_telemetry_log(format!("Git: Encontrados {} commits", commits.len()));
     commits
 }
 
@@ -495,7 +542,7 @@ pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
     };
 
     let spec = format!("{}:./{}", commit_hash, file_name);
-    let output = std::process::Command::new("git")
+    let output = std::process::Command::new("/usr/bin/git")
         .current_dir(parent)
         .args(["show", &spec])
         .output();

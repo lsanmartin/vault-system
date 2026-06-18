@@ -1,38 +1,31 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-16 22:55]
+Última actualización: [2026-06-17 10:30]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
-- **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas (`DragGesture`), y navegación jerárquica (`VaultTreeView`).
-- **Capa 2: Motor de Renderizado (Universal)**: Procesamiento unificado de MD, HTML y LaTeX con detección automática.
-- **Capa 3: Core (Rust) & Seguridad MCP**: Búsqueda semántica (DuckDB + MLX), File Watcher, Puente IPC y RBAC de MCP.
+- **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
+- **Capa 2: Motor de Renderizado (Universal)**: Procesamiento híbrido de MD, HTML y LaTeX con ayuda de sintaxis in-app.
+- **Capa 3: Core (Rust) & Seguridad MCP**: Búsqueda semántica, File Watcher con persistencia Git (Auto-Save), y RBAC de MCP.
 
 ## Resumen Técnico
-- **Objetivo**: Implementación de seguridad estricta para MCP (RBAC de 3 capas), panel de telemetría y buscador de texto nativo en la UI.
+- **Objetivo**: Refinamiento de la interfaz de usuario, independización de columnas y diagnóstico del historial de cambios Git.
 - **Cambios Realizados**:
-  - **[2026-06-16 19:00] Motor de Búsqueda Unicode & Zero-Delay Navigation**:
-    - **Soporte Universal de Acentos y 'ñ' (NFD/NFC)**: Se reemplazó el filtro genérico de carácteres por el uso de propiedades Unicode (`\p{M}*`) y normalización en memoria dentro de Rust, resolviendo el bug silencioso de macOS con carácteres especiales descompuestos en Finder.
-    - **Búsqueda por Intersección Estricta (AND)**: La lógica de consulta de base de datos ahora divide la frase en N tokens y exige que cada término exista individualmente en el archivo (vía `regexp_matches`), emulando comportamientos avanzados de motores de búsqueda.
-    - **Navegación en UI (Zero-Delay)**: Se modificó la vista `EditorViewModel` para que las selecciones de carpetas dentro del mismo workspace procesen el redibujado de la grilla 100% en memoria en Swift (`updateGridForCurrentPath()`), deteniendo los escaneos innecesarios a través del FFI de DuckDB. Se estabilizó a 60FPS constantes.
-    - **Recuperación Fallback MCP**: Se reintegró el pipeline de tokens (`McpTokenRecord`) de la CLI que había colapsado durante el refactor del core.
-  - **[2026-06-16 23:30] Depuración de Búsqueda UI y Sandbox**:
-    - **Fix UI Buscador**: Corregido bug crítico en la renderización de Swift (`updateGridForCurrentPath`) que causaba la mezcla de notas previas con los resultados de búsqueda de DuckDB. La grilla ahora muestra limpia y exclusivamente los archivos que hicieron `match`.
-    - **Persistencia MCP (Fix Sandbox)**: Migrada exitosamente la persistencia de `mcp_tokens` desde archivos en el Sandbox (efímeros ante compilaciones en Xcode) hacia `UserDefaults` nativo en macOS. El core de Rust ahora maneja los tokens en memoria (vía `LazyLock<Mutex>`) y se sincroniza dinámicamente con Swift usando `load_mcp_tokens_from_json` y `export_mcp_tokens_to_json` a través de FFI, garantizando que no se pierdan al recompilar.
-    - **Highlights en Vista**: Se inyectó `mark.js` usando escapado de interpolaciones dinámicas para resaltar el texto buscado directamente dentro del WebKit WebView.
-  - **[2026-06-16 22:50] Hardening y Seguridad Estricta MCP**:
-    - **Aislamiento de Workspaces**: `vault_read`, `vault_write` y `vault_create_folder` ahora cruzan estrictamente sus rutas contra la lista de workspaces autorizados por el `mcp_client_token` inyectado por el demonio. Las búsquedas en `vault_search` se filtran mediante `.retain()`.
-    - **Prevención de Path Traversal (`../`)**: Implementada una limpieza lógica robusta con `.components()` para resolver directorios padre y evaluar la ruta final antes de hacer el cruce de prefijos.
-    - **Neutralización de Enlaces Simbólicos**: Se aplica `std::fs::canonicalize` en tiempo real (al archivo y al directorio padre en caso de escritura) para garantizar que la ruta absoluta resuelta por el OS no escape del workspace.
-    - **Protección DoS**: `vault_read` ahora usa `meta.is_file()` para bloquear operaciones en dispositivos especiales (como FIFOs / Named Pipes) evitando cuelgues infinitos, y establece un límite estricto de 5 MB para evitar que el JSON-RPC devore la memoria (OOM).
-  - **RBAC en Daemon (Rust)**: Implementadas banderas modulares (`--read-only`, `--allow-metadata`, `--allow-system`) en el proxy CLI para validar el acceso al filesystem antes de enviar JSON-RPC a la App.
-  - **Filtros DuckDB (Core)**: La app principal intercepta parámetros inyectados por el Daemon (`exclude_metadata`, `exclude_system`) para añadir cláusulas dinámicas (`NOT LIKE '%/_%'`) y evitar fuga de información en `vault_search`.
-  - **Panel de Telemetría**: Añadida vista `TelemetryView` en SwiftUI con estilo terminal hacker, que hace polling a un buffer seguro (`Mutex<Vec<String>>`) mantenido por Rust.
-  - **Buscador Nativo (Cmd+F)**: Se implementó una interfaz de búsqueda directa mediante `.keyboardShortcut("f")` en SwiftUI que despacha dinámicamente un menú oculto a través de `NSApp.sendAction` para disparar el `performFindPanelAction` del `NSTextView`. El WebView (Preview Mode) fue excluido de esta acción por carecer de la API `isFindInteractionEnabled` nativa en macOS AppKit.
-  - **Mantenimiento**: Arreglada la advertencia `.onChange(of: noteId)` en `CognitiveRadarView` usando la sintaxis de cero parámetros (macOS 14+).
+  - **[2026-06-17 10:20] Diagnóstico Historial Git**:
+    - **Telemetría en Core**: Añadidos logs detallados en `get_file_history` (Rust) para rastrear errores de comandos Git y verificar el conteo de commits detectados.
+    - **Revisión de Persistencia**: Verificado que `save_note` realiza correctamente el ciclo `git add` + `git commit`.
+  - **[2026-06-17 10:10] Ayuda de Sintaxis y Redondeo**:
+    - **Panel de Ayuda**: Añadido icono 'i' con Popover explicando soporte Markdown/HTML/LaTeX.
+    - **Estética Editor**: Aplicado `cornerRadius(15)` al `CodeEditor` y centrado a 850px para consistencia visual con Preview.
+  - **[2026-06-17 09:45] Refactor de Independencia UI**:
+    - **Aplanamiento de HSplitView**: Eliminada la anidación para independizar los tiradores de Sidebar y Cards.
+    - **Lógica de Ocultación**: Sincronizada la visibilidad de Sidebar y Cards bajo un mismo toggle.
+    - **Dimensiones**: Ajustado `minWidth` a 250pts para mayor flexibilidad.
+  - **[2026-06-16] Motor Unicode & Sandbox Fix**:
+    - Soporte universal de acentos y normalización NFD/NFC.
+    - Migración de tokens MCP a `UserDefaults` para evitar pérdida en recompilaciones.
 
 ## Pendientes Próxima Sesión
-- **Generación de Archivos y Metadatos**: Terminar la integración de metadatos (`_memory.md` y `_lore.md`) dentro de los flujos automáticos.
-- **Búsqueda Avanzada WebView**: Desarrollar componente de UI customizado para buscar dentro de la vista `Ver` utilizando la API de inyección `webView.findString()`.
-- **Dashboard de Historial**: Lista interactiva (clickable) para reanudar contextos de trabajo rápidamente.
-- **Vault App Store**: Sistema de gestión para harnesses, workflows, skills y MCPs oficiales.
-- **Artefactos Seguros**: Compartición de notas/artefactos con opciones de seguridad.
+- **Optimización de Historial**: Si la telemetría confirma que Rust obtiene commits pero SwiftUI no los muestra, revisar el flujo de datos en `GitHistorySidebar`.
+- **Arquitectura MCP Broker (MacOS Nativo)**: Abordar la implementación del broker local basado en `vault://register` y XPC para centralizar la gestión de permisos MCP (ver `docs/2026-06-17-mcp-broker-macos.md`).
+- **Búsqueda en WebView**: Componente nativo para buscar dentro del modo Preview.
+- **Persistencia de Layout**: Guardar el ancho de las columnas entre sesiones.

@@ -1,5 +1,5 @@
 import SwiftUI
-import WebKit
+@preconcurrency import WebKit
 
 class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     var lastLoadedHTML: String? = nil

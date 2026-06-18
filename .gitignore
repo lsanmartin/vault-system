@@ -7,3 +7,16 @@ core/bindings/*.swift
 core/bindings/*.h
 **/*.xcodeproj/
 **/*.xcworkspace/
+
+# Xcode & Build Artifacts
+build/
+apple/build/
+DerivedData/
+*.xcuserstate
+*.moved-aside
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
