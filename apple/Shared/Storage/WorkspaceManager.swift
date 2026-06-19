@@ -204,6 +204,7 @@ class WorkspaceManager: ObservableObject {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                         self?.scanProgress.removeValue(forKey: path)
                     }
+                    NotificationCenter.default.post(name: NSNotification.Name("VaultScanDidFinish"), object: nil)
                 }
             }
         }
@@ -212,6 +213,21 @@ class WorkspaceManager: ObservableObject {
     func triggerScanAll() {
         for loc in allLocations {
             triggerScan(for: loc.path)
+        }
+    }
+
+    func abortScan(for path: String) {
+        _ = cancelScan(path: path)
+        DispatchQueue.main.async { [weak self] in
+            self?.scanProgress.removeValue(forKey: path)
+            self?.progressTimers[path]?.invalidate()
+            self?.progressTimers.removeValue(forKey: path)
+        }
+    }
+
+    func abortScanAll() {
+        for loc in allLocations {
+            abortScan(for: loc.path)
         }
     }
 

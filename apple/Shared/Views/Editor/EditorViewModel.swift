@@ -202,61 +202,71 @@ class EditorViewModel: ObservableObject {
         }
 
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
+        let currentSearchText = debouncedSearchText
+        let currentDeletedPaths = deletedPathsThisSession
         
-        // Obtenemos todo de la DB
-        let rawItems = queryNotes(searchTerm: debouncedSearchText, pathFilter: nil, ignorePatterns: ignorePatterns)
-        
-        // Aplicar filtro de sesión GLOBAL (para el árbol y para la lista)
-        let allItems = rawItems.filter { item in
-            if deletedPathsThisSession.contains(item.path) || 
-               deletedPathsThisSession.contains(where: { item.path.hasPrefix("\($0)/") }) { 
-                return false 
-            }
-            return true
-        }
-        
-        // Guardamos todo para el árbol jerárquico
-        if debouncedSearchText.isEmpty {
-            self.allFolders = allItems.filter { $0.isDir }
-            self.allNotes = allItems.filter { !$0.isDir }
-        } else {
-            // Reconstruir la jerarquía de folders SOLO para las carpetas que hicieron match
-            // (Ignoramos las notas, porque ellas ya se muestran en la vista principal)
-            var validPaths = Set<String>()
-            for item in allItems where item.isDir {
-                var current = item.path
-                while current.count > 1 {
-                    validPaths.insert(current)
-                    let parent = fastParentPath(for: current)
-                    if parent == current || parent.isEmpty { break }
-                    current = parent
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // Obtenemos todo de la DB
+            let rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: nil, ignorePatterns: ignorePatterns)
+            
+            // Aplicar filtro de sesión GLOBAL
+            let allItems = rawItems.filter { item in
+                if currentDeletedPaths.contains(item.path) || 
+                   currentDeletedPaths.contains(where: { item.path.hasPrefix("\($0)/") }) { 
+                    return false 
                 }
+                return true
             }
             
-            // Traemos todos los folders del workspace para filtrar los que están en la ruta
-            let allRawFolders = queryNotes(searchTerm: "", pathFilter: nil, ignorePatterns: ignorePatterns).filter { $0.isDir }
-            self.allFolders = allRawFolders.filter { validPaths.contains($0.path) }
-            self.allNotes = allItems.filter { !$0.isDir }
+            var newFolders: [NoteRecord] = []
+            var newNotes: [NoteRecord] = []
+            var newExpandedPaths: Set<String> = []
             
-            // Auto-expandimos SOLO si los resultados son manejables para no colapsar SwiftUI
-            if validPaths.count < 100 {
-                for path in validPaths {
-                    self.expandedPaths.insert(path)
+            if currentSearchText.isEmpty {
+                newFolders = allItems.filter { $0.isDir }
+                newNotes = allItems.filter { !$0.isDir }
+            } else {
+                var validPaths = Set<String>()
+                for item in allItems where item.isDir {
+                    var current = item.path
+                    while current.count > 1 {
+                        validPaths.insert(current)
+                        let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
+                        if parent == current || parent.isEmpty { break }
+                        current = parent
+                    }
+                }
+                
+                let allRawFolders = queryNotes(searchTerm: "", pathFilter: nil, ignorePatterns: ignorePatterns).filter { $0.isDir }
+                newFolders = allRawFolders.filter { validPaths.contains($0.path) }
+                newNotes = allItems.filter { !$0.isDir }
+                
+                if validPaths.count < 100 {
+                    for path in validPaths {
+                        newExpandedPaths.insert(path)
+                    }
                 }
             }
+            let newAllItems = newFolders + newNotes
+            var newChildrenMap: [String: [NoteRecord]] = [:]
+            for item in newAllItems {
+                let parent = fastParentPath(for: item.path)
+                newChildrenMap[parent, default: []].append(item)
+            }
+            
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.allFolders = newFolders
+                self.allNotes = newNotes
+                if !currentSearchText.isEmpty {
+                    for path in newExpandedPaths {
+                        self.expandedPaths.insert(path)
+                    }
+                }
+                self.childrenByParent = newChildrenMap
+                self.updateGridForCurrentPath()
+            }
         }
-        
-        rebuildChildrenByParent()
-        updateGridForCurrentPath()
-    }
-    
-    private func rebuildChildrenByParent() {
-        var map: [String: [NoteRecord]] = [:]
-        for item in allFolders + allNotes {
-            let parent = fastParentPath(for: item.path)
-            map[parent, default: []].append(item)
-        }
-        self.childrenByParent = map
     }
     
     func updateGridForCurrentPath() {
@@ -272,7 +282,7 @@ class EditorViewModel: ObservableObject {
             for item in allItems { uniqueItems[item.path] = item }
             results = Array(uniqueItems.values)
         } else {
-            results = allItems.filter { fastParentPath(for: $0.path) == normalizedCurrentPath }
+            results = self.childrenByParent[normalizedCurrentPath] ?? []
         }
         
         // Aplicar ordenamiento

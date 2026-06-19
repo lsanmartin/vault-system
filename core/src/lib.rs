@@ -40,6 +40,15 @@ pub fn get_scan_progress(path: String) -> f32 {
     0.0
 }
 
+#[uniffi::export]
+pub fn cancel_scan(path: String) -> String {
+    if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+        progress.insert(path, -1.0);
+        return "Cancelado".to_string();
+    }
+    "Error".to_string()
+}
+
 pub fn add_telemetry_log(log: String) {
     if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
         logs.push(log);
@@ -198,6 +207,13 @@ pub fn init_knowledge_base() -> String {
             discovered_at TIMESTAMP DEFAULT now(),
             FOREIGN KEY (note_id) REFERENCES notes(id)
         );
+        CREATE TABLE IF NOT EXISTS memory_contexts (
+            dir_path VARCHAR PRIMARY KEY,
+            hitos JSON,
+            contexto TEXT,
+            historial JSON,
+            last_updated TIMESTAMP DEFAULT now()
+        );
         CREATE TABLE IF NOT EXISTS _schema_version (
             version INTEGER PRIMARY KEY,
             applied_at TIMESTAMP DEFAULT now()
@@ -311,10 +327,15 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             }
         }
 
-        // Actualizar progreso
-        if total_entries > 0 {
-            let pct = ((idx + 1) as f32 / total_entries as f32) * 100.0;
-            if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+        // Actualizar progreso y check cancel
+        if let Ok(mut progress) = SCAN_PROGRESS.lock() {
+            if let Some(&p) = progress.get(&path) {
+                if p < 0.0 {
+                    return "Escaneado cancelado.".to_string();
+                }
+            }
+            if total_entries > 0 {
+                let pct = ((idx + 1) as f32 / total_entries as f32) * 100.0;
                 progress.insert(path.clone(), pct);
             }
         }
@@ -1639,4 +1660,89 @@ pub fn revoke_mcp_token(token_id: String) -> bool {
         return guard.len() < initial_len;
     }
     false
+}
+
+#[uniffi::export]
+pub fn scan_memory_contexts(vault_path: String) -> String {
+    let path = std::path::Path::new(&vault_path);
+    let mut count = 0;
+    
+    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_name() == "_memory.md" {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                let dir_path = entry.path().parent().unwrap().to_str().unwrap_or("").to_string();
+                
+                let mut contexto = String::new();
+                let mut hitos_list = Vec::new();
+                let mut historial_list = Vec::new();
+                let mut current_section = "";
+                
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("## Contexto") {
+                        current_section = "contexto";
+                    } else if trimmed.starts_with("## Hitos") {
+                        current_section = "hitos";
+                    } else if trimmed.starts_with("## Historial") {
+                        current_section = "historial";
+                    } else if trimmed.starts_with("##") {
+                        current_section = "other";
+                    } else {
+                        match current_section {
+                            "contexto" => {
+                                if !contexto.is_empty() {
+                                    contexto.push('\n');
+                                }
+                                contexto.push_str(trimmed);
+                            },
+                            "hitos" => {
+                                if trimmed.starts_with("- ") {
+                                    hitos_list.push(trimmed[2..].to_string());
+                                }
+                            },
+                            "historial" => {
+                                if trimmed.starts_with("- ") {
+                                    historial_list.push(trimmed[2..].to_string());
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+                
+                let hitos_json = serde_json::json!(hitos_list).to_string();
+                let historial_json = serde_json::json!(historial_list).to_string();
+                
+                let mut conn_guard = DB_CONN.lock().unwrap();
+                if let Some(conn) = conn_guard.as_mut() {
+                    let sql = "INSERT OR REPLACE INTO memory_contexts (dir_path, hitos, contexto, historial, last_updated) VALUES (?, ?, ?, ?, now())";
+                    let _ = conn.execute(sql, params![dir_path, hitos_json, contexto, historial_json]);
+                    count += 1;
+                }
+            }
+        }
+    }
+    
+    format!("Escaneado _memory.md completado: {} contextos actualizados.", count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_vault_metodos() {
+        init_db();
+        let path = "/Users/lsanmartin/_vault/m\u{00E9}todos".to_string();
+        let ignore = vec!["_metadata.md".to_string()];
+        let res = scan_vault(path, ignore);
+        println!("Result: {}", res);
+        
+        let conn_guard = DB_CONN.lock().unwrap();
+        if let Some(conn) = conn_guard.as_ref() {
+            let mut stmt = conn.prepare("SELECT count(*) FROM notes WHERE path LIKE '%/me_todos%' OR path LIKE '%/m\u{00E9}todos%' OR path LIKE '%/me\u{0301}todos%'").unwrap();
+            let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+            println!("Rows found: {}", count);
+        }
+    }
 }

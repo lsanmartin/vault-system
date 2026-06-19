@@ -101,13 +101,31 @@ struct SidebarColumn: View {
             Section(header: HStack {
                 Text("Workspaces")
                 Spacer()
-                Button(action: { workspaceManager.triggerScanAll() }) {
-                    Image(systemName: "arrow.clockwise.circle")
+                Button(action: { workspaceManager.requestAccess() }) {
+                    Image(systemName: "plus.circle")
                         .font(.body)
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Re-indexar todos los workspaces")
+                .help("Añadir nuevo workspace")
+                
+                if !workspaceManager.scanProgress.isEmpty {
+                    Button(action: { workspaceManager.abortScanAll() }) {
+                        Image(systemName: "xmark.octagon")
+                            .font(.body)
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancelar escaneo global")
+                } else {
+                    Button(action: { workspaceManager.triggerScanAll() }) {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.body)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Re-indexar todos los workspaces")
+                }
             }) {
                 if let sysLoc = workspaceManager.systemLocation {
                     NavigationLink(value: sysLoc.id) {
@@ -140,14 +158,36 @@ struct SidebarColumn: View {
                             viewModel.navigateTo(path: location.path)
                         })
                         
-                        Button(action: { workspaceManager.triggerScan(for: location.path) }) {
-                            Image(systemName: "arrow.clockwise")
+                        if workspaceManager.scanProgress[location.path] != nil {
+                            Button(action: { workspaceManager.abortScan(for: location.path) }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 4)
+                            .help("Cancelar escaneo")
+                        } else {
+                            Button(action: { workspaceManager.triggerScan(for: location.path) }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 4)
+                            .help("Re-indexar este workspace")
+                        }
+                        
+                        Button(action: {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: location.path))
+                        }) {
+                            Image(systemName: "folder")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         .buttonStyle(.plain)
                         .padding(.trailing, 4)
-                        .help("Re-indexar este workspace")
+                        .help("Abrir en Finder")
                     }
                 }
             }
@@ -176,6 +216,9 @@ struct SidebarColumn: View {
         .navigationTitle("Vault System")
         .background(viewModel.macSidebar)
         .scrollContentBackground(.hidden)
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))) { _ in
+            viewModel.refreshNotes(locations: workspaceManager.allLocations)
+        }
     }
 }
 
