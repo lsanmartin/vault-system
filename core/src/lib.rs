@@ -25,6 +25,14 @@ pub struct NoteRecord {
 }
 
 static DB_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
+
+pub fn get_db_connection() -> Option<Connection> {
+    let guard = DB_CONN.lock().unwrap();
+    if let Some(c) = guard.as_ref() {
+        return c.try_clone().ok();
+    }
+    None
+}
 static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
 // --- COLA DE TELEMETRÍA ---
@@ -256,8 +264,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     // Limpiar registros antiguos para evitar huérfanos antes de re-escanear
     let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
     {
-        let mut conn_guard = DB_CONN.lock().unwrap();
-        if let Some(conn) = conn_guard.as_mut() {
+        if let Some(conn) = get_db_connection() {
             let _ = conn.execute(
                 "DELETE FROM notes WHERE path = ? OR path LIKE ?",
                 params![path, format!("{}%", clean_path)],
@@ -289,40 +296,98 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
     let total_entries = entries.len();
     let mut count = 0;
+    let mut skips = 0;
+
+    // Obtener lista actual (con mtime) para detectar huérfanos
+    let mut db_mtimes = std::collections::HashMap::new();
+    {
+        if let Some(conn) = get_db_connection() {
+            if let Ok(mut stmt) = conn.prepare("SELECT path, COALESCE(modified_ts, 0) FROM notes") {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        db_mtimes.insert(row.0, row.1 as u64);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut batch_inserts = Vec::new();
+    let batch_size = 500; // Lote de 500 para evitar agotar FixedSizeAllocator
 
     // Segunda pasada: procesar e insertar actualizando el progreso
     for (idx, entry) in entries.into_iter().enumerate() {
         let file_path = entry.path();
-        let full_path_str = file_path.to_str().unwrap_or("");
+        let full_path_str = file_path.to_str().unwrap_or("").to_string();
+        
+        let existing_mtime = db_mtimes.remove(&full_path_str);
         
         // Procesar directorios y archivos
         if file_path.is_dir() {
-            let title = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
-            let mut conn_guard = DB_CONN.lock().unwrap();
-            if let Some(conn) = conn_guard.as_mut() {
-                let sql = "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())";
-                let _ = conn.execute(sql, params![full_path_str, title, full_path_str, ""]);
+            if existing_mtime.is_none() {
+                let title = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta").to_string();
+                batch_inserts.push((full_path_str.clone(), title, "".to_string(), vec![], true, 0u64));
             }
         } else if file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md") {
-            let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
-            let content = fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
-            
-            // Generar embedding (esto NO bloquea la base de datos)
-            let emb = generate_embedding(&content);
-            let sql = format!(
-                "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding) VALUES (?, ?, ?, ?, false, now(), {})",
-                vector_to_sql_array(&emb)
-            );
-
-            let mut conn_guard = DB_CONN.lock().unwrap();
-            if let Some(conn) = conn_guard.as_mut() {
-                let insert_res = conn.execute(
-                    &sql,
-                    params![full_path_str, title, full_path_str, content]
-                );
+            let mtime = std::fs::metadata(file_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
                 
-                if insert_res.is_ok() {
-                    count += 1;
+            let content_changed = match existing_mtime {
+                Some(db_mtime) => db_mtime != mtime || db_mtime == 0,
+                None => true,
+            };
+            
+            if content_changed {
+                let content = std::fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
+                let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título").to_string();
+                let emb = generate_embedding(&content);
+                batch_inserts.push((full_path_str.clone(), title, content, emb, false, mtime));
+            } else {
+                let _skips = 1;
+            }
+        }
+
+        // Ejecutar el lote si alcanza tamaño
+        if batch_inserts.len() >= batch_size {
+            if let Some(conn) = get_db_connection() {
+                let _ = conn.execute("BEGIN TRANSACTION", []);
+                let mut tx_failed = false;
+                
+                for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
+                    if tx_failed { continue; }
+                    
+                    let res = if is_dir {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                            duckdb::params![p, t, p, c, mtime as i64]
+                        )
+                    } else {
+                        let sql = format!(
+                            "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            vector_to_sql_array(&emb)
+                        );
+                        conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
+                    };
+                    
+                    match res {
+                        Ok(_) => count += 1,
+                        Err(e) => {
+                            eprintln!("Error insertando nota {}: {}", p, e);
+                            tx_failed = true;
+                        }
+                    }
+                }
+                
+                if tx_failed {
+                    let _ = conn.execute("ROLLBACK", []);
+                } else {
+                    let _ = conn.execute("COMMIT", []);
                 }
             }
         }
@@ -340,6 +405,57 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             }
         }
     }
+    
+    // Procesar último lote
+    if !batch_inserts.is_empty() {
+        if let Some(conn) = get_db_connection() {
+            let _ = conn.execute("BEGIN TRANSACTION", []);
+            let mut tx_failed = false;
+            
+            for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
+                if tx_failed { continue; }
+                
+                let res = if is_dir {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                        duckdb::params![p, t, p, c, mtime as i64]
+                    )
+                } else {
+                    let sql = format!(
+                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                        vector_to_sql_array(&emb)
+                    );
+                    conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
+                };
+                
+                match res {
+                    Ok(_) => count += 1,
+                    Err(e) => {
+                        eprintln!("Error insertando nota {}: {}", p, e);
+                        tx_failed = true;
+                    }
+                }
+            }
+            
+            if tx_failed {
+                let _ = conn.execute("ROLLBACK", []);
+            } else {
+                let _ = conn.execute("COMMIT", []);
+            }
+        }
+    }
+    
+    // Eliminar huérfanos
+    let orphans_count = db_mtimes.len();
+    if orphans_count > 0 {
+        if let Some(conn) = get_db_connection() {
+            for orphan in db_mtimes.keys() {
+                let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
+                let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
+                let _ = conn.execute("DELETE FROM notes WHERE path = ?", duckdb::params![orphan]);
+            }
+        }
+    }
 
     // Asegurar 100% al finalizar
     if let Ok(mut progress) = SCAN_PROGRESS.lock() {
@@ -352,8 +468,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
 #[uniffi::export]
 pub fn remove_vault_path(path: String) -> String {
-    let mut conn_guard = DB_CONN.lock().unwrap();
-    if let Some(conn) = conn_guard.as_mut() {
+    if let Some(conn) = get_db_connection() {
         let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
         
         // Limpieza completa en cascada manual
@@ -402,8 +517,7 @@ pub fn create_item(path: String, is_dir: bool) -> bool {
 pub fn rename_item(old_path: String, new_path: String) -> bool {
     // Borrar registros viejos de la DB (el sync posterior creará los nuevos)
     {
-        let mut conn_guard = DB_CONN.lock().unwrap();
-        if let Some(conn) = conn_guard.as_mut() {
+        if let Some(conn) = get_db_connection() {
             let _ = conn.execute(
                 "DELETE FROM notes WHERE path = ? OR path LIKE ?",
                 params![old_path, format!("{}/%", old_path)],
@@ -417,11 +531,12 @@ pub fn rename_item(old_path: String, new_path: String) -> bool {
 pub fn delete_item(path: String) -> bool {
     // 1. Borrar de la base de datos
     {
-        let mut conn_guard = DB_CONN.lock().unwrap();
-        if let Some(conn) = conn_guard.as_mut() {
+        if let Some(conn) = get_db_connection() {
+            let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![&path, &format!("{}/%", path)]);
+            let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![&path, &format!("{}/%", path)]);
             let _ = conn.execute(
                 "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-                params![path, format!("{}/%", path)],
+                duckdb::params![&path, &format!("{}/%", path)],
             );
         }
     }
@@ -457,8 +572,7 @@ fn make_accent_insensitive_regex(word: &str) -> String {
 
 #[uniffi::export]
 pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ignore_patterns: Vec<String>) -> Vec<NoteRecord> {
-    let conn_guard = DB_CONN.lock().unwrap();
-    let conn = match conn_guard.as_ref() {
+    let conn = match get_db_connection() {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -474,25 +588,37 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         }
     }
 
+    // Telemetry Audit Logging (Radar de Intenciones)
+    if let Some(ref term) = search_term {
+        if !term.is_empty() {
+            let safe_term = term.replace("'", "''");
+            let _ = conn.execute(
+                &format!("INSERT INTO telemetry (event_type, context, message) VALUES ('QUERY_NOTES', 'Vault-System', 'Agent searched for: {}')", safe_term),
+                []
+            );
+        }
+    }
+
+    // Exocórtex de Cuarentena: Priorizamos synthetic_summary si existe
     let mut sql = if is_semantic {
         format!(
-            "SELECT id, title, path, content, is_dir, array_cosine_similarity(embedding, {}) as similarity FROM notes WHERE 1=1",
+            "SELECT n.id, n.title, n.path, COALESCE(s.synthetic_summary, n.content) as content, n.is_dir, array_cosine_similarity(n.embedding, {}) as similarity FROM notes n LEFT JOIN semantic_summaries s ON n.id = s.note_id WHERE 1=1",
             search_emb_sql
         )
     } else {
-        "SELECT id, title, path, content, is_dir FROM notes WHERE 1=1".to_string()
+        "SELECT n.id, n.title, n.path, COALESCE(s.synthetic_summary, n.content) as content, n.is_dir FROM notes n LEFT JOIN semantic_summaries s ON n.id = s.note_id WHERE 1=1".to_string()
     };
     
     // Filtro por Workspace (Path)
     if let Some(path) = path_filter {
         if !path.is_empty() {
-            sql.push_str(&format!(" AND path LIKE '{}%'", path));
+            sql.push_str(&format!(" AND n.path LIKE '{}%'", path));
         }
     }
 
     // Aplicar filtros de ignorado
     for pattern in ignore_patterns {
-        sql.push_str(&format!(" AND path NOT LIKE '%{}%'", pattern));
+        sql.push_str(&format!(" AND n.path NOT LIKE '%{}%'", pattern));
     }
 
     if let Some(ref term) = search_term {
@@ -501,7 +627,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
             for word in term.split_whitespace() {
                 let safe_word = word.replace("'", "''"); // Evitar inyección
                 let regex_pattern = format!("(?i){}", make_accent_insensitive_regex(&safe_word));
-                sql.push_str(&format!(" AND (regexp_matches(title, '{}') OR regexp_matches(content, '{}') OR regexp_matches(path, '{}'))", regex_pattern, regex_pattern, regex_pattern));
+                sql.push_str(&format!(" AND (regexp_matches(n.title, '{}') OR regexp_matches(n.content, '{}') OR regexp_matches(n.path, '{}'))", regex_pattern, regex_pattern, regex_pattern));
             }
         }
     }
@@ -685,8 +811,7 @@ pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
 
 #[uniffi::export]
 pub fn add_telemetry_event(context: String, event_type: String, message: String) {
-    let mut conn_guard = DB_CONN.lock().unwrap();
-    if let Some(conn) = conn_guard.as_mut() {
+    if let Some(conn) = get_db_connection() {
         let _ = conn.execute(
             "INSERT INTO telemetry (context, event_type, message) VALUES (?, ?, ?)",
             params![context, event_type, message],
@@ -696,8 +821,7 @@ pub fn add_telemetry_event(context: String, event_type: String, message: String)
 
 #[uniffi::export]
 pub fn get_telemetry_summary() -> String {
-    let conn_guard = DB_CONN.lock().unwrap();
-    let conn = match conn_guard.as_ref() {
+    let conn = match get_db_connection() {
         Some(c) => c,
         None => return "DB no inicializada".to_string(),
     };
@@ -724,8 +848,7 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                         let is_dir = path.is_dir();
                         
                         if is_dir || (path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p))) {
-                            let mut conn_guard = DB_CONN.lock().unwrap();
-                            if let Some(conn) = conn_guard.as_mut() {
+                            if let Some(conn) = get_db_connection() {
                                 let title = path.file_name().and_then(|s| s.to_str()).unwrap_or("Sin título");
                                 
                                 if is_dir {
@@ -752,8 +875,7 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                 } else if event.kind.is_remove() {
                     for path in event.paths {
                         let path_str = path.to_str().unwrap_or("");
-                        let mut conn_guard = DB_CONN.lock().unwrap();
-                        if let Some(conn) = conn_guard.as_mut() {
+                        if let Some(conn) = get_db_connection() {
                             let _ = conn.execute(
                                 "DELETE FROM notes WHERE path = ? OR path LIKE ?",
                                 params![path_str, format!("{}/%", path_str)],
@@ -898,8 +1020,7 @@ pub struct TemporalEdge {
 
 #[uniffi::export]
 pub fn get_temporal_neighborhood(note_id: String, max_depth: u32) -> Vec<TemporalEdge> {
-    let conn_guard = DB_CONN.lock().unwrap();
-    let conn = match conn_guard.as_ref() {
+    let conn = match get_db_connection() {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -966,8 +1087,7 @@ pub struct SemanticNeighbor {
 
 #[uniffi::export]
 pub fn get_semantic_neighbors(note_id: String, workspace_path: String, limit: u32) -> Vec<SemanticNeighbor> {
-    let conn_guard = DB_CONN.lock().unwrap();
-    let conn = match conn_guard.as_ref() {
+    let conn = match get_db_connection() {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -1037,8 +1157,7 @@ pub struct CognitiveMetrics {
 
 #[uniffi::export]
 pub fn get_cognitive_metrics(note_id: String, workspace_path: String) -> CognitiveMetrics {
-    let conn_guard = DB_CONN.lock().unwrap();
-    let conn = match conn_guard.as_ref() {
+    let conn = match get_db_connection() {
         Some(c) => c,
         None => return CognitiveMetrics { entity_count: 0, novelty_score: 0.5, load_score: 0.0 },
     };

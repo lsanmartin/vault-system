@@ -36,7 +36,7 @@ struct TelemetryView: View {
                         } else {
                             ForEach(Array(viewModel.telemetryLogs.enumerated()), id: \.offset) { index, log in
                                 Text(log)
-                                    .foregroundColor(.green)
+                                    .foregroundColor(colorForLog(log))
                                     .font(.system(.caption, design: .monospaced))
                                     .id(index)
                             }
@@ -58,5 +58,17 @@ struct TelemetryView: View {
         .frame(height: 250)
         .overlay(Rectangle().stroke(Color.gray.opacity(0.3), lineWidth: 1))
         .shadow(radius: 10)
+    }
+    
+    private func colorForLog(_ log: String) -> Color {
+        if log.contains("(humano)") {
+            return .blue
+        } else if log.contains("(agente)") {
+            return .green
+        } else if log.hasPrefix("MCP") {
+            return .purple
+        } else {
+            return .gray
+        }
     }
 }

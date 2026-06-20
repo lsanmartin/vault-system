@@ -197,14 +197,16 @@ class WorkspaceManager: ObservableObject {
             
             self?.progressTimers[path] = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
                 let currentProgress = Double(getScanProgress(path: path))
-                self?.scanProgress[path] = currentProgress
-                if currentProgress >= 100.0 {
-                    timer.invalidate()
-                    self?.progressTimers.removeValue(forKey: path)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        self?.scanProgress.removeValue(forKey: path)
+                DispatchQueue.main.async {
+                    self?.scanProgress[path] = currentProgress
+                    if currentProgress >= 100.0 {
+                        timer.invalidate()
+                        self?.progressTimers.removeValue(forKey: path)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self?.scanProgress.removeValue(forKey: path)
+                        }
+                        NotificationCenter.default.post(name: NSNotification.Name("VaultScanDidFinish"), object: nil)
                     }
-                    NotificationCenter.default.post(name: NSNotification.Name("VaultScanDidFinish"), object: nil)
                 }
             }
         }

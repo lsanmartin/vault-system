@@ -97,7 +97,10 @@ struct SidebarColumn: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     
     var body: some View {
-        List(selection: $viewModel.selectedLocationId) {
+        List(selection: Binding(
+            get: { viewModel.selectedLocationId },
+            set: { if let newId = $0 { viewModel.selectedLocationId = newId } }
+        )) {
             Section(header: HStack {
                 Text("Workspaces")
                 Spacer()
@@ -132,65 +135,53 @@ struct SidebarColumn: View {
                         Label(sysLoc.name, systemImage: "gearshape.fill")
                             .foregroundColor(.orange)
                     }
-                    .simultaneousGesture(TapGesture().onEnded {
-                        viewModel.navigateTo(path: sysLoc.path)
-                    })
                 }
                 ForEach(workspaceManager.locations) { location in
-                    HStack {
-                        NavigationLink(value: location.id) {
-                            HStack {
-                                Label(location.name, systemImage: "folder.fill")
-                                Spacer()
-                                if let progress = workspaceManager.scanProgress[location.path] {
-                                    Text("\(Int(progress))%")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    ProgressView(value: progress, total: 100.0)
-                                        .progressViewStyle(.circular)
-                                        .controlSize(.small)
-                                        .scaleEffect(0.6)
-                                        .frame(width: 12, height: 12)
+                    NavigationLink(value: location.id) {
+                        HStack {
+                            Label(location.name, systemImage: "folder.fill")
+                            Spacer()
+                            
+                            if let progress = workspaceManager.scanProgress[location.path] {
+                                Text("\(Int(progress))%")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(viewModel.macSecondaryText)
+                                    .frame(width: 24, alignment: .trailing)
+                                
+                                Button(action: { workspaceManager.abortScan(for: location.path) }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundColor(.red)
                                 }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 4)
+                                .help("Cancelar escaneo")
+                            } else {
+                                Button(action: { workspaceManager.triggerScan(for: location.path) }) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 4)
+                                .help("Re-indexar este workspace")
                             }
-                        }
-                        .simultaneousGesture(TapGesture().onEnded {
-                            viewModel.navigateTo(path: location.path)
-                        })
-                        
-                        if workspaceManager.scanProgress[location.path] != nil {
-                            Button(action: { workspaceManager.abortScan(for: location.path) }) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.trailing, 4)
-                            .help("Cancelar escaneo")
-                        } else {
-                            Button(action: { workspaceManager.triggerScan(for: location.path) }) {
-                                Image(systemName: "arrow.clockwise")
+                            
+                            Button(action: {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: location.path))
+                            }) {
+                                Image(systemName: "folder")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                             .buttonStyle(.plain)
                             .padding(.trailing, 4)
-                            .help("Re-indexar este workspace")
+                            .help("Abrir en Finder")
                         }
-                        
-                        Button(action: {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: location.path))
-                        }) {
-                            Image(systemName: "folder")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 4)
-                        .help("Abrir en Finder")
                     }
                 }
             }
+            
             Section("Apariencia") {
                 Picker(selection: $viewModel.selectedTheme) {
                     ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
@@ -387,7 +378,8 @@ struct VaultTreeView: View {
     let showNotes: Bool
     
     var rootPath: String {
-        locations.first(where: { $0.id == viewModel.selectedLocationId })?.path ?? ""
+        let p = locations.first(where: { $0.id == viewModel.selectedLocationId })?.path ?? ""
+        return p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
     }
     
     var rootItems: [NoteRecord] {
@@ -681,9 +673,11 @@ struct MainEditorView: View {
         .onChange(of: viewModel.debouncedSearchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onAppear {
-            viewModel.syncAll(locations: workspaceManager.allLocations)
-            if viewModel.selectedLocationId == nil, let first = workspaceManager.allLocations.first { viewModel.selectedLocationId = first.id }
-            viewModel.launchWatcher(paths: workspaceManager.allLocations.map { $0.path }, ignorePatterns: [])
+            DispatchQueue.main.async {
+                viewModel.syncAll(locations: workspaceManager.allLocations)
+                if viewModel.selectedLocationId == nil, let first = workspaceManager.allLocations.first { viewModel.selectedLocationId = first.id }
+                viewModel.launchWatcher(paths: workspaceManager.allLocations.map { $0.path }, ignorePatterns: [])
+            }
         }
     }
     
@@ -978,9 +972,9 @@ struct EditorAreaView: View {
         var themeCSS = ""
         switch theme {
         case .light: themeCSS = ":root { --bg: #fff; --text: #333; --accent: #2b82d9; }"
-        case .dark: themeCSS = ":root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; }"
+        case .dark: themeCSS = ":root { --bg: #282828; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; }"
         case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
-        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #121212; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } }"
+        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #282828; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } }"
         }
         
         // Extraer entidades reales del Exocórtex si el Heatmap está activo
@@ -1019,7 +1013,7 @@ struct EditorAreaView: View {
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/mark.js/8.11.1/mark.min.js"></script>
-        <style>\##(themeCSS) body { font-family: -apple-system, system-ui, sans-serif; padding: 2rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; }
+        <style>\##(themeCSS) body { font-family: -apple-system, system-ui, sans-serif; padding: 2rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; } a, a:visited { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
         img { max-width: 100%; height: auto; border-radius: 8px; } pre { background: rgba(128,128,128,0.1); padding: 1rem; border-radius: 8px; overflow: auto; }
         mark.search-highlight { background-color: rgba(255, 215, 0, 0.4); color: inherit; border-radius: 2px; padding: 0 2px; box-shadow: 0 0 4px rgba(255,215,0,0.5); }
         blockquote { border-left: 4px solid var(--accent); margin: 1.5rem 0; padding: 0.5rem 1rem; background: rgba(128,128,128,0.05); font-style: italic; color: var(--text); opacity: 0.9; }

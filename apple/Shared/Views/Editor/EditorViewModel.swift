@@ -105,7 +105,8 @@ class EditorViewModel: ObservableObject {
                 if let location = currentLocations?.first(where: { $0.id == id }) {
                     DispatchQueue.main.async { [weak self] in
                         self?.selectedItemIds.removeAll()
-                        self?.currentPath = location.path
+                        let p = location.path
+                        self?.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
                         if let locs = self?.currentLocations {
                             self?.refreshNotes(locations: locs)
                         }
@@ -196,9 +197,11 @@ class EditorViewModel: ObservableObject {
     }
     
     func refreshNotes(locations: [VaultLocation]) {
-        self.currentLocations = locations
-        if currentPath.isEmpty, let first = locations.first(where: { $0.id == selectedLocationId }) {
-            currentPath = first.path
+        DispatchQueue.main.async { [weak self] in
+            self?.currentLocations = locations
+            if self?.currentPath.isEmpty == true, let first = locations.first(where: { $0.id == self?.selectedLocationId }) {
+                self?.currentPath = first.path
+            }
         }
 
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
@@ -206,8 +209,12 @@ class EditorViewModel: ObservableObject {
         let currentDeletedPaths = deletedPathsThisSession
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Obtenemos todo de la DB
-            let rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: nil, ignorePatterns: ignorePatterns)
+            var rootWorkspacePath = locations.first(where: { $0.id == self?.selectedLocationId })?.path
+            if let rwp = rootWorkspacePath, rwp.hasSuffix("/") && rwp.count > 1 {
+                rootWorkspacePath = String(rwp.dropLast())
+            }
+            // Obtenemos solo los datos del workspace activo
+            let rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
             
             // Aplicar filtro de sesión GLOBAL
             let allItems = rawItems.filter { item in
@@ -237,7 +244,7 @@ class EditorViewModel: ObservableObject {
                     }
                 }
                 
-                let allRawFolders = queryNotes(searchTerm: "", pathFilter: nil, ignorePatterns: ignorePatterns).filter { $0.isDir }
+                let allRawFolders = queryNotes(searchTerm: "", pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns).filter { $0.isDir }
                 newFolders = allRawFolders.filter { validPaths.contains($0.path) }
                 newNotes = allItems.filter { !$0.isDir }
                 
