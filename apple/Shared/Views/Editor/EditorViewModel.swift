@@ -129,7 +129,7 @@ class EditorViewModel: ObservableObject {
     
     // --- macOS Finder Palette (Dynamic) ---
     var macBackground: Color { selectedTheme == .night ? .black : Color(nsColor: .windowBackgroundColor) }
-    var macSidebar: Color { selectedTheme == .night ? .black : Color(nsColor: .underPageBackgroundColor) }
+    var macSidebar: Color { selectedTheme == .night ? .black : (selectedTheme == .light ? Color(red: 236/255.0, green: 236/255.0, blue: 236/255.0) : Color(nsColor: .windowBackgroundColor)) }
     var macPrimaryText: Color { selectedTheme == .night ? .red : .primary }
     var macSecondaryText: Color { selectedTheme == .night ? Color.red.opacity(0.7) : .secondary }
     var macControlIcon: Color { selectedTheme == .night ? Color.red.opacity(0.5) : .secondary }
@@ -346,7 +346,7 @@ class EditorViewModel: ObservableObject {
             } else {
                 selectedItemIds.insert(id)
             }
-        } else if extend, let lastId = lastSelectedId {
+        } else if extend, let lastId = lastSelectedId, !selectedItemIds.isEmpty {
             // Obtener lista plana de lo que el usuario está viendo realmente
             let visibleItems = getFlattenedVisibleItems()
             
@@ -489,7 +489,16 @@ class EditorViewModel: ObservableObject {
     }
     
     func deleteNote(_ note: NoteRecord, locations: [VaultLocation]) {
-        if deleteItem(path: note.path) {
+        var deletedPhysically = false
+        do {
+            try FileManager.default.removeItem(atPath: note.path)
+            deletedPhysically = true
+        } catch {
+            print("Error borrando nota: \(error)")
+        }
+        _ = deleteItem(path: note.path)
+        
+        if deletedPhysically {
             // Cerrar pestaña si está abierta
             if let index = tabs.firstIndex(where: { $0.id == note.id }) {
                 tabs.remove(at: index)
@@ -504,7 +513,20 @@ class EditorViewModel: ObservableObject {
         var deletedAny = false
         
         for path in itemsToDelete {
-            if deleteItem(path: path) { // Borra del disco
+            // Borrar físicamente desde Swift (macOS Sandbox compatibility)
+            var deletedPhysically = false
+            do {
+                try FileManager.default.removeItem(atPath: path)
+                deletedPhysically = true
+            } catch {
+                print("Error borrando de disco: \(error)")
+            }
+            
+            // Borrar de la base de datos a través de Rust
+            _ = deleteItem(path: path) 
+            
+            if deletedPhysically {
+                deletedAny = true
                 deletedAny = true
                 // Marcar como borrado en esta sesión para evitar que el scanner lo traiga de vuelta
                 deletedPathsThisSession.insert(path)
@@ -533,8 +555,8 @@ class EditorViewModel: ObservableObject {
             if !tabs.contains(where: { $0.id == activeTabId }) {
                 activeTabId = tabs.last?.id
             }
-            // No llamamos a syncAll aquí para evitar que el escáner (sin el fix de limpieza) traiga de vuelta registros huérfanos
-            Telemetry.shared.log("Editor", eventType: "BatchDeleteWorkaround", message: "Eliminados localmente \(itemsToDelete.count) elementos")
+            // Ahora que Rust limpia atómicamente y en cascada, podemos forzar un refresco
+            refreshNotes(locations: locations)
         }
     }
     

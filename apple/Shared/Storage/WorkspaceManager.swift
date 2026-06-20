@@ -234,6 +234,18 @@ class WorkspaceManager: ObservableObject {
     }
 
     /// Elimina una ubicación y libera su recurso.
+    func removeLocation(id: UUID) {
+        if let index = locations.firstIndex(where: { $0.id == id }) {
+            let location = locations[index]
+            location.url?.stopAccessingSecurityScopedResource()
+            _ = removeVaultPath(path: location.path)
+            NotificationCenter.default.post(name: Notification.Name("WorkspaceRemoved"), object: nil, userInfo: ["path": location.path])
+            locations.remove(at: index)
+            saveToDisk()
+            if locations.isEmpty { isAuthorized = false }
+        }
+    }
+    
     func removeLocation(at offsets: IndexSet) {
         for index in offsets {
             let location = locations[index]

@@ -95,11 +95,20 @@ struct NoteCard: View {
 struct SidebarColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @State private var workspaceToRemove: VaultLocation?
     
     var body: some View {
         List(selection: Binding(
             get: { viewModel.selectedLocationId },
-            set: { if let newId = $0 { viewModel.selectedLocationId = newId } }
+            set: { 
+                if let newId = $0 { 
+                    viewModel.selectedLocationId = newId 
+                    DispatchQueue.main.async {
+                        viewModel.searchText = ""
+                        viewModel.debouncedSearchText = ""
+                    }
+                } 
+            }
         )) {
             Section(header: HStack {
                 Text("Workspaces")
@@ -178,6 +187,13 @@ struct SidebarColumn: View {
                             .padding(.trailing, 4)
                             .help("Abrir en Finder")
                         }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                workspaceToRemove = location
+                            } label: {
+                                Label("Desvincular Workspace", systemImage: "xmark.bin")
+                            }
+                        }
                     }
                 }
             }
@@ -186,6 +202,8 @@ struct SidebarColumn: View {
                 Picker(selection: $viewModel.selectedTheme) {
                     ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
                 } label: { Label("Tema", systemImage: "paintbrush") }
+                .colorMultiply(viewModel.selectedTheme == .night ? .red : .white)
+                .listRowBackground(viewModel.macSidebar)
             }
             Section("Explorar") {
                 Picker(selection: $viewModel.treeMode) {
@@ -193,6 +211,8 @@ struct SidebarColumn: View {
                         Text(mode.rawValue).tag(mode)
                     }
                 } label: { Label("Modo", systemImage: "magnifyingglass") }
+                .colorMultiply(viewModel.selectedTheme == .night ? .red : .white)
+                .listRowBackground(viewModel.macSidebar)
 
                 switch viewModel.treeMode {
                 case .hierarchy:
@@ -209,6 +229,23 @@ struct SidebarColumn: View {
         .scrollContentBackground(.hidden)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))) { _ in
             viewModel.refreshNotes(locations: workspaceManager.allLocations)
+        }
+        .preferredColorScheme(viewModel.selectedTheme == .light ? .light : .dark)
+        .tint(viewModel.macAccent)
+        .foregroundColor(viewModel.macPrimaryText)
+        .alert(item: $workspaceToRemove) { loc in
+            Alert(
+                title: Text("¿Desvincular Workspace?"),
+                message: Text("¿Estás seguro de que quieres desvincular '\(loc.name)'? Esto NO borrará los archivos de tu disco duro."),
+                primaryButton: .destructive(Text("Desvincular")) {
+                    workspaceManager.removeLocation(id: loc.id)
+                    // Volver a la raíz del sistema si era el que estaba seleccionado
+                    if viewModel.selectedLocationId == loc.id {
+                        viewModel.selectedLocationId = workspaceManager.systemLocation?.id
+                    }
+                },
+                secondaryButton: .cancel(Text("Cancelar"))
+            )
         }
     }
 }
@@ -248,18 +285,15 @@ struct MainContentColumn: View {
                     }
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        isSearchFocused = false
-                        NSApp.keyWindow?.makeFirstResponder(nil)
-                        viewModel.selectedItemIds.removeAll()
-                    }
                 }
-                .simultaneousGesture(TapGesture().onEnded { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) })
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
-                        .onTapGesture { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+                        .onTapGesture { 
+                            isSearchFocused = false
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.selectedItemIds.removeAll()
+                        }
                 )
             } else {
                 ScrollView {
@@ -273,19 +307,16 @@ struct MainContentColumn: View {
                     }
                     .padding()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        isSearchFocused = false
-                        NSApp.keyWindow?.makeFirstResponder(nil)
-                        viewModel.selectedItemIds.removeAll()
-                    }
                 }
-                .simultaneousGesture(TapGesture().onEnded { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) })
                 .frame(maxWidth: .infinity)
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
-                        .onTapGesture { isSearchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+                        .onTapGesture { 
+                            isSearchFocused = false
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            viewModel.selectedItemIds.removeAll()
+                        }
                 )
             }
         }

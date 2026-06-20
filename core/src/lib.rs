@@ -261,26 +261,21 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         progress.insert(path.clone(), 0.0);
     }
 
-    // Limpiar registros antiguos para evitar huérfanos antes de re-escanear
-    let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
-    {
-        if let Some(conn) = get_db_connection() {
-            let _ = conn.execute(
-                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-                params![path, format!("{}%", clean_path)],
-            );
-        } else {
-            return "Error: La base de datos no ha sido inicializada.".to_string();
-        }
-    }
+
 
     let vault_path = Path::new(&path);
 
     // Primera pasada: recolectar y contar todas las entradas válidas
     let mut entries = Vec::new();
-    for entry in WalkDir::new(vault_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    let it = WalkDir::new(vault_path).into_iter().filter_entry(|e| {
+        let is_hidden = e.file_name()
+             .to_str()
+             .map(|s| s.starts_with("."))
+             .unwrap_or(false);
+        !is_hidden
+    });
+    
+    for entry in it.filter_map(|e| e.ok())
     {
         let file_path = entry.path();
         let full_path_str = file_path.to_str().unwrap_or("");
