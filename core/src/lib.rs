@@ -177,7 +177,8 @@ pub fn init_knowledge_base() -> String {
             is_dir BOOLEAN DEFAULT false,
             created_at TIMESTAMP,
             tags VARCHAR[],
-            embedding FLOAT[384]
+            embedding FLOAT[384],
+            modified_ts BIGINT DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS links (
             source_id VARCHAR,
