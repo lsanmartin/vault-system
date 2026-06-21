@@ -8,8 +8,6 @@ struct NoteCard: View {
     let locations: [VaultLocation]
     @ObservedObject var viewModel: EditorViewModel
     
-    @State private var isShowingRename = false
-    @State private var newName = ""
     
     private var displayPath: String {
         if let root = workspacePath, note.path.hasPrefix(root) {
@@ -72,8 +70,7 @@ struct NoteCard: View {
                 } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
             } else {
                 Button {
-                    newName = note.title
-                    isShowingRename = true
+                    viewModel.beginRename(for: note)
                 } label: { Label("Renombrar", systemImage: "pencil") }
                 
                 Button(role: .destructive) { 
@@ -82,11 +79,7 @@ struct NoteCard: View {
                 } label: { Label("Eliminar", systemImage: "trash") }
             }
         }
-        .alert("Renombrar Nota", isPresented: $isShowingRename) {
-            TextField("Nuevo nombre", text: $newName)
-            Button("Cancelar", role: .cancel) { }
-            Button("Guardar") { viewModel.performRename(item: note, newName: newName, locations: locations) }
-        }
+
     }
 }
 
@@ -225,10 +218,24 @@ struct SidebarColumn: View {
             }
         }
         .navigationTitle("Vault System")
-        .background(viewModel.macSidebar)
+        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
         .scrollContentBackground(.hidden)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))) { _ in
             viewModel.refreshNotes(locations: workspaceManager.allLocations)
+        }
+        .alert("Renombrar", isPresented: Binding(
+            get: { viewModel.itemToRename != nil },
+            set: { if !$0 { viewModel.itemToRename = nil } }
+        )) {
+            TextField("Nuevo nombre", text: $viewModel.newNameForRename)
+                .onSubmit {
+                    viewModel.commitRename(locations: workspaceManager.allLocations)
+                }
+            Button("Cancelar", role: .cancel) { }
+            Button("Guardar") { viewModel.commitRename(locations: workspaceManager.allLocations) }
+                .keyboardShortcut(.defaultAction)
+        } message: {
+            Text(viewModel.itemToRename?.title ?? "")
         }
         .preferredColorScheme(viewModel.selectedTheme == .light ? .light : .dark)
         .tint(viewModel.macAccent)
@@ -321,7 +328,7 @@ struct MainContentColumn: View {
             }
         }
         .navigationTitle("Notas")
-        .background(viewModel.macBackground)
+        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
         .onChange(of: viewModel.selectedItemIds) { isSearchFocused = false }
         .onChange(of: viewModel.selectedLocationId) { isSearchFocused = false }
         .background(
@@ -397,7 +404,7 @@ struct MainContentColumn: View {
             }
         }
         .padding()
-        .background(viewModel.macBackground)
+        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
     }
 }
 
@@ -421,16 +428,44 @@ struct VaultTreeView: View {
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        Group {
             if rootPath.isEmpty {
                 ContentUnavailableView("No Workspace", systemImage: "folder.badge.questionmark")
             } else {
                 ForEach(rootItems, id: \.path) { item in
-                    VaultTreeRow(item: item, viewModel: viewModel, locations: locations, showNotes: showNotes)
+                    VaultTreeRow(item: item, viewModel: viewModel, locations: locations, showNotes: showNotes, depth: 0)
                 }
             }
         }
-        .padding(.horizontal, 8)
+    }
+}
+
+struct VaultContextMenu: View {
+    let item: NoteRecord
+    @ObservedObject var viewModel: EditorViewModel
+    let locations: [VaultLocation]
+    
+    var body: some View {
+        if viewModel.selectedItemIds.count > 1 {
+            Button(role: .destructive) {
+                viewModel.deleteSelectedItems(locations: locations)
+            } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
+        } else {
+            if item.isDir {
+                Button { viewModel.createNewNote(at: item.path, locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
+                Button { viewModel.createNewFolder(at: item.path, locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
+                Divider()
+            }
+            
+            Button {
+                viewModel.beginRename(for: item)
+            } label: { Label("Renombrar", systemImage: "pencil") }
+
+            Button(role: .destructive) { 
+                viewModel.selectItem(item)
+                viewModel.deleteSelectedItems(locations: locations) 
+            } label: { Label("Eliminar", systemImage: "trash") }
+        }
     }
 }
 
@@ -439,9 +474,8 @@ struct VaultTreeRow: View {
     @ObservedObject var viewModel: EditorViewModel
     let locations: [VaultLocation]
     let showNotes: Bool
+    var depth: Int = 0
     
-    @State private var isShowingRename = false
-    @State private var newName = ""
     
     var isExpanded: Bool {
         viewModel.expandedPaths.contains(item.path)
@@ -460,7 +494,7 @@ struct VaultTreeRow: View {
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        Group {
             HStack(spacing: 4) {
                 if item.isDir {
                     Image(systemName: "chevron.right")
@@ -506,44 +540,20 @@ struct VaultTreeRow: View {
                     }
                 }
                 .contextMenu {
-                    if viewModel.selectedItemIds.count > 1 {
-                         Button(role: .destructive) {
-                            viewModel.deleteSelectedItems(locations: locations)
-                        } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
-                    } else {
-                        if item.isDir {
-                            Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
-                            Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
-                            Divider()
-                        }
-                        
-                        Button {
-                            newName = item.title
-                            isShowingRename = true
-                        } label: { Label("Renombrar", systemImage: "pencil") }
-
-                        Button(role: .destructive) { 
-                            viewModel.selectItem(item)
-                            viewModel.deleteSelectedItems(locations: locations) 
-                        } label: { Label("Eliminar", systemImage: "trash") }
-                    }
+                    VaultContextMenu(item: item, viewModel: viewModel, locations: locations)
+                        .id(item.path + "_ctx")
                 }
+                .id(item.path + "_row")
+                .padding(.leading, CGFloat(depth * 16))
             }
             
             if item.isDir && isExpanded {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(children, id: \.path) { child in
-                        VaultTreeRow(item: child, viewModel: viewModel, locations: locations, showNotes: showNotes)
-                    }
+                ForEach(children, id: \.path) { child in
+                    VaultTreeRow(item: child, viewModel: viewModel, locations: locations, showNotes: showNotes, depth: depth + 1)
                 }
-                .padding(.leading, 12)
             }
         }
-        .alert("Renombrar \(item.isDir ? "Carpeta" : "Nota")", isPresented: $isShowingRename) {
-            TextField("Nuevo nombre", text: $newName)
-            Button("Cancelar", role: .cancel) { }
-            Button("Guardar") { viewModel.performRename(item: item, newName: newName, locations: locations) }
-        }
+
     }
 }
 
@@ -567,7 +577,7 @@ struct DetailColumn: View {
                             }
                         }
                     }
-                    .background(viewModel.macSidebar)
+                    .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
                     
                     EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
                     
@@ -579,7 +589,7 @@ struct DetailColumn: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 12)
                         .padding(.top, 8)
-                        .background(viewModel.macBackground)
+                        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
                 }
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
@@ -726,8 +736,6 @@ struct FileRowView: View {
     @ObservedObject var viewModel: EditorViewModel
     let locations: [VaultLocation]
     
-    @State private var isShowingRename = false
-    @State private var newName = ""
     
     var body: some View {
         HStack {
@@ -760,28 +768,10 @@ struct FileRowView: View {
             }
         }
         .contextMenu {
-            if viewModel.selectedItemIds.count > 1 {
-                Button(role: .destructive) {
-                    viewModel.deleteSelectedItems(locations: locations)
-                } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
-            } else {
-                if item.isDir {
-                    Button { viewModel.navigateTo(path: item.path); viewModel.createNewNote(locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
-                    Button { viewModel.navigateTo(path: item.path); viewModel.createNewFolder(locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
-                    Divider()
-                }
-                
-                Button {
-                    newName = item.title
-                    isShowingRename = true
-                } label: { Label("Renombrar", systemImage: "pencil") }
-
-                Button(role: .destructive) { 
-                    viewModel.selectItem(item)
-                    viewModel.deleteSelectedItems(locations: locations) 
-                } label: { Label("Eliminar", systemImage: "trash") }
-            }
+            VaultContextMenu(item: item, viewModel: viewModel, locations: locations)
+                .id(item.path + "_ctx_grid")
         }
+        .id(item.path + "_row_grid")
         .listRowBackground(viewModel.macBackground)
         .overlay(
             Rectangle()
@@ -936,10 +926,10 @@ struct EditorAreaView: View {
                     .cornerRadius(15)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 16)
-                    .background(viewModel.macBackground) 
+                    .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial))) 
             }
             }
-            .background(viewModel.macBackground)
+            .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
             .background(
                 Group {
                     Button("") {
@@ -1002,10 +992,10 @@ struct EditorAreaView: View {
         let base64Content = Data(content.utf8).base64EncodedString()
         var themeCSS = ""
         switch theme {
-        case .light: themeCSS = ":root { --bg: #fff; --text: #333; --accent: #2b82d9; }"
-        case .dark: themeCSS = ":root { --bg: #282828; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; }"
+        case .light: themeCSS = ":root { --bg: transparent; --text: #333; --accent: #2b82d9; } body { background: transparent; }"
+        case .dark: themeCSS = ":root { --bg: transparent; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } body { background: transparent; }"
         case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
-        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: #282828; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } }"
+        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: transparent; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } } body { background: transparent; }"
         }
         
         // Extraer entidades reales del Exocórtex si el Heatmap está activo

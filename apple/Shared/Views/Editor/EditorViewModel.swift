@@ -92,6 +92,20 @@ class EditorViewModel: ObservableObject {
     @Published var debouncedSearchText: String = ""
     private var cancellables = Set<AnyCancellable>()
     @Published var selectedItemIds: Set<String> = []
+    
+    @Published var itemToRename: NoteRecord? = nil
+    @Published var newNameForRename: String = ""
+    
+    func beginRename(for item: NoteRecord) {
+        self.newNameForRename = item.title
+        self.itemToRename = item
+    }
+    
+    func commitRename(locations: [VaultLocation]) {
+        guard let item = itemToRename else { return }
+        performRename(item: item, newName: newNameForRename, locations: locations)
+        self.itemToRename = nil
+    }
     @Published var expandedPaths: Set<String> = []
     @Published var childrenByParent: [String: [NoteRecord]] = [:]
     @Published var deletedPathsThisSession: Set<String> = []
@@ -312,6 +326,7 @@ class EditorViewModel: ObservableObject {
         currentPath = path
         // Al navegar, limpiamos selección por defecto para evitar confusiones de contexto
         selectedItemIds = [path] 
+        lastSelectedId = nil
         
         // Si estábamos en modo búsqueda y el usuario entra a una carpeta,
         // limpiamos la búsqueda para mostrar el contenido real de la carpeta.
@@ -347,17 +362,24 @@ class EditorViewModel: ObservableObject {
                 selectedItemIds.insert(id)
             }
         } else if extend, let lastId = lastSelectedId, !selectedItemIds.isEmpty {
-            // Obtener lista plana de lo que el usuario está viendo realmente
-            let visibleItems = getFlattenedVisibleItems()
-            
-            if let startIdx = visibleItems.firstIndex(where: { $0.path == lastId }),
-               let endIdx = visibleItems.firstIndex(where: { $0.path == id }) {
+            let gridItems = self.folders + self.notes
+            if let startIdx = gridItems.firstIndex(where: { $0.path == lastId }),
+               let endIdx = gridItems.firstIndex(where: { $0.path == id }) {
                 let range = startIdx < endIdx ? startIdx...endIdx : endIdx...startIdx
                 for i in range {
-                    selectedItemIds.insert(visibleItems[i].path)
+                    selectedItemIds.insert(gridItems[i].path)
                 }
             } else {
-                selectedItemIds.insert(id)
+                let visibleItems = getFlattenedVisibleItems()
+                if let startIdx = visibleItems.firstIndex(where: { $0.path == lastId }),
+                   let endIdx = visibleItems.firstIndex(where: { $0.path == id }) {
+                    let range = startIdx < endIdx ? startIdx...endIdx : endIdx...startIdx
+                    for i in range {
+                        selectedItemIds.insert(visibleItems[i].path)
+                    }
+                } else {
+                    selectedItemIds.insert(id)
+                }
             }
         } else {
             selectedItemIds = [id]
@@ -429,21 +451,23 @@ class EditorViewModel: ObservableObject {
         refreshNotes(locations: locations)
     }
     
-    func createNewNote(locations: [VaultLocation]) {
-        var targetPath = currentPath
+    func createNewNote(at specificPath: String? = nil, locations: [VaultLocation]) {
+        var targetPath = specificPath ?? currentPath
         
-        // Priorizar el último elemento seleccionado (carpeta o archivo)
-        if let lastId = lastSelectedId ?? selectedItemIds.first {
-            let allItems = allFolders + allNotes
-            if let selectedItem = allItems.first(where: { $0.path == lastId }) {
-                if selectedItem.isDir {
-                    targetPath = selectedItem.path
-                } else {
-                    targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+        print("DEBUG createNewNote: specificPath = \(String(describing: specificPath)), currentPath = \(currentPath)")
+        if specificPath == nil {
+            if let lastId = lastSelectedId ?? selectedItemIds.first {
+                let allItems = allFolders + allNotes
+                if let selectedItem = allItems.first(where: { $0.path == lastId }) {
+                    if selectedItem.isDir {
+                        targetPath = selectedItem.path
+                    } else {
+                        targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+                    }
                 }
+            } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
+                targetPath = location.path
             }
-        } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
-            targetPath = location.path
         }
         
         if targetPath.isEmpty { return }
@@ -454,28 +478,41 @@ class EditorViewModel: ObservableObject {
         if createItem(path: fullPath, isDir: false) {
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
             syncAll(locations: locations)
-            if let newNote = notes.first(where: { $0.path == fullPath }) ?? allNotes.first(where: { $0.path == fullPath }) {
-                openNote(newNote)
-                selectItem(newNote)
+            
+            let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
+            self.allNotes.append(tempNote)
+            self.childrenByParent[targetPath, default: []].append(tempNote)
+            
+            if self.currentPath != targetPath {
+                self.currentPath = targetPath
+            } else {
+                self.updateGridForCurrentPath()
+            }
+            
+            openNote(tempNote)
+            selectItem(tempNote)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.beginRename(for: tempNote)
             }
         }
     }
     
-    func createNewFolder(locations: [VaultLocation]) {
-        var targetPath = currentPath
+    func createNewFolder(at specificPath: String? = nil, locations: [VaultLocation]) {
+        var targetPath = specificPath ?? currentPath
         
-        // Priorizar el último elemento seleccionado (carpeta o archivo)
-        if let lastId = lastSelectedId ?? selectedItemIds.first {
-            let allItems = allFolders + allNotes
-            if let selectedItem = allItems.first(where: { $0.path == lastId }) {
-                if selectedItem.isDir {
-                    targetPath = selectedItem.path
-                } else {
-                    targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+        if specificPath == nil {
+            if let lastId = lastSelectedId ?? selectedItemIds.first {
+                let allItems = allFolders + allNotes
+                if let selectedItem = allItems.first(where: { $0.path == lastId }) {
+                    if selectedItem.isDir {
+                        targetPath = selectedItem.path
+                    } else {
+                        targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
+                    }
                 }
+            } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
+                targetPath = location.path
             }
-        } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
-            targetPath = location.path
         }
         
         if targetPath.isEmpty { return }
@@ -485,6 +522,24 @@ class EditorViewModel: ObservableObject {
         
         if createItem(path: fullPath, isDir: true) {
             syncAll(locations: locations)
+            
+            let tempFolder = NoteRecord(id: fullPath, title: folderName, path: fullPath, content: "", isDir: true)
+            self.allFolders.append(tempFolder)
+            self.childrenByParent[targetPath, default: []].append(tempFolder)
+            
+            if self.currentPath != targetPath {
+                self.currentPath = targetPath
+            } else {
+                self.updateGridForCurrentPath()
+            }
+            
+            selectItem(tempFolder)
+            self.expandedPaths.insert(targetPath)
+            self.expandedPaths.insert(fullPath)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.beginRename(for: tempFolder)
+            }
         }
     }
     
@@ -572,9 +627,13 @@ class EditorViewModel: ObservableObject {
         
         let newPath = parentURL.appendingPathComponent(newFileName).path
         
-        if renameItem(oldPath: item.path, newPath: newPath) {
+        let success = renameItem(oldPath: item.path, newPath: newPath)
+        if success {
             syncAll(locations: locations)
             Telemetry.shared.log("Editor", eventType: "Rename", message: "De \(item.title) a \(newFileName)")
+        } else {
+            Telemetry.shared.log("Editor", eventType: "Rename", message: "FAILED rename \(item.path) to \(newPath)")
+            print("FAILED RENAME: \(item.path) -> \(newPath)")
         }
     }
     
