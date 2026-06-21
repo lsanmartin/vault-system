@@ -88,53 +88,55 @@ struct HeatmapView: View {
     }
 
     private func loadActivity() {
-        guard let wsPath = currentWorkspacePath else {
-            activityByDay = []
-            return
-        }
-        isLoading = true
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let items = getWorkspaceActivity(workspacePath: wsPath, daysBack: daysBack)
-
-            // Agrupar por days_ago
-            var grouped: [UInt32: [NoteActivity]] = [:]
-            for item in items {
-                grouped[item.daysAgo, default: []].append(item)
+        DispatchQueue.main.async {
+            guard let wsPath = self.currentWorkspacePath else {
+                self.activityByDay = []
+                return
             }
+            self.isLoading = true
 
-            let calendar = Calendar.current
-            let today = Date()
-            let dateFormatter = DateFormatter()
-            dateFormatter.locale = Locale(identifier: "es_CL")
+            DispatchQueue.global(qos: .userInitiated).async {
+                let items = getWorkspaceActivity(workspacePath: wsPath, daysBack: self.daysBack)
 
-            var sections: [(label: String, date: String, notes: [NoteActivity])] = []
-
-            for day in 0..<daysBack {
-                guard let notes = grouped[day], !notes.isEmpty else { continue }
-                guard let date = calendar.date(byAdding: .day, value: -Int(day), to: today) else { continue }
-
-                let label: String
-                switch day {
-                case 0: label = "Hoy"
-                case 1: label = "Ayer"
-                default:
-                    dateFormatter.dateFormat = "EEEE d"
-                    label = dateFormatter.string(from: date).capitalized
+                // Agrupar por days_ago
+                var grouped: [UInt32: [NoteActivity]] = [:]
+                for item in items {
+                    grouped[item.daysAgo, default: []].append(item)
                 }
 
-                dateFormatter.dateFormat = "yyyy-MM-dd"
-                let dateKey = dateFormatter.string(from: date)
+                let calendar = Calendar.current
+                let today = Date()
+                let dateFormatter = DateFormatter()
+                dateFormatter.locale = Locale(identifier: "es_CL")
 
-                sections.append((label: label, date: dateKey, notes: notes))
-            }
+                var sections: [(label: String, date: String, notes: [NoteActivity])] = []
 
-            let total = items.count
+                for day in 0..<self.daysBack {
+                    guard let notes = grouped[day], !notes.isEmpty else { continue }
+                    guard let date = calendar.date(byAdding: .day, value: -Int(day), to: today) else { continue }
 
-            DispatchQueue.main.async {
-                self.activityByDay = sections
-                self.totalCount    = total
-                self.isLoading     = false
+                    let label: String
+                    switch day {
+                    case 0: label = "Hoy"
+                    case 1: label = "Ayer"
+                    default:
+                        dateFormatter.dateFormat = "EEEE d"
+                        label = dateFormatter.string(from: date).capitalized
+                    }
+
+                    dateFormatter.dateFormat = "yyyy-MM-dd"
+                    let dateKey = dateFormatter.string(from: date)
+
+                    sections.append((label: label, date: dateKey, notes: notes))
+                }
+
+                let total = items.count
+
+                DispatchQueue.main.async {
+                    self.activityByDay = sections
+                    self.totalCount    = total
+                    self.isLoading     = false
+                }
             }
         }
     }

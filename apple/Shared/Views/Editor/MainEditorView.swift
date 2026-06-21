@@ -329,8 +329,16 @@ struct MainContentColumn: View {
         }
         .navigationTitle("Notas")
         .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
-        .onChange(of: viewModel.selectedItemIds) { isSearchFocused = false }
-        .onChange(of: viewModel.selectedLocationId) { isSearchFocused = false }
+        .onChange(of: viewModel.selectedItemIds) { 
+            DispatchQueue.main.async {
+                isSearchFocused = false 
+            }
+        }
+        .onChange(of: viewModel.selectedLocationId) { 
+            DispatchQueue.main.async {
+                isSearchFocused = false 
+            }
+        }
         .background(
             Button(action: {
                 isSearchFocused = true
@@ -1250,10 +1258,12 @@ struct SemanticTreeView: View {
             loadSemanticNeighbors(for: newId)
         }
         .onChange(of: viewModel.selectedLocationId) { _, _ in
-            // Al cambiar workspace, resetear y recargar para la nota activa
-            semanticClusters = []
-            activeNoteTitle = ""
-            loadSemanticNeighbors(for: viewModel.activeTabId)
+            DispatchQueue.main.async {
+                // Al cambiar workspace, resetear y recargar para la nota activa
+                semanticClusters = []
+                activeNoteTitle = ""
+                loadSemanticNeighbors(for: viewModel.activeTabId)
+            }
         }
         .onAppear {
             loadSemanticNeighbors(for: viewModel.activeTabId)
@@ -1261,64 +1271,66 @@ struct SemanticTreeView: View {
     }
 
     private func loadSemanticNeighbors(for noteId: String?) {
-        guard let noteId = noteId, !noteId.isEmpty,
-              let wsPath = currentWorkspace?.path else {
-            semanticClusters = []
-            activeNoteTitle = ""
-            return
-        }
+        DispatchQueue.main.async {
+            guard let noteId = noteId, !noteId.isEmpty,
+                  let wsPath = self.currentWorkspace?.path else {
+                self.semanticClusters = []
+                self.activeNoteTitle = ""
+                return
+            }
 
-        // Verificar que la nota pertenece al workspace actual
-        guard noteId.hasPrefix(wsPath) else {
-            semanticClusters = []
-            activeNoteTitle = ""
-            return
-        }
+            // Verificar que la nota pertenece al workspace actual
+            guard noteId.hasPrefix(wsPath) else {
+                self.semanticClusters = []
+                self.activeNoteTitle = ""
+                return
+            }
 
-        isLoading = true
-        activeNoteTitle = URL(fileURLWithPath: noteId).deletingPathExtension().lastPathComponent
+            self.isLoading = true
+            self.activeNoteTitle = URL(fileURLWithPath: noteId).deletingPathExtension().lastPathComponent
 
-        // Snapshot del índice de notas antes de entrar al hilo de background
-        let noteIndex = Dictionary(uniqueKeysWithValues: workspaceNotes.map { ($0.path, $0) })
+            // Snapshot del índice de notas antes de entrar al hilo de background
+            let noteIndex = Dictionary(uniqueKeysWithValues: self.workspaceNotes.map { ($0.path, $0) })
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let neighbors = getSemanticNeighbors(noteId: noteId, workspacePath: wsPath, limit: 40)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let neighbors = getSemanticNeighbors(noteId: noteId, workspacePath: wsPath, limit: 40)
 
-            // Agrupar en 3 anillos de proximidad semántica
-            var nucleus: [NoteRecord] = []   // score > 0.80 — hablan de lo mismo
-            var resonance: [NoteRecord] = [] // score 0.65–0.80 — relacionados
-            var periphery: [NoteRecord] = [] // score 0.45–0.65 — conectados tangencialmente
+                // Agrupar en 3 anillos de proximidad semántica
+                var nucleus: [NoteRecord] = []   // score > 0.80 — hablan de lo mismo
+                var resonance: [NoteRecord] = [] // score 0.65–0.80 — relacionados
+                var periphery: [NoteRecord] = [] // score 0.45–0.65 — conectados tangencialmente
 
-            for neighbor in neighbors {
-                guard let record = noteIndex[neighbor.path] else { continue }
-                if neighbor.score > 0.80 {
-                    nucleus.append(record)
-                } else if neighbor.score > 0.65 {
-                    resonance.append(record)
-                } else {
-                    periphery.append(record)
+                for neighbor in neighbors {
+                    guard let record = noteIndex[neighbor.path] else { continue }
+                    if neighbor.score > 0.80 {
+                        nucleus.append(record)
+                    } else if neighbor.score > 0.65 {
+                        resonance.append(record)
+                    } else {
+                        periphery.append(record)
+                    }
                 }
-            }
 
-            // Fallback si el embedding aún no existe: agrupar workspace por carpeta
-            let hasSemantic = !nucleus.isEmpty || !resonance.isEmpty || !periphery.isEmpty
-            var clusters: [(String, [NoteRecord])]
+                // Fallback si el embedding aún no existe: agrupar workspace por carpeta
+                let hasSemantic = !nucleus.isEmpty || !resonance.isEmpty || !periphery.isEmpty
+                var clusters: [(String, [NoteRecord])]
 
-            if hasSemantic {
-                clusters = [
-                    ("🔗 Núcleo Semántico  >80%", nucleus),
-                    ("🌐 Zona de Resonancia  65–80%", resonance),
-                    ("🌌 Periferia  45–65%", periphery),
-                ].filter { !$0.1.isEmpty }
-            } else {
-                // Sin embeddings: fallback con todas las notas del workspace
-                let allWsNotes = Array(noteIndex.values).sorted { $0.title < $1.title }
-                clusters = allWsNotes.isEmpty ? [] : [("📁 Workspace (sin embeddings)", allWsNotes)]
-            }
+                if hasSemantic {
+                    clusters = [
+                        ("🔗 Núcleo Semántico  >80%", nucleus),
+                        ("🌐 Zona de Resonancia  65–80%", resonance),
+                        ("🌌 Periferia  45–65%", periphery),
+                    ].filter { !$0.1.isEmpty }
+                } else {
+                    // Sin embeddings: fallback con todas las notas del workspace
+                    let allWsNotes = Array(noteIndex.values).sorted { $0.title < $1.title }
+                    clusters = allWsNotes.isEmpty ? [] : [("📁 Workspace (sin embeddings)", allWsNotes)]
+                }
 
-            DispatchQueue.main.async {
-                self.semanticClusters = clusters
-                self.isLoading = false
+                DispatchQueue.main.async {
+                    self.semanticClusters = clusters
+                    self.isLoading = false
+                }
             }
         }
     }
@@ -1452,10 +1464,20 @@ struct GitHistorySidebar: View {
         .frame(width: 300)
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear {
-            commits = getFileHistory(path: noteId)
+            loadHistory()
         }
         .onChange(of: noteId) {
-            commits = getFileHistory(path: noteId)
+            loadHistory()
+        }
+    }
+    
+    private func loadHistory() {
+        let path = noteId
+        DispatchQueue.global(qos: .userInitiated).async {
+            let history = getFileHistory(path: path)
+            DispatchQueue.main.async {
+                self.commits = history
+            }
         }
     }
 }
