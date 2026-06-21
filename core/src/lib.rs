@@ -222,6 +222,19 @@ pub fn init_knowledge_base() -> String {
             historial JSON,
             last_updated TIMESTAMP DEFAULT now()
         );
+        CREATE TABLE IF NOT EXISTS domain_metadata (
+            dir_path VARCHAR PRIMARY KEY,
+            memory_contexto TEXT,
+            memory_hitos JSON,
+            memory_historial JSON,
+            specs_arquitectura TEXT,
+            specs_reglas JSON,
+            specs_dependencias JSON,
+            lore_proposito TEXT,
+            lore_glosario JSON,
+            lore_usuarios JSON,
+            last_updated TIMESTAMP DEFAULT now()
+        );
         CREATE TABLE IF NOT EXISTS _schema_version (
             version INTEGER PRIMARY KEY,
             applied_at TIMESTAMP DEFAULT now()
@@ -297,8 +310,8 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     let mut db_mtimes = std::collections::HashMap::new();
     {
         if let Some(conn) = get_db_connection() {
-            if let Ok(mut stmt) = conn.prepare("SELECT path, COALESCE(modified_ts, 0) FROM notes") {
-                if let Ok(rows) = stmt.query_map([], |row| {
+            if let Ok(mut stmt) = conn.prepare("SELECT path, COALESCE(modified_ts, 0) FROM notes WHERE path = ? OR path LIKE ?") {
+                if let Ok(rows) = stmt.query_map(duckdb::params![&path, format!("{}/%", path)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 }) {
                     for row in rows.flatten() {
@@ -837,45 +850,47 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
 
         for res in rx {
             if let Ok(event) = res {
-                if event.kind.is_modify() || event.kind.is_create() {
-                    for path in event.paths {
-                        let path_str = path.to_str().unwrap_or("");
+                for path in event.paths {
+                    let path_str = path.to_str().unwrap_or("");
+                    if !path.exists() {
+                        // Fue borrado o movido a la papelera (Delete / Rename / Trash)
+                        if let Some(conn) = get_db_connection() {
+                            let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![path_str, format!("{}/%", path_str)]);
+                            let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![path_str, format!("{}/%", path_str)]);
+                            let _ = conn.execute(
+                                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
+                                duckdb::params![path_str, format!("{}/%", path_str)],
+                            );
+                            update_sync_ts();
+                        }
+                    } else if event.kind.is_modify() || event.kind.is_create() {
                         let is_dir = path.is_dir();
+                        let is_hidden = path.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with(".")).unwrap_or(false);
                         
-                        if is_dir || (path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p))) {
+                        if !is_hidden && (is_dir || (path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p)))) {
                             if let Some(conn) = get_db_connection() {
                                 let title = path.file_name().and_then(|s| s.to_str()).unwrap_or("Sin título");
                                 
                                 if is_dir {
                                     let _ = conn.execute(
-                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at) VALUES (?, ?, ?, ?, true, now())",
-                                        params![path_str, title, path_str, ""],
+                                        "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                                        duckdb::params![path_str, title, path_str, ""],
                                     );
                                 } else {
-                                    let content = fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
+                                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                                    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
                                     let emb = generate_embedding(&content);
                                     let sql = format!(
-                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding) VALUES (?, ?, ?, ?, false, now(), {})",
+                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
                                         vector_to_sql_array(&emb)
                                     );
                                     let _ = conn.execute(
                                         &sql,
-                                        params![path_str, title, path_str, content],
+                                        duckdb::params![path_str, title, path_str, content, mtime as i64],
                                     );
                                 }
                                 update_sync_ts();
                             }
-                        }
-                    }
-                } else if event.kind.is_remove() {
-                    for path in event.paths {
-                        let path_str = path.to_str().unwrap_or("");
-                        if let Some(conn) = get_db_connection() {
-                            let _ = conn.execute(
-                                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-                                params![path_str, format!("{}/%", path_str)],
-                            );
-                            update_sync_ts();
                         }
                     }
                 }
@@ -1459,6 +1474,41 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             },
                             "required": ["path"]
                         }
+                    },
+                    {
+                        "name": "vault_get_domain_context",
+                        "description": "Obtiene la triada completa de metadatos de dominio (_memory.md, _specs.md, lore.md) del Nodo Ancla mas cercano hacia arriba en la jerarquia.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta absoluta de archivo o carpeta desde la cual buscar el contexto de dominio." }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "vault_log_friction",
+                        "description": "Registra una situacion de friccion, error o desalineamiento con el usuario para su posterior analisis.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "context": { "type": "string", "description": "El modulo o proyecto donde ocurre (ej. UCH, Nicelio)." },
+                                "action": { "type": "string", "description": "La accion o comando que provoco el error o friccion." },
+                                "friction_detail": { "type": "string", "description": "La descripcion detallada del error o feedback del usuario." }
+                            },
+                            "required": ["context", "action", "friction_detail"]
+                        }
+                    },
+                    {
+                        "name": "vault_export_domain_metadata",
+                        "description": "Exporta los metadatos de dominio estructurados de todos los Nodos Ancla (util para pipelines RAG de LangChain).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "limit": { "type": "integer", "description": "Numero maximo de registros a exportar (por defecto 100)." },
+                                "since_seconds": { "type": "integer", "description": "Filtrar por registros actualizados desde este timestamp epoch en segundos (por defecto 0)." }
+                            }
+                        }
                     }
                 ]
             });
@@ -1627,6 +1677,124 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     }
                 },
+                "vault_get_domain_context" => {
+                    let path_str = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if !is_path_allowed(path_str, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
+                    } else {
+                        if let Some(anchor_dir) = find_anchor_path(path_str, &token_record) {
+                            let val = read_domain_context_from_disk(&anchor_dir);
+                            serde_json::to_string_pretty(&val).unwrap_or_else(|_| "Error al formatear JSON".to_string())
+                        } else {
+                            serde_json::json!({
+                                "anchor_path": null,
+                                "memory": null,
+                                "specs": null,
+                                "lore": null,
+                                "message": "No se encontro ningun Nodo Ancla (_memory.md, _specs.md, lore.md) en la jerarquia de directorios."
+                            }).to_string()
+                        }
+                    }
+                },
+                "vault_log_friction" => {
+                    let ctx = arguments.get("context").and_then(|c| c.as_str()).unwrap_or("");
+                    let act = arguments.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                    let det = arguments.get("friction_detail").and_then(|d| d.as_str()).unwrap_or("");
+                    if crate::log_friction_event(ctx.to_string(), act.to_string(), det.to_string()) {
+                        "Friccion registrada correctamente en el sistema de telemetria.".to_string()
+                    } else {
+                        "Error al escribir en el registro de telemetria.".to_string()
+                    }
+                },
+                "vault_export_domain_metadata" => {
+                    let limit = arguments.get("limit").and_then(|l| l.as_u64()).unwrap_or(100);
+                    let since_seconds = arguments.get("since_seconds").and_then(|s| s.as_u64()).unwrap_or(0);
+                    
+                    let mut conn_guard = DB_CONN.lock().unwrap();
+                    if let Some(conn) = conn_guard.as_mut() {
+                        let query_sql = if since_seconds > 0 {
+                            "SELECT dir_path, memory_contexto, memory_hitos, memory_historial, 
+                                    specs_arquitectura, specs_reglas, specs_dependencias, 
+                                    lore_proposito, lore_glosario, lore_usuarios, 
+                                    epoch(last_updated)
+                             FROM domain_metadata 
+                             WHERE epoch(last_updated) >= ? 
+                             ORDER BY last_updated DESC 
+                             LIMIT ?"
+                        } else {
+                            "SELECT dir_path, memory_contexto, memory_hitos, memory_historial, 
+                                    specs_arquitectura, specs_reglas, specs_dependencias, 
+                                    lore_proposito, lore_glosario, lore_usuarios, 
+                                    epoch(last_updated)
+                             FROM domain_metadata 
+                             ORDER BY last_updated DESC 
+                             LIMIT ?"
+                        };
+                        
+                        let mut stmt = match conn.prepare(query_sql) {
+                            Ok(s) => s,
+                            Err(e) => return format!("Error al preparar consulta SQL: {}", e),
+                        };
+                        
+                        let mapper = |row: &duckdb::Row<'_>| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, Option<String>>(5)?,
+                                row.get::<_, Option<String>>(6)?,
+                                row.get::<_, Option<String>>(7)?,
+                                row.get::<_, Option<String>>(8)?,
+                                row.get::<_, Option<String>>(9)?,
+                                row.get::<_, f64>(10)?,
+                            ))
+                        };
+                        
+                        let rows_res = if since_seconds > 0 {
+                            stmt.query_map(params![since_seconds, limit], mapper)
+                        } else {
+                            stmt.query_map(params![limit], mapper)
+                        };
+                        
+                        match rows_res {
+                            Ok(rows) => {
+                                let mut results = Vec::new();
+                                for r in rows.flatten() {
+                                    let parse_json_array = |opt_str: Option<String>| -> Vec<String> {
+                                        opt_str.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default()
+                                    };
+                                    
+                                    let export_row = serde_json::json!({
+                                        "dir_path": r.0,
+                                        "memory": {
+                                            "contexto": r.1.unwrap_or_default(),
+                                            "hitos": parse_json_array(r.2),
+                                            "historial": parse_json_array(r.3)
+                                        },
+                                        "specs": {
+                                            "arquitectura": r.4.unwrap_or_default(),
+                                            "reglas": parse_json_array(r.5),
+                                            "dependencias": parse_json_array(r.6)
+                                        },
+                                        "lore": {
+                                            "proposito": r.7.unwrap_or_default(),
+                                            "glosario": parse_json_array(r.8),
+                                            "usuarios": parse_json_array(r.9)
+                                        },
+                                        "last_updated_epoch": r.10 as u64
+                                    });
+                                    results.push(export_row);
+                                }
+                                serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
+                            },
+                            Err(e) => format!("Error al ejecutar consulta SQL: {}", e),
+                        }
+                    } else {
+                        "Error: Base de datos no inicializada.".to_string()
+                    }
+                },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
             };
 
@@ -1776,68 +1944,472 @@ pub fn revoke_mcp_token(token_id: String) -> bool {
     false
 }
 
-#[uniffi::export]
-pub fn scan_memory_contexts(vault_path: String) -> String {
-    let path = std::path::Path::new(&vault_path);
-    let mut count = 0;
-    
-    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_name() == "_memory.md" {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                let dir_path = entry.path().parent().unwrap().to_str().unwrap_or("").to_string();
-                
-                let mut contexto = String::new();
-                let mut hitos_list = Vec::new();
-                let mut historial_list = Vec::new();
-                let mut current_section = "";
-                
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("## Contexto") {
-                        current_section = "contexto";
-                    } else if trimmed.starts_with("## Hitos") {
-                        current_section = "hitos";
-                    } else if trimmed.starts_with("## Historial") {
-                        current_section = "historial";
-                    } else if trimmed.starts_with("##") {
-                        current_section = "other";
-                    } else {
-                        match current_section {
-                            "contexto" => {
-                                if !contexto.is_empty() {
-                                    contexto.push('\n');
-                                }
-                                contexto.push_str(trimmed);
-                            },
-                            "hitos" => {
-                                if trimmed.starts_with("- ") {
-                                    hitos_list.push(trimmed[2..].to_string());
-                                }
-                            },
-                            "historial" => {
-                                if trimmed.starts_with("- ") {
-                                    historial_list.push(trimmed[2..].to_string());
-                                }
-                            },
-                            _ => {}
+fn parse_markdown_sections(
+    content: &str,
+    sec_free_keyword: &str,
+    sec_list1_keyword: &str,
+    sec_list2_keyword: &str,
+) -> (String, Vec<String>, Vec<String>) {
+    let mut free_text = String::new();
+    let mut list1 = Vec::new();
+    let mut list2 = Vec::new();
+    let mut current_section = "";
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("##") {
+            let header = trimmed[2..].trim().to_lowercase();
+            if header.contains(&sec_free_keyword.to_lowercase()) {
+                current_section = "free";
+            } else if header.contains(&sec_list1_keyword.to_lowercase()) {
+                current_section = "list1";
+            } else if header.contains(&sec_list2_keyword.to_lowercase()) {
+                current_section = "list2";
+            } else {
+                current_section = "other";
+            }
+        } else {
+            match current_section {
+                "free" => {
+                    if !trimmed.is_empty() || !free_text.is_empty() {
+                        if !free_text.is_empty() {
+                            free_text.push('\n');
                         }
+                        free_text.push_str(trimmed);
                     }
                 }
-                
-                let hitos_json = serde_json::json!(hitos_list).to_string();
-                let historial_json = serde_json::json!(historial_list).to_string();
-                
-                let mut conn_guard = DB_CONN.lock().unwrap();
-                if let Some(conn) = conn_guard.as_mut() {
-                    let sql = "INSERT OR REPLACE INTO memory_contexts (dir_path, hitos, contexto, historial, last_updated) VALUES (?, ?, ?, ?, now())";
-                    let _ = conn.execute(sql, params![dir_path, hitos_json, contexto, historial_json]);
+                "list1" => {
+                    if trimmed.starts_with("- ") {
+                        list1.push(trimmed[2..].trim().to_string());
+                    } else if trimmed.starts_with("* ") {
+                        list1.push(trimmed[2..].trim().to_string());
+                    }
+                }
+                "list2" => {
+                    if trimmed.starts_with("- ") {
+                        list2.push(trimmed[2..].trim().to_string());
+                    } else if trimmed.starts_with("* ") {
+                        list2.push(trimmed[2..].trim().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (free_text.trim().to_string(), list1, list2)
+}
+
+fn read_domain_context_from_disk(anchor_dir: &std::path::Path) -> serde_json::Value {
+    let memory_path = anchor_dir.join("_memory.md");
+    let specs_path = anchor_dir.join("_specs.md");
+    let lore_path = anchor_dir.join("lore.md");
+
+    let mut memory_val = serde_json::json!({
+        "contexto": "",
+        "hitos": [],
+        "historial": []
+    });
+    if memory_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&memory_path) {
+            let (ctx, hitos, hist) = parse_markdown_sections(&content, "contexto", "hitos", "historial");
+            memory_val = serde_json::json!({
+                "contexto": ctx,
+                "hitos": hitos,
+                "historial": hist
+            });
+        }
+    }
+
+    let mut specs_val = serde_json::json!({
+        "arquitectura": "",
+        "reglas": [],
+        "dependencias": []
+    });
+    if specs_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&specs_path) {
+            let (arq, reglas, deps) = parse_markdown_sections(&content, "arquitectura", "reglas", "dependencias");
+            specs_val = serde_json::json!({
+                "arquitectura": arq,
+                "reglas": reglas,
+                "dependencias": deps
+            });
+        }
+    }
+
+    let mut lore_val = serde_json::json!({
+        "proposito": "",
+        "glosario": [],
+        "usuarios": []
+    });
+    if lore_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&lore_path) {
+            let (prop, glosario, usuarios) = parse_markdown_sections(&content, "prop", "glosario", "usuarios");
+            lore_val = serde_json::json!({
+                "proposito": prop,
+                "glosario": glosario,
+                "usuarios": usuarios
+            });
+        }
+    }
+
+    serde_json::json!({
+        "anchor_path": anchor_dir.to_string_lossy().to_string(),
+        "memory": memory_val,
+        "specs": specs_val,
+        "lore": lore_val
+    })
+}
+
+fn find_anchor_path(start_path: &str, token_record: &Option<McpTokenRecord>) -> Option<std::path::PathBuf> {
+    let mut current = std::path::PathBuf::from(start_path);
+    if current.is_file() {
+        current = match current.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return None,
+        };
+    }
+
+    loop {
+        let current_str = current.to_string_lossy();
+        let mut is_allowed = false;
+        if let Some(r) = token_record {
+            for w in &r.workspaces {
+                if current_str.starts_with(w) {
+                    is_allowed = true;
+                    break;
+                }
+            }
+            let home = std::env::var("HOME").unwrap_or("/".to_string());
+            let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
+            if current_str.starts_with(sys_dir.to_str().unwrap_or("")) {
+                is_allowed = true;
+            }
+        }
+
+        if !is_allowed {
+            return None;
+        }
+
+        if current.join("_memory.md").exists() || current.join("_specs.md").exists() || current.join("lore.md").exists() {
+            return Some(current);
+        }
+
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    None
+}
+
+#[uniffi::export]
+pub fn scan_domain_metadata(vault_path: String) -> String {
+    let path = std::path::Path::new(&vault_path);
+    let mut processed_dirs = std::collections::HashSet::new();
+    let mut count = 0;
+
+    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name == "_memory.md" || file_name == "_specs.md" || file_name == "lore.md" {
+            let parent_dir = match entry.path().parent() {
+                Some(p) => p.to_path_buf(),
+                None => continue,
+            };
+
+            let parent_str = parent_dir.to_string_lossy().to_string();
+            if processed_dirs.contains(&parent_str) {
+                continue;
+            }
+            processed_dirs.insert(parent_str.clone());
+
+            let memory_path = parent_dir.join("_memory.md");
+            let specs_path = parent_dir.join("_specs.md");
+            let lore_path = parent_dir.join("lore.md");
+
+            let mut memory_contexto: Option<String> = None;
+            let mut memory_hitos: Option<String> = None;
+            let mut memory_historial: Option<String> = None;
+
+            let mut specs_arquitectura: Option<String> = None;
+            let mut specs_reglas: Option<String> = None;
+            let mut specs_dependencias: Option<String> = None;
+
+            let mut lore_proposito: Option<String> = None;
+            let mut lore_glosario: Option<String> = None;
+            let mut lore_usuarios: Option<String> = None;
+
+            if memory_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&memory_path) {
+                    let (ctx, hitos, hist) = parse_markdown_sections(&content, "contexto", "hitos", "historial");
+                    memory_contexto = Some(ctx);
+                    memory_hitos = Some(serde_json::json!(hitos).to_string());
+                    memory_historial = Some(serde_json::json!(hist).to_string());
+                }
+            }
+
+            if specs_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&specs_path) {
+                    let (arq, reglas, deps) = parse_markdown_sections(&content, "arquitectura", "reglas", "dependencias");
+                    specs_arquitectura = Some(arq);
+                    specs_reglas = Some(serde_json::json!(reglas).to_string());
+                    specs_dependencias = Some(serde_json::json!(deps).to_string());
+                }
+            }
+
+            if lore_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&lore_path) {
+                    let (prop, glosario, usuarios) = parse_markdown_sections(&content, "prop", "glosario", "usuarios");
+                    lore_proposito = Some(prop);
+                    lore_glosario = Some(serde_json::json!(glosario).to_string());
+                    lore_usuarios = Some(serde_json::json!(usuarios).to_string());
+                }
+            }
+
+            let mut conn_guard = DB_CONN.lock().unwrap();
+            if let Some(conn) = conn_guard.as_mut() {
+                let sql = "INSERT OR REPLACE INTO domain_metadata (
+                    dir_path,
+                    memory_contexto, memory_hitos, memory_historial,
+                    specs_arquitectura, specs_reglas, specs_dependencias,
+                    lore_proposito, lore_glosario, lore_usuarios,
+                    last_updated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())";
+
+                let res = conn.execute(
+                    sql,
+                    params![
+                        parent_str,
+                        memory_contexto,
+                        memory_hitos,
+                        memory_historial,
+                        specs_arquitectura,
+                        specs_reglas,
+                        specs_dependencias,
+                        lore_proposito,
+                        lore_glosario,
+                        lore_usuarios
+                    ],
+                );
+                if res.is_ok() {
                     count += 1;
                 }
             }
         }
     }
+
+    format!("Escaneo de metadatos de dominio completado: {} carpetas ancla actualizadas.", count)
+}
+
+#[uniffi::export]
+pub fn scan_memory_contexts(vault_path: String) -> String {
+    scan_domain_metadata(vault_path)
+}
+
+fn inject_bullets_into_file(file_path: &std::path::Path, header_name: &str, bullets: &[String], default_template: &str) -> std::io::Result<()> {
+    let mut content = if file_path.exists() {
+        std::fs::read_to_string(file_path)?
+    } else {
+        default_template.to_string()
+    };
+
+    let header_marker = format!("## {}", header_name);
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     
-    format!("Escaneado _memory.md completado: {} contextos actualizados.", count)
+    let mut header_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().starts_with(&header_marker) {
+            header_idx = Some(i);
+            break;
+        }
+    }
+
+    if let Some(idx) = header_idx {
+        let mut insert_pos = idx + 1;
+        while insert_pos < lines.len() && !lines[insert_pos].trim().starts_with("##") {
+            insert_pos += 1;
+        }
+        
+        for bullet in bullets.iter().rev() {
+            let bullet_line = if bullet.starts_with("- ") || bullet.starts_with("* ") {
+                bullet.clone()
+            } else {
+                format!("- {}", bullet)
+            };
+            lines.insert(insert_pos, bullet_line);
+        }
+    } else {
+        lines.push(String::new());
+        lines.push(header_marker);
+        for bullet in bullets {
+            let bullet_line = if bullet.starts_with("- ") || bullet.starts_with("* ") {
+                bullet.clone()
+            } else {
+                format!("- {}", bullet)
+            };
+            lines.push(bullet_line);
+        }
+    }
+
+    let mut new_content = lines.join("\n");
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    std::fs::write(file_path, new_content)?;
+    Ok(())
+}
+
+#[uniffi::export]
+pub fn consolidate_session(active_path: String) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let system_dir = std::path::PathBuf::from(&home).join(".vault_system").join("system_workspace");
+    let scratchpad_path = system_dir.join("current_session.md");
+
+    if !scratchpad_path.exists() {
+        return "Error: No se encontró el archivo de Scratchpad (current_session.md).".to_string();
+    }
+
+    let content = match std::fs::read_to_string(&scratchpad_path) {
+        Ok(c) => c,
+        Err(e) => return format!("Error al leer el Scratchpad: {}", e),
+    };
+
+    let mut hitos = Vec::new();
+    let mut acuerdos = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if lower.contains("[hito]") {
+            let clean = trimmed
+                .replace("[HITO]", "")
+                .replace("[hito]", "")
+                .replace("[Hito]", "")
+                .trim()
+                .to_string();
+            let clean_bullet = if clean.starts_with("- ") {
+                clean[2..].trim().to_string()
+            } else if clean.starts_with("* ") {
+                clean[2..].trim().to_string()
+            } else {
+                clean
+            };
+            if !clean_bullet.is_empty() {
+                hitos.push(format!("- {}", clean_bullet));
+            }
+        } else if lower.contains("[acuerdo]") {
+            let clean = trimmed
+                .replace("[ACUERDO]", "")
+                .replace("[acuerdo]", "")
+                .replace("[Acuerdo]", "")
+                .trim()
+                .to_string();
+            let clean_bullet = if clean.starts_with("- ") {
+                clean[2..].trim().to_string()
+            } else if clean.starts_with("* ") {
+                clean[2..].trim().to_string()
+            } else {
+                clean
+            };
+            if !clean_bullet.is_empty() {
+                acuerdos.push(format!("- {}", clean_bullet));
+            }
+        }
+    }
+
+    if hitos.is_empty() && acuerdos.is_empty() {
+        return "No se encontraron elementos marcados con [HITO] o [ACUERDO] para consolidar.".to_string();
+    }
+
+    let anchor_dir = {
+        let mut current = std::path::PathBuf::from(&active_path);
+        if current.is_file() {
+            current = current.parent().map(|p| p.to_path_buf()).unwrap_or(current);
+        }
+
+        let mut found = None;
+        let mut temp = current.clone();
+        loop {
+            if temp.join("_memory.md").exists() || temp.join("_specs.md").exists() || temp.join("lore.md").exists() {
+                found = Some(temp.clone());
+                break;
+            }
+            match temp.parent() {
+                Some(parent) => temp = parent.to_path_buf(),
+                None => break,
+            }
+        }
+        found.unwrap_or(current)
+    };
+
+    let anchor_str = anchor_dir.to_string_lossy().to_string();
+    let mut summary = format!("Consolidando en el Nodo Ancla: {}\n", anchor_str);
+
+    if !hitos.is_empty() {
+        let memory_path = anchor_dir.join("_memory.md");
+        let default_mem = "# Memoria de Desarrollo\n\n## Contexto\n\n## Hitos\n\n## Historial\n";
+        match inject_bullets_into_file(&memory_path, "Hitos", &hitos, default_mem) {
+            Ok(_) => summary.push_str(&format!("✅ Inyectados {} hitos en _memory.md.\n", hitos.len())),
+            Err(e) => summary.push_str(&format!("❌ Error al inyectar hitos: {}\n", e)),
+        }
+    }
+
+    if !acuerdos.is_empty() {
+        let specs_path = anchor_dir.join("_specs.md");
+        let default_specs = "# Especificaciones Técnicas\n\n## Arquitectura\n\n## Reglas\n\n## Dependencias\n";
+        match inject_bullets_into_file(&specs_path, "Reglas", &acuerdos, default_specs) {
+            Ok(_) => summary.push_str(&format!("✅ Inyectados {} acuerdos en _specs.md.\n", acuerdos.len())),
+            Err(e) => summary.push_str(&format!("❌ Error al inyectar acuerdos: {}\n", e)),
+        }
+    }
+
+    let reset_content = "# Sesión Actual\n\n- [HITO] \n- [ACUERDO] \n";
+    if let Err(e) = std::fs::write(&scratchpad_path, reset_content) {
+        summary.push_str(&format!("⚠️ No se pudo vaciar el Scratchpad: {}\n", e));
+    } else {
+        summary.push_str("✅ Scratchpad reiniciado.\n");
+    }
+
+    let _ = scan_domain_metadata(anchor_str);
+
+    summary
+}
+
+#[uniffi::export]
+pub fn log_friction_event(context: String, action: String, friction_detail: String) -> bool {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_path = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace").join("telemetria.log");
+
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    
+    let mut conn_guard = DB_CONN.lock().unwrap();
+    if let Some(conn) = conn_guard.as_mut() {
+        let sql = "INSERT INTO telemetry (ts, context, event_type, message, metadata) VALUES (now(), ?, 'FRICCION', ?, ?)";
+        let meta = serde_json::json!({
+            "action": action,
+            "friction_detail": friction_detail
+        }).to_string();
+        let _ = conn.execute(sql, params![context, friction_detail, meta]);
+    }
+
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        let log_line = format!("[{}] | FRICCION | CONTEXTO: {} | ACCION: {} | DETALLE: {}\n", now, context, action, friction_detail);
+        let _ = file.write_all(log_line.as_bytes());
+        crate::add_telemetry_log(format!("[FRICCION] ({}) - {}", context, friction_detail));
+        return true;
+    }
+    
+    false
 }
 
 #[cfg(test)]

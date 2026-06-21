@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 func loadTokensFromUserDefaults() {
@@ -31,9 +32,41 @@ struct VaultApp: App {
                     // Iniciar el Cognitive Daemon (Arquitectura Dual-Brain)
                     let daemonStatus = startCognitiveDaemon()
                     print("Daemon: \(daemonStatus)")
+                    
+                    // Inicializar Observabilidad y Telemetría Nativa
+                    _ = TelemetryManager.shared
                 }
         }
         // Ocultar la barra de título en macOS para un look más moderno
         .windowStyle(HiddenTitleBarWindowStyle())
+    }
+}
+
+
+class TelemetryManager {
+    static let shared = TelemetryManager()
+    private var cancellables = Set<AnyCancellable>()
+    
+    private init() {
+        setupSubscriptions()
+    }
+    
+    func setupSubscriptions() {
+        // Suscribirse a remociones de workspace
+        NotificationCenter.default.publisher(for: Notification.Name("WorkspaceRemoved"))
+            .sink { notification in
+                if let userInfo = notification.userInfo, let path = userInfo["path"] as? String {
+                    _ = logFrictionEvent(
+                        context: "Workspace",
+                        action: "remove_location",
+                        frictionDetail: "Usuario elimino el acceso al workspace en la ruta: \(path)"
+                    )
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    func logManualFriction(context: String, action: String, detail: String) {
+        _ = logFrictionEvent(context: context, action: action, frictionDetail: detail)
     }
 }

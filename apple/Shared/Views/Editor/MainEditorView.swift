@@ -631,6 +631,7 @@ struct MainEditorView: View {
     @State private var showTelemetry = false
     @State private var isNoteHidden = false
     @State private var isSidebarHidden = false
+    @State private var showScratchpad = false
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -657,6 +658,15 @@ struct MainEditorView: View {
                         }
                         .keyboardShortcut("f", modifiers: [.command, .shift])
                         .help("Ocultar paneles (Cmd+Shift+F)")
+                    }
+                    
+                    ToolbarItem(placement: .navigation) {
+                        Button(action: { withAnimation { showScratchpad.toggle() } }) {
+                            Image(systemName: "note.text.badge.plus")
+                                .foregroundColor(showScratchpad ? .accentColor : .primary)
+                        }
+                        .keyboardShortcut("s", modifiers: [.command, .shift])
+                        .help("Sesión Actual - Scratchpad (Cmd+Shift+S)")
                     }
                     
                     if isNoteHidden {
@@ -706,6 +716,12 @@ struct MainEditorView: View {
             if showTelemetry {
                 TelemetryView(viewModel: viewModel, isPresented: $showTelemetry)
                     .transition(.move(edge: .bottom))
+            }
+            
+            if showScratchpad {
+                BottomSheetScratchpadView(viewModel: viewModel, isPresented: $showScratchpad)
+                    .transition(.move(edge: .bottom))
+                    .zIndex(50)
             }
         }
         .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
@@ -1441,5 +1457,176 @@ struct GitHistorySidebar: View {
         .onChange(of: noteId) {
             commits = getFileHistory(path: noteId)
         }
+    }
+}
+
+
+struct BottomSheetScratchpadView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    @Binding var isPresented: Bool
+    
+    @State private var scratchpadText: String = ""
+    @State private var consoleMessage: String = ""
+    @State private var height: CGFloat = 300
+    @GestureState private var dragOffset: CGFloat = 0
+    
+    private let minHeight: CGFloat = 200
+    private let midHeight: CGFloat = 400
+    
+    private var currentSessionURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".vault_system/system_workspace/current_session.md")
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 4) {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.4))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 8)
+                
+                HStack {
+                    Image(systemName: "square.and.pencil")
+                        .foregroundColor(.accentColor)
+                    
+                    Text("Sesión Actual (Scratchpad)")
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    if !consoleMessage.isEmpty {
+                        Text(consoleMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 8)
+                            .background(Color.black.opacity(0.05))
+                            .cornerRadius(4)
+                            .transition(.opacity)
+                    }
+                    
+                    Button(action: consolidate) {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                            Text("Consolidar Sesión")
+                        }
+                        .fontWeight(.bold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.purple)
+                    
+                    Button {
+                        isPresented = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+            .background(Color(NSColor.windowBackgroundColor))
+            .gesture(
+                DragGesture()
+                    .updating($dragOffset) { value, state, _ in
+                        state = value.translation.height
+                    }
+                    .onEnded { value in
+                        let newHeight = height - value.translation.height
+                        let screenHeight: CGFloat = 800
+                        
+                        if newHeight < (minHeight + midHeight) / 2 {
+                            height = minHeight
+                        } else if newHeight > (midHeight + screenHeight) / 2 {
+                            height = screenHeight - 100
+                        } else {
+                            height = midHeight
+                        }
+                    }
+            )
+            
+            Divider()
+            
+            TextEditor(text: $scratchpadText)
+                .font(.system(.body, design: .monospaced))
+                .padding(8)
+                .background(Color(NSColor.textBackgroundColor))
+                .onChange(of: scratchpadText) { _, newText in
+                    saveContent(newText)
+                }
+        }
+        .frame(height: max(minHeight, height - dragOffset))
+        .background(Color(NSColor.windowBackgroundColor))
+        .clipShape(RoundedCornerTop(radius: 32))
+        .shadow(color: .black.opacity(0.3), radius: 15, x: 0, y: -5)
+        .onAppear {
+            loadContent()
+        }
+    }
+    
+    private func loadContent() {
+        let dir = currentSessionURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        
+        if FileManager.default.fileExists(atPath: currentSessionURL.path) {
+            if let content = try? String(contentsOf: currentSessionURL, encoding: .utf8) {
+                scratchpadText = content
+            }
+        } else {
+            let defaultContent = "# Sesión Actual\n\n- [HITO] \n- [ACUERDO] \n"
+            try? defaultContent.write(to: currentSessionURL, atomically: true, encoding: .utf8)
+            scratchpadText = defaultContent
+        }
+    }
+    
+    private func saveContent(_ text: String) {
+        try? text.write(to: currentSessionURL, atomically: true, encoding: .utf8)
+    }
+    
+    private func consolidate() {
+        let activePath = viewModel.activeTabId ?? ""
+        if activePath.isEmpty {
+            withAnimation {
+                consoleMessage = "Abre una nota del proyecto antes de consolidar."
+            }
+            return
+        }
+        
+        _ = consolidateSession(activePath: activePath)
+        withAnimation {
+            consoleMessage = "Consolidación terminada con éxito."
+            scratchpadText = "# Sesión Actual\n\n- [HITO] \n- [ACUERDO] \n"
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            withAnimation {
+                consoleMessage = ""
+            }
+        }
+    }
+}
+
+struct RoundedCornerTop: Shape {
+    var radius: CGFloat
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let width = rect.size.width
+        let height = rect.size.height
+        
+        path.move(to: CGPoint(x: 0, y: height))
+        path.addLine(to: CGPoint(x: 0, y: radius))
+        path.addArc(center: CGPoint(x: radius, y: radius), radius: radius, startAngle: Angle(degrees: 180), endAngle: Angle(degrees: 270), clockwise: false)
+        
+        path.addLine(to: CGPoint(x: width - radius, y: 0))
+        path.addArc(center: CGPoint(x: width - radius, y: radius), radius: radius, startAngle: Angle(degrees: 270), endAngle: Angle(degrees: 0), clockwise: false)
+        
+        path.addLine(to: CGPoint(x: width, y: height))
+        path.closeSubpath()
+        
+        return path
     }
 }

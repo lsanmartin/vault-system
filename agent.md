@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-17 10:30]
+Última actualización: [2026-06-21 18:25]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -8,8 +8,14 @@
 - **Capa 3: Core (Rust) & Seguridad MCP**: Búsqueda semántica, File Watcher con persistencia Git (Auto-Save), y RBAC de MCP.
 
 ## Resumen Técnico
-- **Objetivo**: Refinamiento de la interfaz de usuario, independización de columnas y diagnóstico del historial de cambios Git.
+- **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-21 18:25] Soberanía Cognitiva (Fase 1-4)**:
+    - **DuckDB & Core FFI**: Creada tabla `domain_metadata` y refactorizado el escáner a `scan_domain_metadata` para parsear la tríada completa (`_memory.md`, `_specs.md`, `lore.md`).
+    - **UI Scratchpad**: Componente `BottomSheetScratchpadView` en SwiftUI con drag vertical y snaps, persistido en `current_session.md`, con botón de Consolidar (`consolidate_session` en Rust).
+    - **Telemetría Nativa**: `TelemetryManager` singleton en Swift que reporta remociones de workspace, guardándolos en `telemetria.log` e insertando logs de fricción a la tabla `telemetry` en DuckDB via FFI (`log_friction_event`).
+    - **API de RAG**: Añadida la herramienta MCP `vault_export_domain_metadata` para exportar en JSON optimizado todos los metadatos de dominio.
+    - **MCP Tools**: Expuestas `vault_get_domain_context`, `vault_log_friction` y `vault_export_domain_metadata`.
   - **[2026-06-17 10:20] Diagnóstico Historial Git**:
     - **Telemetría en Core**: Añadidos logs detallados en `get_file_history` (Rust) para rastrear errores de comandos Git y verificar el conteo de commits detectados.
     - **Revisión de Persistencia**: Verificado que `save_note` realiza correctamente el ciclo `git add` + `git commit`.
@@ -25,7 +31,6 @@
     - Migración de tokens MCP a `UserDefaults` para evitar pérdida en recompilaciones.
 
 ## Pendientes Próxima Sesión
-- **Optimización de Historial**: Si la telemetría confirma que Rust obtiene commits pero SwiftUI no los muestra, revisar el flujo de datos en `GitHistorySidebar`.
-- **Arquitectura MCP Broker (MacOS Nativo)**: Abordar la implementación del broker local basado en `vault://register` y XPC para centralizar la gestión de permisos MCP (ver `docs/2026-06-17-mcp-broker-macos.md`).
-- **Búsqueda en WebView**: Componente nativo para buscar dentro del modo Preview.
-- **Persistencia de Layout**: Guardar el ancho de las columnas entre sesiones.
+- **Refinamiento de RAG Local**: Integrar la generación de embeddings nativos en Apple Silicon (MLX/Metal) directamente en la tabla `domain_metadata` para RAG local offline.
+- **Validación de Rendimiento**: Comprobar tiempo de respuesta del scanner en vaults de gran escala (>1000 carpetas).
+- **Consistencia UI**: Sincronizar el estado visual del botón del Scratchpad tras la consolidación exitosa.
