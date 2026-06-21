@@ -608,14 +608,13 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         }
     }
 
-    // Exocórtex de Cuarentena: Priorizamos synthetic_summary si existe
     let mut sql = if is_semantic {
         format!(
-            "SELECT n.id, n.title, n.path, COALESCE(s.synthetic_summary, n.content) as content, n.is_dir, array_cosine_similarity(n.embedding, {}) as similarity FROM notes n LEFT JOIN semantic_summaries s ON n.id = s.note_id WHERE 1=1",
+            "SELECT n.id, n.title, n.path, n.content, n.is_dir, array_cosine_similarity(n.embedding, {}) as similarity FROM notes n WHERE 1=1",
             search_emb_sql
         )
     } else {
-        "SELECT n.id, n.title, n.path, COALESCE(s.synthetic_summary, n.content) as content, n.is_dir FROM notes n LEFT JOIN semantic_summaries s ON n.id = s.note_id WHERE 1=1".to_string()
+        "SELECT n.id, n.title, n.path, n.content, n.is_dir FROM notes n WHERE 1=1".to_string()
     };
     
     // Filtro por Workspace (Path)
