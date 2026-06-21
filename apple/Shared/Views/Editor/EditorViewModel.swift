@@ -210,6 +210,18 @@ class EditorViewModel: ObservableObject {
         }
     }
     
+    func resetToWorkspaceRoot(locations: [VaultLocation]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let id = self.selectedLocationId,
+                  let location = locations.first(where: { $0.id == id }) else { return }
+            self.selectedItemIds.removeAll()
+            let p = location.path
+            self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
+            self.refreshNotes(locations: locations)
+        }
+    }
+
     func refreshNotes(locations: [VaultLocation]) {
         DispatchQueue.main.async { [weak self] in
             self?.currentLocations = locations

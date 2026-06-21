@@ -136,6 +136,10 @@ struct SidebarColumn: View {
                     NavigationLink(value: sysLoc.id) {
                         Label(sysLoc.name, systemImage: "gearshape.fill")
                             .foregroundColor(.orange)
+                            .simultaneousGesture(TapGesture().onEnded {
+                                viewModel.selectedLocationId = sysLoc.id
+                                viewModel.resetToWorkspaceRoot(locations: workspaceManager.allLocations)
+                            })
                     }
                 }
                 ForEach(workspaceManager.locations) { location in
@@ -180,6 +184,11 @@ struct SidebarColumn: View {
                             .padding(.trailing, 4)
                             .help("Abrir en Finder")
                         }
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(TapGesture().onEnded {
+                            viewModel.selectedLocationId = location.id
+                            viewModel.resetToWorkspaceRoot(locations: workspaceManager.allLocations)
+                        })
                         .contextMenu {
                             Button(role: .destructive) {
                                 workspaceToRemove = location
