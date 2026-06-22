@@ -23,8 +23,13 @@ struct CodeEditor: NSViewRepresentable {
         textView.isIncrementalSearchingEnabled = true
         
         // Agregar espacio interno (Padding)
-        textView.textContainerInset = NSSize(width: 20, height: 20)
+        textView.textContainerInset = NSSize(width: 70, height: 70)
         textView.textContainer?.lineFragmentPadding = 5
+        
+        // Auto-foco del cursor al entrar a edición
+        DispatchQueue.main.async {
+            scrollView.window?.makeFirstResponder(textView)
+        }
         
         return scrollView
     }
@@ -110,8 +115,9 @@ struct CodeEditor: NSViewRepresentable {
             
             // 2. Procesar por patrones (Evitando propagación global)
             let theme = parent.theme
-            let tagColor = theme == .night ? NSColor.orange : (theme == .dark ? NSColor.systemOrange : NSColor.systemBlue)
-            let headerColor = theme == .night ? NSColor.red : (theme == .dark ? NSColor.systemBlue : NSColor.systemIndigo)
+            let isDarkTheme = (theme == .dark || (theme == .system && NSApp.effectiveAppearance.name == .darkAqua))
+            let tagColor = theme == .night ? NSColor.orange : (isDarkTheme ? NSColor.systemOrange : NSColor.systemBlue)
+            let headerColor = theme == .night ? NSColor.red : (isDarkTheme ? NSColor.systemBlue : NSColor.systemIndigo)
             
             if parent.language == "html" {
                 // HTML: Resaltar etiquetas <...>
@@ -128,15 +134,15 @@ struct CodeEditor: NSViewRepresentable {
                 applyRegex(to: textStorage, pattern: "\\[.*?\\]\\(.*?\\)", color: tagColor)
                 
                 // Negritas/Cursivas (Simple)
-                let emphColor = theme == .night ? NSColor.magenta : (theme == .dark ? NSColor.systemPink : NSColor.systemGray)
+                let emphColor = theme == .night ? NSColor.magenta : (isDarkTheme ? NSColor.systemPink : NSColor.systemGray)
                 applyRegex(to: textStorage, pattern: "\\*\\*.*?\\*\\*|__.*?__", color: emphColor)
 
                 // Listas
-                let listColor = theme == .night ? NSColor.yellow : (theme == .dark ? NSColor.systemYellow : NSColor.systemGreen)
+                let listColor = theme == .night ? NSColor.yellow : (isDarkTheme ? NSColor.systemYellow : NSColor.systemGreen)
                 applyRegex(to: textStorage, pattern: "^[\\t ]*(?:[-*+]|\\d+\\.)[\\t ]", color: listColor)
 
                 // Tareas
-                let taskColor = theme == .night ? NSColor.green : (theme == .dark ? NSColor.systemGreen : NSColor.systemTeal)
+                let taskColor = theme == .night ? NSColor.green : (isDarkTheme ? NSColor.systemGreen : NSColor.systemTeal)
                 applyRegex(to: textStorage, pattern: "^[\\t ]*[-*+][\\t ]+\\[[ xX]\\]", color: taskColor)
 
                 // Citas / Blockquotes

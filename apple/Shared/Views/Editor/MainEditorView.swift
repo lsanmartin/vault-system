@@ -24,6 +24,13 @@ struct NoteCard: View {
                 Image(systemName: "doc.text.fill")
                     .foregroundColor(viewModel.macControlIcon)
                     .font(.system(size: 12))
+                
+                if viewModel.pinnedPaths.contains(note.path) {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                }
+                
                 Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
@@ -70,8 +77,21 @@ struct NoteCard: View {
                 } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
             } else {
                 Button {
+                    viewModel.togglePin(for: note.path, locations: locations)
+                } label: {
+                    let isPinned = viewModel.pinnedPaths.contains(note.path)
+                    Label(isPinned ? "Desfijar" : "Fijar", systemImage: isPinned ? "pin.slash" : "pin")
+                }
+                
+                Divider()
+
+                Button {
                     viewModel.beginRename(for: note)
                 } label: { Label("Renombrar", systemImage: "pencil") }
+                
+                Button {
+                    NSWorkspace.shared.selectFile(note.path, inFileViewerRootedAtPath: "")
+                } label: { Label("Mostrar en Finder", systemImage: "folder") }
                 
                 Button(role: .destructive) { 
                     viewModel.selectItem(note)
@@ -246,7 +266,7 @@ struct SidebarColumn: View {
         } message: {
             Text(viewModel.itemToRename?.title ?? "")
         }
-        .preferredColorScheme(viewModel.selectedTheme == .light ? .light : .dark)
+        .preferredColorScheme(viewModel.selectedTheme.colorScheme)
         .tint(viewModel.macAccent)
         .foregroundColor(viewModel.macPrimaryText)
         .alert(item: $workspaceToRemove) { loc in
@@ -371,6 +391,15 @@ struct MainContentColumn: View {
                         .font(.headline)
                         .foregroundColor(viewModel.macPrimaryText)
                         .lineLimit(1)
+                    
+                    Button(action: {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: viewModel.currentPath))
+                    }) {
+                        Image(systemName: "folder")
+                            .foregroundColor(viewModel.macControlIcon)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Abrir carpeta en Finder")
                 }
                 Spacer()
                 Picker("", selection: $viewModel.layoutMode) {
@@ -441,7 +470,18 @@ struct VaultTreeView: View {
         let allRoot = viewModel.childrenByParent[rootPath] ?? []
         let folders = allRoot.filter { $0.isDir }
         let notes = showNotes ? allRoot.filter { !$0.isDir } : []
-        return (folders + notes).sorted { $0.title.lowercased() < $1.title.lowercased() }
+        let combined = folders + notes
+        return combined.sorted { a, b in
+            let aPinned = viewModel.pinnedPaths.contains(a.path)
+            let bPinned = viewModel.pinnedPaths.contains(b.path)
+            if aPinned != bPinned {
+                return aPinned
+            }
+            if a.isDir != b.isDir {
+                return a.isDir
+            }
+            return a.title.lowercased() < b.title.lowercased()
+        }
     }
     
     var body: some View {
@@ -468,10 +508,26 @@ struct VaultContextMenu: View {
                 viewModel.deleteSelectedItems(locations: locations)
             } label: { Label("Eliminar \(viewModel.selectedItemIds.count) elementos", systemImage: "trash") }
         } else {
+            Button {
+                viewModel.togglePin(for: item.path, locations: locations)
+            } label: {
+                let isPinned = viewModel.pinnedPaths.contains(item.path)
+                Label(isPinned ? "Desfijar" : "Fijar", systemImage: isPinned ? "pin.slash" : "pin")
+            }
+            
+            Divider()
+
             if item.isDir {
                 Button { viewModel.createNewNote(at: item.path, locations: locations) } label: { Label("Nueva Nota aquí", systemImage: "note.text.badge.plus") }
                 Button { viewModel.createNewFolder(at: item.path, locations: locations) } label: { Label("Nueva Carpeta aquí", systemImage: "folder.badge.plus") }
+                Button {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: item.path))
+                } label: { Label("Mostrar en Finder", systemImage: "folder") }
                 Divider()
+            } else {
+                Button {
+                    NSWorkspace.shared.selectFile(item.path, inFileViewerRootedAtPath: "")
+                } label: { Label("Mostrar en Finder", systemImage: "folder") }
             }
             
             Button {
@@ -503,7 +559,18 @@ struct VaultTreeRow: View {
         let allChildren = viewModel.childrenByParent[item.path] ?? []
         let subfolders = allChildren.filter { $0.isDir }
         let subnotes = showNotes ? allChildren.filter { !$0.isDir } : []
-        return (subfolders + subnotes).sorted { $0.title.lowercased() < $1.title.lowercased() }
+        let combined = subfolders + subnotes
+        return combined.sorted { a, b in
+            let aPinned = viewModel.pinnedPaths.contains(a.path)
+            let bPinned = viewModel.pinnedPaths.contains(b.path)
+            if aPinned != bPinned {
+                return aPinned
+            }
+            if a.isDir != b.isDir {
+                return a.isDir
+            }
+            return a.title.lowercased() < b.title.lowercased()
+        }
     }
     
     var isSelected: Bool {
@@ -535,6 +602,12 @@ struct VaultTreeRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     
+                    if viewModel.pinnedPaths.contains(item.path) {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.orange)
+                    }
+                    
                     Spacer()
                 }
                 .padding(.vertical, 4)
@@ -561,8 +634,8 @@ struct VaultTreeRow: View {
                         .id(item.path + "_ctx")
                 }
                 .id(item.path + "_row")
-                .padding(.leading, CGFloat(depth * 16))
             }
+            .padding(.leading, CGFloat(depth * 16))
             
             if item.isDir && isExpanded {
                 ForEach(children, id: \.path) { child in
@@ -741,7 +814,7 @@ struct MainEditorView: View {
                     .zIndex(50)
             }
         }
-        .preferredColorScheme(colorScheme(for: viewModel.selectedTheme))
+        .preferredColorScheme(viewModel.selectedTheme.colorScheme)
         .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.debouncedSearchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
@@ -755,13 +828,7 @@ struct MainEditorView: View {
         }
     }
     
-    private func colorScheme(for theme: AppTheme) -> ColorScheme? {
-        switch theme {
-        case .light: return .light
-        case .dark, .night: return .dark
-        case .system: return nil
-        }
-    }
+
 }
 
 struct FileRowView: View {
@@ -777,7 +844,14 @@ struct FileRowView: View {
                 .font(.system(size: 14))
             
             VStack(alignment: .leading) {
-                Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText)
+                HStack(spacing: 4) {
+                    Text(item.title).font(.headline).foregroundColor(viewModel.macPrimaryText)
+                    if viewModel.pinnedPaths.contains(item.path) {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
+                }
                 if !viewModel.searchText.isEmpty { 
                     Text(item.path).font(.caption2).lineLimit(1).opacity(0.6).foregroundColor(viewModel.macSecondaryText)
                 }
@@ -1028,7 +1102,7 @@ struct EditorAreaView: View {
         case .light: themeCSS = ":root { --bg: transparent; --text: #333; --accent: #2b82d9; } body { background: transparent; }"
         case .dark: themeCSS = ":root { --bg: transparent; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } body { background: transparent; }"
         case .night: themeCSS = ":root { --bg: #000; --text: #ff3b30; --accent: #ff453a; } body { background:#000; color:#ff3b30; }"
-        case .system: themeCSS = "@media (prefers-color-scheme: dark) { :root { --bg: transparent; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } } body { background: transparent; }"
+        case .system: themeCSS = ":root { --bg: transparent; --text: #333; --accent: #2b82d9; } @media (prefers-color-scheme: dark) { :root { --bg: transparent; --text: rgba(240, 240, 240, 0.85); --accent: #58a6ff; } } body { background: transparent; }"
         }
         
         // Extraer entidades reales del Exocórtex si el Heatmap está activo
@@ -1067,7 +1141,7 @@ struct EditorAreaView: View {
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/mark.js/8.11.1/mark.min.js"></script>
-        <style>\##(themeCSS) body { font-family: -apple-system, system-ui, sans-serif; padding: 2rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; } a, a:visited { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+        <style>\##(themeCSS) body { font-family: -apple-system, system-ui, sans-serif; padding: 5.125rem; line-height: 1.6; color: var(--text); background: var(--bg); max-width: 850px; margin: 0 auto; overflow-wrap: break-word; } a, a:visited { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
         img { max-width: 100%; height: auto; border-radius: 8px; } pre { background: rgba(128,128,128,0.1); padding: 1rem; border-radius: 8px; overflow: auto; }
         mark.search-highlight { background-color: rgba(255, 215, 0, 0.4); color: inherit; border-radius: 2px; padding: 0 2px; box-shadow: 0 0 4px rgba(255,215,0,0.5); }
         blockquote { border-left: 4px solid var(--accent); margin: 1.5rem 0; padding: 0.5rem 1rem; background: rgba(128,128,128,0.05); font-style: italic; color: var(--text); opacity: 0.9; }

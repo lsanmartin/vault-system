@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-21 18:25]
+Última actualización: [2026-06-22 00:18]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,33 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-22 00:18] Ajuste Fino de Padding en Notas**:
+    - **Visualización (Ver)**: Reducido padding del cuerpo HTML a `5.125rem` (82px, -10px sobre el aumento anterior).
+    - **Edición (Editar)**: Reducido `textContainerInset` de `CodeEditor` a `NSSize(70, 70)` (-10px sobre el aumento anterior).
+  - **[2026-06-21 20:10] Padding Adicional de Notas**:
+    - **Visualización (Ver)**: Incrementado el padding del cuerpo HTML a `4.5rem` (72px, +20px adicionales).
+    - **Edición (Editar)**: Incrementado el `textContainerInset` de `CodeEditor` a `NSSize(60, 60)` (+20px adicionales).
+  - **[2026-06-21 20:05] Padding de Notas y Foco de Cursor**:
+    - **Visualización (Ver)**: Incrementado el padding del cuerpo HTML a `3.25rem` (52px, +20px sobre el original).
+    - **Edición (Editar)**: Incrementado el `textContainerInset` de `CodeEditor` a `NSSize(40, 40)` (+20px sobre el original).
+    - **Cursor**: Añadida asignación asíncrona de primer respondedor (`makeFirstResponder`) en `CodeEditor` para posicionar automáticamente el cursor de escritura al alternar a modo de edición.
+  - **[2026-06-21 19:54] Integración NSApp.appearance para Sincronización del Sistema**:
+    - **AppKit NSApp.appearance**: Añadida la llamada a `NSApp.appearance = nil` para delegar al sistema el aspecto de las ventanas cuando está seleccionado "Sistema", y forzar `.darkAqua` o `.aqua` según corresponda, solucionando el bug de preferredColorScheme.
+    - **Persistencia del Tema**: Guardado y restauración del tema seleccionado en `UserDefaults` usando la clave `vault_selected_theme`.
+  - **[2026-06-21 19:45] Corrección del Tema del Sistema (preferredColorScheme)**:
+    - **SwiftUI preferredColorScheme**: Eliminado el acoplamiento forzado en la columna de la barra lateral que forzaba el modo oscuro al seleccionar el tema del sistema.
+    - **Propiedad Dinámica**: Trasladado el mapeo de colorScheme al enum `AppTheme`.
+    - **CodeEditor**: Modificado el coloreado de sintaxis y color de inserción para reaccionar dinámicamente al aspecto actual (`effectiveAppearance`) cuando está en modo sistema.
+    - **Vista Web (HTML)**: Corregidas las variables CSS en la vista web para el tema del sistema, agregando soporte dinámico para light y dark modes.
+  - **[2026-06-21 19:40] Funcionalidad de Fijado (Pin)**:
+    - **Persistencia**: Almacenamiento local de rutas fijadas (`pinnedPaths`) mediante `UserDefaults`.
+    - **Ordenamiento**: Modificada la lógica de ordenación para colocar elementos fijados al inicio de la lista/árbol (carpetas primero, luego notas).
+    - **Visualización**: Icono de pin naranja (`pin.fill`) en `VaultTreeRow`, `FileRowView` y `NoteCard`.
+    - **Menú Contextual**: Acción "Fijar"/"Desfijar" en `VaultContextMenu` y `NoteCard` context menu.
+  - **[2026-06-21 19:30] Alineación de Chevrons y Acceso a Finder**:
+    - **Alineación**: Ajustado el padding horizontal de los chevrons en el árbol para alinearse con su nivel de profundidad respectivo en lugar de pegarse al borde izquierdo.
+    - **Menú Contextual**: Botón "Mostrar en Finder" en VaultContextMenu (abre carpetas o revela notas).
+    - **Encabezado**: Botón junto al nombre de la carpeta actual para abrir en Finder.
   - **[2026-06-21 18:25] Soberanía Cognitiva (Fase 1-4)**:
     - **DuckDB & Core FFI**: Creada tabla `domain_metadata` y refactorizado el escáner a `scan_domain_metadata` para parsear la tríada completa (`_memory.md`, `_specs.md`, `lore.md`).
     - **UI Scratchpad**: Componente `BottomSheetScratchpadView` en SwiftUI con drag vertical y snaps, persistido en `current_session.md`, con botón de Consolidar (`consolidate_session` en Rust).

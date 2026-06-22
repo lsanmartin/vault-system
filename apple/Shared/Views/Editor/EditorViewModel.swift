@@ -52,6 +52,14 @@ struct TabItem: Identifiable, Hashable {
 enum AppTheme: String, CaseIterable, Identifiable {
     case system = "Sistema", light = "Claro", dark = "Oscuro", night = "Noche (IR)"
     var id: String { self.rawValue }
+    
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .light: return .light
+        case .dark, .night: return .dark
+        case .system: return nil
+        }
+    }
 }
 
 enum SortOption: String, CaseIterable, Identifiable {
@@ -92,6 +100,7 @@ class EditorViewModel: ObservableObject {
     @Published var debouncedSearchText: String = ""
     private var cancellables = Set<AnyCancellable>()
     @Published var selectedItemIds: Set<String> = []
+    @Published var pinnedPaths: Set<String> = []
     
     @Published var itemToRename: NoteRecord? = nil
     @Published var newNameForRename: String = ""
@@ -105,6 +114,29 @@ class EditorViewModel: ObservableObject {
         guard let item = itemToRename else { return }
         performRename(item: item, newName: newNameForRename, locations: locations)
         self.itemToRename = nil
+    }
+    
+    func togglePin(for path: String, locations: [VaultLocation]) {
+        if pinnedPaths.contains(path) {
+            pinnedPaths.remove(path)
+        } else {
+            pinnedPaths.insert(path)
+        }
+        UserDefaults.standard.set(Array(pinnedPaths), forKey: "vault_pinned_paths")
+        refreshNotes(locations: locations)
+    }
+    
+    func updateAppAppearance() {
+        DispatchQueue.main.async {
+            switch self.selectedTheme {
+            case .light:
+                NSApp.appearance = NSAppearance(named: .aqua)
+            case .dark, .night:
+                NSApp.appearance = NSAppearance(named: .darkAqua)
+            case .system:
+                NSApp.appearance = nil
+            }
+        }
     }
     @Published var expandedPaths: Set<String> = []
     @Published var childrenByParent: [String: [NoteRecord]] = [:]
@@ -134,7 +166,12 @@ class EditorViewModel: ObservableObject {
     
     @Published var selectedFolderId: String? // Mantenemos para resaltar seleccionadas si es necesario
     @Published var showSystemFiles: Bool = true 
-    @Published var selectedTheme: AppTheme = .system
+    @Published var selectedTheme: AppTheme = .system {
+        didSet {
+            UserDefaults.standard.set(selectedTheme.rawValue, forKey: "vault_selected_theme")
+            updateAppAppearance()
+        }
+    }
     @Published var sortOption: SortOption = .name
     
     @AppStorage("vault_layout_mode") var layoutMode: LayoutMode = .list
@@ -172,6 +209,17 @@ class EditorViewModel: ObservableObject {
         if let savedId = UserDefaults.standard.string(forKey: "vault_last_selected_location"),
            let uuid = UUID(uuidString: savedId) {
             self.selectedLocationId = uuid
+        }
+        
+        if let savedPinned = UserDefaults.standard.stringArray(forKey: "vault_pinned_paths") {
+            self.pinnedPaths = Set(savedPinned)
+        }
+        
+        if let savedThemeRaw = UserDefaults.standard.string(forKey: "vault_selected_theme"),
+           let savedTheme = AppTheme(rawValue: savedThemeRaw) {
+            self.selectedTheme = savedTheme
+        } else {
+            updateAppAppearance()
         }
         
         startPolling()
@@ -322,6 +370,11 @@ class EditorViewModel: ObservableObject {
         switch sortOption {
         case .name:
             results.sort { a, b in
+                let aPinned = self.pinnedPaths.contains(a.path)
+                let bPinned = self.pinnedPaths.contains(b.path)
+                if aPinned != bPinned {
+                    return aPinned
+                }
                 if a.isDir != b.isDir { return a.isDir } // Carpetas primero
                 return a.title.lowercased() < b.title.lowercased()
             }
