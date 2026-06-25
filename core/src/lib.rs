@@ -689,16 +689,19 @@ pub fn save_note(path: String, content: String) -> String {
                         // 1. Git Add
                         let add_out = std::process::Command::new("/usr/bin/git")
                             .current_dir(parent)
-                            .args(["add", file_str])
+                            .args(["-c", "safe.directory=*", "add", file_str])
                             .output();
                         
                         match add_out {
                             Ok(o) if !o.status.success() => {
-                                let err = String::from_utf8_lossy(&o.stderr);
+                                let err = String::from_utf8_lossy(&o.stderr).to_string();
                                 crate::add_telemetry_log(format!("Git Add Error: {}", err));
+                                crate::log_friction_event("Git".to_string(), "Git Add Error".to_string(), err);
                             },
                             Err(e) => {
-                                crate::add_telemetry_log(format!("Git Add Failed to start: {}", e));
+                                let err_str = e.to_string();
+                                crate::add_telemetry_log(format!("Git Add Failed to start: {}", err_str));
+                                crate::log_friction_event("Git".to_string(), "Git Add Failed to start".to_string(), err_str);
                             },
                             _ => {}
                         }
@@ -706,7 +709,12 @@ pub fn save_note(path: String, content: String) -> String {
                         // 2. Git Commit
                         let commit_out = std::process::Command::new("/usr/bin/git")
                             .current_dir(parent)
-                            .args(["commit", "-m", &format!("[Vault Auto-Save] {}", file_str)])
+                            .args([
+                                "-c", "safe.directory=*",
+                                "-c", "user.name=Vault Auto-Save",
+                                "-c", "user.email=vault-autosave@lsm.cl",
+                                "commit", "-m", &format!("[Vault Auto-Save] {}", file_str)
+                            ])
                             .output();
 
                         match commit_out {
@@ -714,16 +722,19 @@ pub fn save_note(path: String, content: String) -> String {
                                 if o.status.success() {
                                     crate::add_telemetry_log(format!("Git: Commit exitoso para {}", file_str));
                                 } else {
-                                    let err = String::from_utf8_lossy(&o.stderr);
+                                    let err = String::from_utf8_lossy(&o.stderr).to_string();
                                     if err.contains("nothing to commit") || err.contains("no cambios") {
                                         crate::add_telemetry_log("Git: Sin cambios detectados para commit".to_string());
                                     } else {
                                         crate::add_telemetry_log(format!("Git Commit Error: {}", err));
+                                        crate::log_friction_event("Git".to_string(), "Git Commit Error".to_string(), err);
                                     }
                                 }
                             },
                             Err(e) => {
-                                crate::add_telemetry_log(format!("Git Commit Failed to start: {}", e));
+                                let err_str = e.to_string();
+                                crate::add_telemetry_log(format!("Git Commit Failed to start: {}", err_str));
+                                crate::log_friction_event("Git".to_string(), "Git Commit Failed to start".to_string(), err_str);
                             }
                         }
                     }
@@ -764,14 +775,15 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
 
     let output = std::process::Command::new("/usr/bin/git")
         .current_dir(parent)
-        .args(["log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name])
+        .args(["-c", "safe.directory=*", "log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name])
         .output();
 
     let mut commits = vec![];
     if let Ok(out) = output {
         if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
             crate::add_telemetry_log(format!("Git: Error en comando log - {}", err));
+            crate::log_friction_event("Git".to_string(), "Git Log Error".to_string(), err);
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
         for line in stdout.lines() {
@@ -786,6 +798,7 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
         }
     } else {
         crate::add_telemetry_log("Git: Fallo crítico al ejecutar comando git log".to_string());
+        crate::log_friction_event("Git".to_string(), "Git Log Failed to start".to_string(), "Fallo crítico al ejecutar".to_string());
     }
     
     crate::add_telemetry_log(format!("Git: Encontrados {} commits", commits.len()));
@@ -807,7 +820,7 @@ pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
     let spec = format!("{}:./{}", commit_hash, file_name);
     let output = std::process::Command::new("/usr/bin/git")
         .current_dir(parent)
-        .args(["show", &spec])
+        .args(["-c", "safe.directory=*", "show", &spec])
         .output();
 
     if let Ok(out) = output {

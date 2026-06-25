@@ -959,6 +959,15 @@ struct EditorAreaView: View {
                     Spacer()
                     
                     Button {
+                        viewModel.revealInSidebar(path: tab.id)
+                    } label: {
+                        Image(systemName: "folder.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Mostrar en primera columna la carpeta contenedora")
+                    
+                    Button {
                         isHistoryActive.toggle()
                     } label: {
                         Label("Historial", systemImage: "clock.arrow.circlepath")

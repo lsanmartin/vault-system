@@ -19,6 +19,8 @@ targets:
         LIBRARY_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/../target"
         LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=x86_64]: "$(inherited) $(PROJECT_DIR)/../target /usr/local/opt/duckdb/lib"
         LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=arm64]: "$(inherited) $(PROJECT_DIR)/../target /opt/homebrew/opt/duckdb/lib"
+        # @rpath resolution: bundle-installed primero, luego dev local
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks $(PROJECT_DIR)/../target/aarch64-apple-darwin/release/deps"
         OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lduckdb_generated_extension_loader -lautocomplete_extension -lparquet_extension -ljson_extension -licu_extension -lcore_functions_extension -lduckdb_static -lc++ -framework Accelerate -framework Metal -framework Foundation"
         ARCHS: "$(ARCHS_STANDARD)"
         ONLY_ACTIVE_ARCH: YES

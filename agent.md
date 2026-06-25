@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-22 00:18]
+Última actualización: [2026-06-22 14:47]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,9 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-22 14:47] Revelar Nota en Sidebar y Solución de Historial Git**:
+    - **Revelar Nota**: Creado método `revealInSidebar` en `EditorViewModel` e integrado en `EditorAreaView` (icono `folder.circle` a la izquierda de Historial) para expandir ancestros, seleccionar la nota activa en el Sidebar y navegar a su directorio contenedor (focalizando el Grid de la segunda columna).
+    - **Historial Git**: Añadida la bandera `-c safe.directory=*` en todas las ejecuciones de `git` en `core/src/lib.rs` (add, commit, log, show) para eludir restricciones de directorio seguro de Git dentro del contexto de ejecución de la app nativa en macOS.
   - **[2026-06-22 00:18] Ajuste Fino de Padding en Notas**:
     - **Visualización (Ver)**: Reducido padding del cuerpo HTML a `5.125rem` (82px, -10px sobre el aumento anterior).
     - **Edición (Editar)**: Reducido `textContainerInset` de `CodeEditor` a `NSSize(70, 70)` (-10px sobre el aumento anterior).

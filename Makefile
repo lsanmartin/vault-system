@@ -45,12 +45,26 @@ build-universal: build-aarch64
 		-library target/$(TARGET_ARM)/release/libvault_core.dylib -headers core/bindings/ \
 		-output $(XCFRAMEWORK_DIR)
 
+	@echo "--- Fijando @rpath install name en XCFramework (safety net) ---"
+	@DYLIB_IN_FW=$$(find $(XCFRAMEWORK_DIR) -name 'libvault_core.dylib' | head -1); \
+	if [ -n "$$DYLIB_IN_FW" ]; then \
+		install_name_tool -id @rpath/libvault_core.dylib "$$DYLIB_IN_FW"; \
+		echo "✅ install name → @rpath/libvault_core.dylib"; \
+	fi
+
 clean:
 	cargo clean
 	rm -rf target/
 	rm -rf $(ARCHIVE_PATH)
 
 xcode-build:
+	@echo "--- Regenerando .xcodeproj desde project.yml ---"
+	@if command -v xcodegen &>/dev/null; then \
+		xcodegen generate --spec apple/project.yml --project apple/; \
+		echo "✅ .xcodeproj regenerado"; \
+	else \
+		echo "⚠️  xcodegen no encontrado, usando .xcodeproj existente"; \
+	fi
 	@echo "--- Archivando $(APP_NAME) (Release) ---"
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(XCODE_SCHEME) \

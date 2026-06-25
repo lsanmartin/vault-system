@@ -417,6 +417,30 @@ class EditorViewModel: ObservableObject {
         }
     }
     
+    func revealInSidebar(path: String) {
+        if !debouncedSearchText.isEmpty {
+            clearSearch()
+        }
+        
+        let url = URL(fileURLWithPath: path)
+        let parentPath = url.deletingLastPathComponent().path
+        
+        currentPath = parentPath
+        
+        var current = parentPath
+        while current.count > 1 {
+            expandedPaths.insert(current)
+            let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
+            if parent == current { break }
+            current = parent
+        }
+        
+        selectedItemIds = [path]
+        lastSelectedId = path
+        
+        updateGridForCurrentPath()
+    }
+    
     func selectItem(_ item: NoteRecord, extend: Bool = false, toggle: Bool = false) {
         let id = item.path
         
