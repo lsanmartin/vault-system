@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-22 14:47]
+Última actualización: [2026-06-26 16:15]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,15 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-26 16:15] Filtros de Exploración y Estética del Editor en Modo Oscuro**:
+    - **Filtros de Exploración (Vistas)**: Creado el enum `ExplorationFilter` e implementadas funciones FFI en Rust (`query_recent_created` y `query_recent_modified`) ordenando por `created_at` y `modified_ts` en DuckDB. Diseñada sección de "Vistas" (Favoritos, Recientes, Pins) en el Sidebar.
+    - **Persistencia de Workspace**: Corregida la inicialización asíncrona del path del workspace para que se restaure de manera instantánea el último workspace activo guardado al abrir la aplicación.
+    - **Fondo Modo Oscuro #1E1E1E**: Modificado el fondo de `NSTextView` en `CodeEditor.swift` y de las vistas SwiftUI del visor de nota para pintar un color gris oscuro sólido `#1E1E1E` (tipo VS Code) en lugar del fondo translúcido y clear por defecto en modo oscuro.
+    - **Indicador de Modo Edición**: Diseñado un badge flotante "Modo Edición" y un borde naranja sutil (overlay border) alrededor del editor de texto para indicar de manera inequívoca cuándo se está en modo edición.
+  - **[2026-06-26 16:00] Resolución de Compilación del Core y Despliegue de XCFramework**:
+    - **Limpieza Preventiva de Almacenamiento**: Se detectó almacenamiento crítico en disco (1.5 GiB libres) y se realizó una purga segura de cachés de Xcode DerivedData y Homebrew para recuperar **4.2 GB** de espacio libre, permitiendo compilar sin fallos por `no space left on device`.
+    - **Generación de XCFramework**: Se recompiló el Core Rust para Apple Silicon y se generaron los enlaces FFI usando UniFFI Bindgen, empaquetándolos exitosamente en `target/apple_core.xcframework`.
+    - **Build y Despliegue**: Se resolvió la dependencia faltante de Xcode, logrando un build exitoso (`ARCHIVE SUCCEEDED`) y desplegando la aplicación en `/Applications/VaultSystem.app`.
   - **[2026-06-22 14:47] Revelar Nota en Sidebar y Solución de Historial Git**:
     - **Revelar Nota**: Creado método `revealInSidebar` en `EditorViewModel` e integrado en `EditorAreaView` (icono `folder.circle` a la izquierda de Historial) para expandir ancestros, seleccionar la nota activa en el Sidebar y navegar a su directorio contenedor (focalizando el Grid de la segunda columna).
     - **Historial Git**: Añadida la bandera `-c safe.directory=*` en todas las ejecuciones de `git` en `core/src/lib.rs` (add, commit, log, show) para eludir restricciones de directorio seguro de Git dentro del contexto de ejecución de la app nativa en macOS.

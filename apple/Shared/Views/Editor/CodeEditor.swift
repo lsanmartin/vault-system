@@ -60,6 +60,7 @@ struct CodeEditor: NSViewRepresentable {
     }
     
     private func updateColors(_ textView: NSTextView) {
+        let isDark = theme == .dark || (theme == .system && NSApp.effectiveAppearance.name == .darkAqua)
         switch theme {
         case .night:
             textView.backgroundColor = .black
@@ -68,10 +69,28 @@ struct CodeEditor: NSViewRepresentable {
                 scrollView.drawsBackground = true
             }
         case .dark, .light, .system:
-            textView.backgroundColor = .clear
-            textView.insertionPointColor = (theme == .dark || (theme == .system && NSApp.effectiveAppearance.name == .darkAqua)) ? .white : .black
-            if let scrollView = textView.enclosingScrollView {
-                scrollView.drawsBackground = false
+            if isDark {
+                textView.backgroundColor = NSColor(red: 30/255.0, green: 30/255.0, blue: 30/255.0, alpha: 1.0)
+                textView.insertionPointColor = .white
+                if let scrollView = textView.enclosingScrollView {
+                    scrollView.drawsBackground = true
+                }
+            } else {
+                textView.backgroundColor = .clear
+                textView.insertionPointColor = .black
+                if let scrollView = textView.enclosingScrollView {
+                    scrollView.drawsBackground = false
+                }
+            }
+        }
+    }
+    
+    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
+        if let textView = nsView.documentView as? NSTextView {
+            textView.delegate = nil
+            textView.undoManager?.removeAllActions(withTarget: textView)
+            if let textStorage = textView.layoutManager?.textStorage {
+                textView.undoManager?.removeAllActions(withTarget: textStorage)
             }
         }
     }

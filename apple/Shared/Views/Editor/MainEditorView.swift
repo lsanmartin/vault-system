@@ -220,13 +220,68 @@ struct SidebarColumn: View {
                 }
             }
             
-            Section("Apariencia") {
-                Picker(selection: $viewModel.selectedTheme) {
-                    ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
-                } label: { Label("Tema", systemImage: "paintbrush") }
-                .colorMultiply(viewModel.selectedTheme == .night ? .red : .white)
+            Section {
+                HStack(spacing: 16) {
+                    Spacer()
+                    
+                    Button(action: {
+                        viewModel.explorationFilter = .all
+                    }) {
+                        Image(systemName: "tray.2.fill")
+                            .font(.title3)
+                            .foregroundColor(viewModel.explorationFilter == .all ? viewModel.macAccent : .secondary)
+                            .padding(6)
+                            .background(viewModel.explorationFilter == .all ? viewModel.macAccent.opacity(0.15) : Color.clear)
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Todas las notas")
+                    
+                    Button(action: {
+                        viewModel.explorationFilter = .recentCreated
+                    }) {
+                        Image(systemName: "doc.badge.plus")
+                            .font(.title3)
+                            .foregroundColor(viewModel.explorationFilter == .recentCreated ? viewModel.macAccent : .secondary)
+                            .padding(6)
+                            .background(viewModel.explorationFilter == .recentCreated ? viewModel.macAccent.opacity(0.15) : Color.clear)
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Recientes creadas")
+                    
+                    Button(action: {
+                        viewModel.explorationFilter = .recentModified
+                    }) {
+                        Image(systemName: "clock.arrow.2.circlepath")
+                            .font(.title3)
+                            .foregroundColor(viewModel.explorationFilter == .recentModified ? viewModel.macAccent : .secondary)
+                            .padding(6)
+                            .background(viewModel.explorationFilter == .recentModified ? viewModel.macAccent.opacity(0.15) : Color.clear)
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Recientes editadas")
+                    
+                    Button(action: {
+                        viewModel.explorationFilter = .pinned
+                    }) {
+                        Image(systemName: "pin.fill")
+                            .font(.title3)
+                            .foregroundColor(viewModel.explorationFilter == .pinned ? viewModel.macAccent : .secondary)
+                            .padding(6)
+                            .background(viewModel.explorationFilter == .pinned ? viewModel.macAccent.opacity(0.15) : Color.clear)
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Notas fijadas (Pins)")
+                    
+                    Spacer()
+                }
+                .padding(.vertical, 4)
                 .listRowBackground(viewModel.macSidebar)
             }
+            
             Section("Explorar") {
                 Picker(selection: $viewModel.treeMode) {
                     ForEach(TreeMode.allCases) { mode in
@@ -244,6 +299,14 @@ struct SidebarColumn: View {
                 case .heatmap:
                     HeatmapView(viewModel: viewModel)
                 }
+            }
+            
+            Section("Apariencia") {
+                Picker(selection: $viewModel.selectedTheme) {
+                    ForEach(AppTheme.allCases) { Text($0.rawValue).tag($0) }
+                } label: { Label("Tema", systemImage: "paintbrush") }
+                .colorMultiply(viewModel.selectedTheme == .night ? .red : .white)
+                .listRowBackground(viewModel.macSidebar)
             }
         }
         .navigationTitle("Vault System")
@@ -667,7 +730,7 @@ struct DetailColumn: View {
                             }
                         }
                     }
-                    .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+                    .background(viewModel.noteBackgroundColor)
                     
                     EditorAreaView(tab: $viewModel.tabs[index], selectedTheme: viewModel.selectedTheme, viewModel: viewModel)
                     
@@ -679,7 +742,7 @@ struct DetailColumn: View {
                         .padding(.horizontal, 16)
                         .padding(.bottom, 12)
                         .padding(.top, 8)
-                        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+                        .background(viewModel.noteBackgroundColor)
                 }
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
@@ -1037,15 +1100,38 @@ struct EditorAreaView: View {
                 )
                 .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
             } else {
-                CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
-                    .frame(maxWidth: 850)
-                    .cornerRadius(15)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 16)
-                    .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial))) 
+                VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Label("Modo Edición", systemImage: "pencil.and.outline")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.orange.opacity(0.8))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.orange.opacity(0.12))
+                            .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                            )
+                            .padding(.trailing, 24)
+                            .padding(.bottom, 6)
+                    }
+                    
+                    CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
+                        .frame(maxWidth: 850)
+                        .cornerRadius(15)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 15)
+                                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                        )
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 8)
+                        .background(viewModel.noteBackgroundColor)
+                }
             }
             }
-            .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+            .background(viewModel.noteBackgroundColor)
             .background(
                 Group {
                     Button("") {

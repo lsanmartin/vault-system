@@ -674,6 +674,72 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
 }
 
 #[uniffi::export]
+pub fn query_recent_created(path_filter: Option<String>, limit: i32) -> Vec<NoteRecord> {
+    let conn = match get_db_connection() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
+    if let Some(ref path) = path_filter {
+        if !path.is_empty() {
+            let clean_path = path.trim_end_matches('/');
+            sql.push_str(&format!(" AND path LIKE '{}%'", clean_path));
+        }
+    }
+    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT {}", limit));
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let note_iter = match stmt.query_map([], |row| {
+        Ok(NoteRecord {
+            id: row.get(0).unwrap_or_default(),
+            title: row.get(1).unwrap_or_default(),
+            path: row.get(2).unwrap_or_default(),
+            content: row.get(3).unwrap_or_default(),
+            is_dir: row.get(4).unwrap_or(false),
+        })
+    }) {
+        Ok(iter) => iter,
+        Err(_) => return Vec::new(),
+    };
+    note_iter.filter_map(|n| n.ok()).collect()
+}
+
+#[uniffi::export]
+pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<NoteRecord> {
+    let conn = match get_db_connection() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
+    if let Some(ref path) = path_filter {
+        if !path.is_empty() {
+            let clean_path = path.trim_end_matches('/');
+            sql.push_str(&format!(" AND path LIKE '{}%'", clean_path));
+        }
+    }
+    sql.push_str(&format!(" ORDER BY modified_ts DESC LIMIT {}", limit));
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let note_iter = match stmt.query_map([], |row| {
+        Ok(NoteRecord {
+            id: row.get(0).unwrap_or_default(),
+            title: row.get(1).unwrap_or_default(),
+            path: row.get(2).unwrap_or_default(),
+            content: row.get(3).unwrap_or_default(),
+            is_dir: row.get(4).unwrap_or(false),
+        })
+    }) {
+        Ok(iter) => iter,
+        Err(_) => return Vec::new(),
+    };
+    note_iter.filter_map(|n| n.ok()).collect()
+}
+
+#[uniffi::export]
 pub fn save_note(path: String, content: String) -> String {
     let res = fs::write(&path, content);
     match res {

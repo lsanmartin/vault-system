@@ -81,6 +81,14 @@ enum TreeMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+enum ExplorationFilter: String, CaseIterable, Identifiable {
+    case all = "Todos"
+    case recentCreated = "Recientes Creadas"
+    case recentModified = "Recientes Editadas"
+    case pinned = "Fijadas"
+    var id: String { self.rawValue }
+}
+
 func fastParentPath(for path: String) -> String {
     let normalized = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
     guard let lastSlash = normalized.lastIndex(of: "/") else { return "" }
@@ -92,6 +100,13 @@ class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String?
     @Published var treeMode: TreeMode = .hierarchy
+    @Published var explorationFilter: ExplorationFilter = .all {
+        didSet {
+            if let locs = currentLocations {
+                refreshNotes(locations: locs)
+            }
+        }
+    }
     @Published var notes: [NoteRecord] = []
     @Published var folders: [NoteRecord] = [] // Carpetas del nivel actual (Grid)
     @Published var allFolders: [NoteRecord] = [] // Todas las carpetas (Árbol Sidebar)
@@ -180,6 +195,16 @@ class EditorViewModel: ObservableObject {
     
     // --- macOS Finder Palette (Dynamic) ---
     var macBackground: Color { selectedTheme == .night ? .black : Color(nsColor: .windowBackgroundColor) }
+    var noteBackgroundColor: Color {
+        let isDark = selectedTheme == .dark || (selectedTheme == .system && NSApp.effectiveAppearance.name == .darkAqua)
+        if selectedTheme == .night {
+            return .black
+        } else if isDark {
+            return Color(hex: "1E1E1E")
+        } else {
+            return Color(nsColor: .windowBackgroundColor)
+        }
+    }
     var macSidebar: Color { selectedTheme == .night ? .black : (selectedTheme == .light ? Color(red: 236/255.0, green: 236/255.0, blue: 236/255.0) : Color(nsColor: .windowBackgroundColor)) }
     var macPrimaryText: Color { selectedTheme == .night ? .red : .primary }
     var macSecondaryText: Color { selectedTheme == .night ? Color.red.opacity(0.7) : .secondary }
@@ -272,9 +297,15 @@ class EditorViewModel: ObservableObject {
 
     func refreshNotes(locations: [VaultLocation]) {
         DispatchQueue.main.async { [weak self] in
-            self?.currentLocations = locations
-            if self?.currentPath.isEmpty == true, let first = locations.first(where: { $0.id == self?.selectedLocationId }) {
-                self?.currentPath = first.path
+            guard let self = self else { return }
+            self.currentLocations = locations
+            if self.currentPath.isEmpty {
+                if let id = self.selectedLocationId, let loc = locations.first(where: { $0.id == id }) {
+                    let p = loc.path
+                    self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
+                } else if let first = locations.first {
+                    self.currentPath = first.path
+                }
             }
         }
 
@@ -283,12 +314,25 @@ class EditorViewModel: ObservableObject {
         let currentDeletedPaths = deletedPathsThisSession
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var rootWorkspacePath = locations.first(where: { $0.id == self?.selectedLocationId })?.path
+            guard let self = self else { return }
+            var rootWorkspacePath = locations.first(where: { $0.id == self.selectedLocationId })?.path
             if let rwp = rootWorkspacePath, rwp.hasSuffix("/") && rwp.count > 1 {
                 rootWorkspacePath = String(rwp.dropLast())
             }
-            // Obtenemos solo los datos del workspace activo
-            let rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
+            
+            // Obtenemos solo los datos según el filtro activo
+            let rawItems: [NoteRecord]
+            switch self.explorationFilter {
+            case .all:
+                rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
+            case .recentCreated:
+                rawItems = queryRecentCreated(pathFilter: rootWorkspacePath, limit: 50)
+            case .recentModified:
+                rawItems = queryRecentModified(pathFilter: rootWorkspacePath, limit: 50)
+            case .pinned:
+                let allRaw = queryNotes(searchTerm: "", pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
+                rawItems = allRaw.filter { self.pinnedPaths.contains($0.path) }
+            }
             
             // Aplicar filtro de sesión GLOBAL
             let allItems = rawItems.filter { item in
@@ -303,7 +347,9 @@ class EditorViewModel: ObservableObject {
             var newNotes: [NoteRecord] = []
             var newExpandedPaths: Set<String> = []
             
-            if currentSearchText.isEmpty {
+            if self.explorationFilter != .all {
+                newNotes = allItems.filter { !$0.isDir }
+            } else if currentSearchText.isEmpty {
                 newFolders = allItems.filter { $0.isDir }
                 newNotes = allItems.filter { !$0.isDir }
             } else {
@@ -336,7 +382,6 @@ class EditorViewModel: ObservableObject {
             }
             
             DispatchQueue.main.async {
-                guard let self = self else { return }
                 self.allFolders = newFolders
                 self.allNotes = newNotes
                 if !currentSearchText.isEmpty {
@@ -358,7 +403,9 @@ class EditorViewModel: ObservableObject {
         
         var results: [NoteRecord] = []
         
-        if !debouncedSearchText.isEmpty {
+        if self.explorationFilter != .all {
+            results = self.allNotes
+        } else if !debouncedSearchText.isEmpty {
             var uniqueItems = [String: NoteRecord]()
             for item in allItems { uniqueItems[item.path] = item }
             results = Array(uniqueItems.values)
@@ -367,19 +414,21 @@ class EditorViewModel: ObservableObject {
         }
         
         // Aplicar ordenamiento
-        switch sortOption {
-        case .name:
-            results.sort { a, b in
-                let aPinned = self.pinnedPaths.contains(a.path)
-                let bPinned = self.pinnedPaths.contains(b.path)
-                if aPinned != bPinned {
-                    return aPinned
+        if self.explorationFilter == .all {
+            switch sortOption {
+            case .name:
+                results.sort { a, b in
+                    let aPinned = self.pinnedPaths.contains(a.path)
+                    let bPinned = self.pinnedPaths.contains(b.path)
+                    if aPinned != bPinned {
+                        return aPinned
+                    }
+                    if a.isDir != b.isDir { return a.isDir } // Carpetas primero
+                    return a.title.lowercased() < b.title.lowercased()
                 }
-                if a.isDir != b.isDir { return a.isDir } // Carpetas primero
-                return a.title.lowercased() < b.title.lowercased()
+            case .date:
+                break 
             }
-        case .date:
-            break 
         }
         
         // Separar carpetas y notas para el layout táctico
@@ -388,6 +437,7 @@ class EditorViewModel: ObservableObject {
     }
     
     func navigateTo(path: String) {
+        explorationFilter = .all
         currentPath = path
         // Al navegar, limpiamos selección por defecto para evitar confusiones de contexto
         selectedItemIds = [path] 
