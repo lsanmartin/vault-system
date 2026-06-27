@@ -501,6 +501,9 @@ class EditorViewModel: ObservableObject {
         if !debouncedSearchText.isEmpty {
             clearSearch()
         }
+        if explorationFilter != .all {
+            explorationFilter = .all
+        }
         
         let url = URL(fileURLWithPath: path)
         let parentPath = url.deletingLastPathComponent().path
