@@ -39,10 +39,18 @@ struct TabItem: Identifiable, Hashable {
     var content: String
     var isPreviewMode: Bool = true
     var renderMode: RenderMode = .md
+    var lastSavedAt: Date? = nil
     
     var language: String {
         if renderMode == .html || id.lowercased().hasSuffix(".html") { return "html" }
         return "markdown"
+    }
+    
+    var lastSavedText: String {
+        guard let date = lastSavedAt else { return "" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return "Guardado: \(formatter.string(from: date))"
     }
     
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -98,7 +106,11 @@ func fastParentPath(for path: String) -> String {
 
 class EditorViewModel: ObservableObject {
     @Published var tabs: [TabItem] = []
-    @Published var activeTabId: String?
+    @Published var activeTabId: String? {
+        didSet {
+            updateShowLineNumbersForActiveTab()
+        }
+    }
     @Published var treeMode: TreeMode = .hierarchy
     @Published var explorationFilter: ExplorationFilter = .all {
         didSet {
@@ -116,6 +128,24 @@ class EditorViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     @Published var selectedItemIds: Set<String> = []
     @Published var pinnedPaths: Set<String> = []
+    
+    @Published var showLineNumbers: Bool = false {
+        didSet {
+            if let tabId = activeTabId {
+                UserDefaults.standard.set(showLineNumbers, forKey: "vault_show_line_numbers_\(tabId)")
+            }
+        }
+    }
+    
+    private func updateShowLineNumbersForActiveTab() {
+        guard let tabId = activeTabId else { return }
+        let key = "vault_show_line_numbers_\(tabId)"
+        if UserDefaults.standard.object(forKey: key) == nil {
+            self.showLineNumbers = false
+        } else {
+            self.showLineNumbers = UserDefaults.standard.bool(forKey: key)
+        }
+    }
     
     @Published var itemToRename: NoteRecord? = nil
     @Published var newNameForRename: String = ""
@@ -781,7 +811,9 @@ class EditorViewModel: ObservableObject {
             // Modo Universal por defecto para todas las nuevas pestañas
             let initialMode: RenderMode = .universal
             
-            let newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: initialMode)
+            var newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: initialMode)
+            let fileModDate = (try? FileManager.default.attributesOfItem(atPath: note.id)[.modificationDate] as? Date)
+            newTab.lastSavedAt = fileModDate
             tabs.append(newTab)
         }
         activeTabId = note.id
@@ -810,6 +842,7 @@ class EditorViewModel: ObservableObject {
         let tab = tabs[index]
         _ = saveNote(path: tab.id, content: tab.content)
         Telemetry.shared.log("Editor", eventType: "SaveNote", message: "Guardada: \(tab.title)")
+        tabs[index].lastSavedAt = Date()
         refreshNotes(locations: locations)
     }
 }

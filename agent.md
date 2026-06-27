@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-26 16:15]
+Última actualización: [2026-06-27 13:46]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,30 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 13:46] Previsualización de Versiones de Cambios**:
+    - **Panel de Previsualización**: Implementada la hoja emergente (.sheet) estilizada bajo Liquid Glass (`.ultraThinMaterial`) para visualizar el contenido exacto de una nota en un commit específico sin alterar el estado actual.
+    - **Row Interaction**: Añadido `.onTapGesture` sobre las filas del listado de historial de cambios en `GitHistorySidebar` para cargar dinámicamente y abrir la previsualización del commit clicado.
+    - **Extensión de Tipo**: Implementada la conformidad a `Identifiable` para `GitCommit` extendiendo el tipo en Swift para facilitar la presentación con sheets nativas.
+  - **[2026-06-27 13:32] Soporte de Normas Gráficas Liquid Glass (macOS Tahoe)**:
+    - **Materiales Translúcidos**: Integrado `.ultraThinMaterial` en barras de herramientas, cabeceras y barra lateral de navegación para habilitar el motor de refracción y profundidad dinámico nativo de macOS Tahoe.
+    - **Compatibilidad y Accesibilidad**: Agregada la variable de entorno `@Environment(\.accessibilityReduceTransparency)` para desactivar automáticamente la refracción translúcida y degradar a colores sólidos estáticos (`macSidebar` y `macBackground`) cuando el usuario solicita reducción de transparencia en macOS.
+  - **[2026-06-27 13:26] Auto-inicialización de Repositorios Git**:
+    - **Inicilización Automática**: Implementada la función `init_git_repo` en el Core de Rust que verifica la existencia de la carpeta `.git` en el espacio de trabajo, inicializando un nuevo repositorio Git y realizando un commit inicial vacío (`--allow-empty`) para habilitar los comandos de historial de forma inmediata.
+    - **Integración con Swift**: Invocado `initGitRepo` desde `WorkspaceManager.swift` al inicializar el espacio de sistema (`.vault_system/system_workspace`), restaurar las ubicaciones registradas en el arranque, o al añadir nuevos directorios.
+    - **Preservación de TCC y Symlinks**: Ajustado el comando git para ejecutarse con la bandera `-C` utilizando la ruta original seleccionada por el usuario (sin resolver canonicalize) para mantener la cadena de permisos TCC intacta en macOS.
+  - **[2026-06-27 09:10] Botón Guardar, Indicador y Comando+S**:
+    - **Indicador Temporal**: Mostrado el string `lastSavedText` en la barra superior en formato monoespaciado (`HH:mm:ss`). Se inicializa con la fecha de modificación real en disco.
+    - **Botón Guardar Físico**: Agregado botón en la barra superior sólo visible en modo de edición para guardar cambios de inmediato.
+    - **Atajo Cmd + S**: Vinculado atajo `.keyboardShortcut("s", modifiers: .command)` nativo sobre el botón Guardar.
+    - **Alineación de Números e Intervalos**: Ajustado el offset Y a `-1.5pt` y acotados los límites Y con `max(0, ...)` resolviendo desfase visual al aplicar un `lineSpacing` de `4.0pt` en el editor.
+  - **[2026-06-27 08:40] Números de Línea y Selección Avanzada en Editor**:
+    - **Regla de Números**: Implementada la subclase `LineNumberRulerView` de `NSRulerView` para dibujar números de línea minimalistas y discretos con ancho de 45pt.
+    - **Gestos de Selección en Regla**: Soportado click primario para seleccionar toda la línea y `Shift + Click` para extender la selección actual hasta la línea clicada.
+    - **Cmd + L**: Subclase `EditorTextView` que intercepta `Cmd + L` para seleccionar toda la línea o conjunto de líneas activas de la selección.
+    - **Persistencia y Toggle**: Creado botón discreto en cabecera con icono `list.number` para alternar la visibilidad, persistiendo el estado en `UserDefaults` (`"vault_show_line_numbers"`).
+  - **[2026-06-27 08:15] Menú Contextual en Background de Segunda Columna**:
+    - **Nueva Nota y Nueva Carpeta**: Se añadió un `.contextMenu` al fondo (background) del ScrollView en `MainContentColumn` (tanto para modo de vista `.list` como para cuadrícula).
+    - **Acciones Directas**: Permite crear una nueva nota (`createNewNote`) o una nueva carpeta (`createNewFolder`) mediante click secundario en el espacio vacío de la columna de listado de notas.
   - **[2026-06-26 16:15] Filtros de Exploración y Estética del Editor en Modo Oscuro**:
     - **Filtros de Exploración (Vistas)**: Creado el enum `ExplorationFilter` e implementadas funciones FFI en Rust (`query_recent_created` y `query_recent_modified`) ordenando por `created_at` y `modified_ts` en DuckDB. Diseñada sección de "Vistas" (Favoritos, Recientes, Pins) en el Sidebar.
     - **Persistencia de Workspace**: Corregida la inicialización asíncrona del path del workspace para que se restaure de manera instantánea el último workspace activo guardado al abrir la aplicación.

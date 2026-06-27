@@ -750,12 +750,18 @@ pub fn save_note(path: String, content: String) -> String {
             // Auto Git Commit implementation
             let path_obj = std::path::Path::new(&path);
             if let Some(parent) = path_obj.parent() {
+                let parent_str = parent.to_string_lossy().into_owned();
                 if let Some(file_name) = path_obj.file_name() {
                     if let Some(file_str) = file_name.to_str() {
                         // 1. Git Add
                         let add_out = std::process::Command::new("/usr/bin/git")
-                            .current_dir(parent)
-                            .args(["-c", "safe.directory=*", "add", file_str])
+                            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+                            .env_remove("GIT_DIR")
+                            .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_INDEX_FILE")
+                            .env_remove("GIT_OBJECT_DIRECTORY")
+                            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+                            .args(["-C", &parent_str, "-c", "safe.directory=*", "add", file_str])
                             .output();
                         
                         match add_out {
@@ -774,8 +780,14 @@ pub fn save_note(path: String, content: String) -> String {
                         
                         // 2. Git Commit
                         let commit_out = std::process::Command::new("/usr/bin/git")
-                            .current_dir(parent)
+                            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+                            .env_remove("GIT_DIR")
+                            .env_remove("GIT_WORK_TREE")
+                            .env_remove("GIT_INDEX_FILE")
+                            .env_remove("GIT_OBJECT_DIRECTORY")
+                            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
                             .args([
+                                "-C", &parent_str,
                                 "-c", "safe.directory=*",
                                 "-c", "user.name=Vault Auto-Save",
                                 "-c", "user.email=vault-autosave@lsm.cl",
@@ -831,6 +843,7 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
             return vec![];
         }
     };
+    let parent_str = parent.to_string_lossy().into_owned();
     let file_name = match path_obj.file_name() {
         Some(f) => f.to_str().unwrap_or(""),
         None => {
@@ -840,8 +853,17 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
     };
 
     let output = std::process::Command::new("/usr/bin/git")
-        .current_dir(parent)
-        .args(["-c", "safe.directory=*", "log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name])
+        .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .args([
+            "-C", &parent_str,
+            "-c", "safe.directory=*",
+            "log", "--pretty=format:%H|%ad|%s", "--date=short", "--", file_name
+        ])
         .output();
 
     let mut commits = vec![];
@@ -878,6 +900,7 @@ pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
         Some(p) => p,
         None => return String::new(),
     };
+    let parent_str = parent.to_string_lossy().into_owned();
     let file_name = match path_obj.file_name() {
         Some(f) => f.to_str().unwrap_or(""),
         None => return String::new(),
@@ -885,14 +908,64 @@ pub fn get_file_content_at_commit(path: String, commit_hash: String) -> String {
 
     let spec = format!("{}:./{}", commit_hash, file_name);
     let output = std::process::Command::new("/usr/bin/git")
-        .current_dir(parent)
-        .args(["-c", "safe.directory=*", "show", &spec])
+        .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .args([
+            "-C", &parent_str,
+            "-c", "safe.directory=*",
+            "show", &spec
+        ])
         .output();
 
     if let Ok(out) = output {
         String::from_utf8_lossy(&out.stdout).to_string()
     } else {
         String::new()
+    }
+}
+
+#[uniffi::export]
+pub fn init_git_repo(workspace_path: String) {
+    let path_obj = std::path::Path::new(&workspace_path);
+    let git_dir = path_obj.join(".git");
+    if !git_dir.exists() {
+        crate::add_telemetry_log(format!("Git: Inicializando nuevo repositorio en {}", workspace_path));
+        let out = std::process::Command::new("/usr/bin/git")
+            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .args(["-C", &workspace_path, "init"])
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() {
+                crate::add_telemetry_log("Git: Repositorio inicializado con éxito".to_string());
+                // Create an initial empty commit so git log works
+                let _ = std::process::Command::new("/usr/bin/git")
+                    .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+                    .env_remove("GIT_DIR")
+                    .env_remove("GIT_WORK_TREE")
+                    .env_remove("GIT_INDEX_FILE")
+                    .env_remove("GIT_OBJECT_DIRECTORY")
+                    .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+                    .args([
+                        "-C", &workspace_path,
+                        "-c", "user.name=Vault Auto-Save",
+                        "-c", "user.email=vault-autosave@lsm.cl",
+                        "commit", "--allow-empty", "-m", "Initial commit from VaultSystem"
+                    ])
+                    .output();
+            } else {
+                let err = String::from_utf8_lossy(&o.stderr).to_string();
+                crate::add_telemetry_log(format!("Git Init Error: {}", err));
+            }
+        }
     }
 }
 

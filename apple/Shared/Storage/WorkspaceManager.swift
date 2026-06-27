@@ -82,6 +82,7 @@ class WorkspaceManager: ObservableObject {
                 bookmarkData: mockBookmark,
                 path: systemVaultURL.path
             )
+            initGitRepo(workspacePath: systemVaultURL.path)
     }
     
     /// Presenta el panel nativo de macOS para que el usuario seleccione carpetas adicionales.
@@ -122,6 +123,7 @@ class WorkspaceManager: ObservableObject {
                     _ = url.startAccessingSecurityScopedResource()
                     self.isAuthorized = true
                     self.logger.info("Nueva ubicación añadida e hidratada: \(url.path)")
+                    initGitRepo(workspacePath: url.path)
                 }
             }
         } catch {
@@ -150,6 +152,7 @@ class WorkspaceManager: ObservableObject {
                 if url.startAccessingSecurityScopedResource() {
                     self.logger.info("Acceso restaurado para: \(url.path)")
                     self.isAuthorized = true
+                    initGitRepo(workspacePath: url.path)
                 } else {
                     self.logger.error("No se pudo restaurar acceso para: \(url.path)")
                 }

@@ -108,6 +108,7 @@ struct NoteCard: View {
 struct SidebarColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     @State private var workspaceToRemove: VaultLocation?
     
     var body: some View {
@@ -310,7 +311,7 @@ struct SidebarColumn: View {
             }
         }
         .navigationTitle("Vault System")
-        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+        .background(reduceTransparency ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
         .scrollContentBackground(.hidden)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))) { _ in
             viewModel.refreshNotes(locations: workspaceManager.allLocations)
@@ -352,6 +353,7 @@ struct SidebarColumn: View {
 struct MainContentColumn: View {
     @ObservedObject var viewModel: EditorViewModel
     @EnvironmentObject var workspaceManager: WorkspaceManager
+    @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     @FocusState private var isSearchFocused: Bool
     @Binding var isNoteHidden: Bool
     
@@ -385,6 +387,18 @@ struct MainContentColumn: View {
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
+                .contextMenu {
+                    Button {
+                        viewModel.createNewNote(locations: workspaceManager.allLocations)
+                    } label: {
+                        Label("Nueva Nota", systemImage: "note.text.badge.plus")
+                    }
+                    Button {
+                        viewModel.createNewFolder(locations: workspaceManager.allLocations)
+                    } label: {
+                        Label("Nueva Carpeta", systemImage: "folder.badge.plus")
+                    }
+                }
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
@@ -408,6 +422,18 @@ struct MainContentColumn: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
                 .frame(maxWidth: .infinity)
+                .contextMenu {
+                    Button {
+                        viewModel.createNewNote(locations: workspaceManager.allLocations)
+                    } label: {
+                        Label("Nueva Nota", systemImage: "note.text.badge.plus")
+                    }
+                    Button {
+                        viewModel.createNewFolder(locations: workspaceManager.allLocations)
+                    } label: {
+                        Label("Nueva Carpeta", systemImage: "folder.badge.plus")
+                    }
+                }
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
@@ -420,7 +446,7 @@ struct MainContentColumn: View {
             }
         }
         .navigationTitle("Notas")
-        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+        .background(reduceTransparency ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
         .onChange(of: viewModel.selectedItemIds) { 
             DispatchQueue.main.async {
                 isSearchFocused = false 
@@ -513,7 +539,7 @@ struct MainContentColumn: View {
             }
         }
         .padding()
-        .background(viewModel.selectedTheme == .night ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+        .background(reduceTransparency ? AnyView(viewModel.macBackground) : AnyView(Rectangle().fill(.ultraThinMaterial)))
     }
 }
 
@@ -1019,6 +1045,13 @@ struct EditorAreaView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
+                    if !tab.lastSavedText.isEmpty {
+                        Text(tab.lastSavedText)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 8)
+                    }
+                    
                     Spacer()
                     
                     Button {
@@ -1072,6 +1105,16 @@ struct EditorAreaView: View {
                     
                     if !tab.isPreviewMode {
                         Button {
+                            viewModel.saveActiveTab(locations: workspaceManager.allLocations)
+                        } label: {
+                            Label("Guardar", systemImage: "square.and.arrow.down")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .keyboardShortcut("s", modifiers: .command)
+                        .help("Guardar cambios (Cmd+S)")
+                        
+                        Button {
                             triggerSearch = true
                         } label: {
                             Label("Buscar", systemImage: "magnifyingglass")
@@ -1103,6 +1146,23 @@ struct EditorAreaView: View {
                 VStack(spacing: 0) {
                     HStack {
                         Spacer()
+                        
+                        Button(action: {
+                            viewModel.showLineNumbers.toggle()
+                        }) {
+                            Image(systemName: "list.number")
+                                .font(.system(size: 11))
+                                .foregroundColor(viewModel.showLineNumbers ? viewModel.macAccent : .secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(viewModel.showLineNumbers ? viewModel.macAccent.opacity(0.1) : Color.clear)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .help(viewModel.showLineNumbers ? "Ocultar números de línea" : "Mostrar números de línea")
+                        .padding(.trailing, 8)
+                        .padding(.bottom, 6)
+
                         Label("Modo Edición", systemImage: "pencil.and.outline")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.orange.opacity(0.8))
@@ -1118,7 +1178,7 @@ struct EditorAreaView: View {
                             .padding(.bottom, 6)
                     }
                     
-                    CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, language: tab.language, theme: selectedTheme)
+                    CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, showLineNumbers: $viewModel.showLineNumbers, language: tab.language, theme: selectedTheme)
                         .frame(maxWidth: 850)
                         .cornerRadius(15)
                         .overlay(
@@ -1569,6 +1629,8 @@ struct GitHistorySidebar: View {
     @Binding var isPresented: Bool
     
     @State private var commits: [GitCommit] = []
+    @State private var previewCommit: GitCommit?
+    @State private var previewContent: String = ""
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1636,6 +1698,12 @@ struct GitHistorySidebar: View {
                         }
                     }
                     .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let oldContent = getFileContentAtCommit(path: noteId, commitHash: commit.hash)
+                        previewContent = oldContent
+                        previewCommit = commit
+                    }
                 }
             }
         }
@@ -1646,6 +1714,51 @@ struct GitHistorySidebar: View {
         }
         .onChange(of: noteId) {
             loadHistory()
+        }
+        .sheet(item: $previewCommit) { commit in
+            VStack(spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Previsualización de Versión")
+                            .font(.headline)
+                        Text("Commit: \(commit.hash.prefix(7)) — \(commit.date)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Cerrar") {
+                        previewCommit = nil
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
+                
+                Divider()
+                
+                ScrollView {
+                    Text(previewContent.isEmpty ? "(Nota vacía)" : previewContent)
+                        .font(.system(.body, design: .monospaced))
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(8)
+                .padding(.horizontal)
+                
+                HStack {
+                    Spacer()
+                    Button("Restaurar esta versión") {
+                        content = previewContent
+                        _ = saveNote(path: noteId, content: content)
+                        previewCommit = nil
+                        isPresented = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding()
+                }
+            }
+            .frame(minWidth: 600, minHeight: 450)
+            .background(Rectangle().fill(.ultraThinMaterial))
         }
     }
     
@@ -1829,4 +1942,8 @@ struct RoundedCornerTop: Shape {
         
         return path
     }
+}
+
+extension GitCommit: Identifiable {
+    public var id: String { hash }
 }
