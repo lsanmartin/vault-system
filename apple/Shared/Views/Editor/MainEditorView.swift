@@ -2000,7 +2000,7 @@ struct FocoMemoriaView: View {
             } else {
                 Text(words[currentIndex])
                     .font(.system(size: 64, weight: .black, design: .default))
-                    .foregroundColor(.orange)
+                    .foregroundColor(.orange).opacity(0.85)
                     .frame(maxWidth: .infinity)
                     .frame(height: 140)
                     .contentShape(Rectangle())
