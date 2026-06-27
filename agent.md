@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 14:41]
+Última actualización: [2026-06-27 19:31]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,10 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 19:31] Eliminación del Crash Interno de Indexación DuckDB (ART Checkpoint Error)**:
+    - **Remoción de Unique Constraints**: Eliminadas las restricciones `PRIMARY KEY` y `FOREIGN KEY` de todas las tablas de la base de datos DuckDB, previniendo el bug interno de DuckDB al serializar índices ART (`TransformToDeprecated` invalidation error). Se crearon índices estándares en `id` y `path` para mantener consultas ultra rápidas.
+    - **Controlador de Borrado Preventivo**: Modificados los bloques de inserción en `scan_vault`, `start_watcher` e `import_domain_specs` para ejecutar una eliminación explícita (`DELETE WHERE id = ?`) previa a la inserción, emulando de forma segura el comportamiento de `INSERT OR REPLACE` / `INSERT OR IGNORE`.
+    - **Auto-recreación Dinámica**: Implementado validador en `init_knowledge_base` que detecta si el esquema local requiere migración o si la base de datos fue invalidada por DuckDB, eliminando preventivamente el archivo físico `vault.duckdb` y reconstruyendo el esquema correcto en frío.
   - **[2026-06-27 14:41] Resolución de Bloqueo de Acceso Concurrente DuckDB**:
     - **DbConnectionGuard con Deref**: Implementada la estructura `DbConnectionGuard` en Rust que encapsula la conexión a DuckDB y una guardia de exclusión mutua global (`MutexGuard<'static, ()>`). Utiliza las características `Deref` y `DerefMut` para permitir el uso directo y transparente del objeto connection original.
     - **Exclusión Mutua Global (DB_QUERY_MUTEX)**: Introducido el mutex global `DB_QUERY_MUTEX` que se bloquea al obtener la conexión en `get_db_connection()` y se libera automáticamente cuando la guardia retornada sale del ámbito de ejecución de cada hilo (Thread 2 y Thread 4). Esto previene que se lancen lecturas (SELECT) e inserciones transaccionales concurrentes sobre la misma tabla `notes`, evitando corrupción de memoria y crashes SIGBUS/EXC_BAD_ACCESS.
