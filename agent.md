@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 14:35]
+Última actualización: [2026-06-27 14:41]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,9 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 14:41] Resolución de Bloqueo de Acceso Concurrente DuckDB**:
+    - **DbConnectionGuard con Deref**: Implementada la estructura `DbConnectionGuard` en Rust que encapsula la conexión a DuckDB y una guardia de exclusión mutua global (`MutexGuard<'static, ()>`). Utiliza las características `Deref` y `DerefMut` para permitir el uso directo y transparente del objeto connection original.
+    - **Exclusión Mutua Global (DB_QUERY_MUTEX)**: Introducido el mutex global `DB_QUERY_MUTEX` que se bloquea al obtener la conexión en `get_db_connection()` y se libera automáticamente cuando la guardia retornada sale del ámbito de ejecución de cada hilo (Thread 2 y Thread 4). Esto previene que se lancen lecturas (SELECT) e inserciones transaccionales concurrentes sobre la misma tabla `notes`, evitando corrupción de memoria y crashes SIGBUS/EXC_BAD_ACCESS.
   - **[2026-06-27 14:35] Corrección al Revelar Carpeta Contenedora**:
     - **Reinicio del Filtro de Exploración**: Modificado `revealInSidebar` en `EditorViewModel.swift` para forzar `explorationFilter = .all` al hacer clic en el botón revelar carpeta. Esto asegura que la aplicación cambie de la lista plana de "Recientes" o "Marcadas" a la estructura de árbol del directorio original, posicionando y seleccionando correctamente la nota en su ubicación correspondiente.
   - **[2026-06-27 14:17] Lector RSVP y Mejoras de Enfoque Visual**:
