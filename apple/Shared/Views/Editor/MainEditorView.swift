@@ -1013,6 +1013,7 @@ struct EditorAreaView: View {
     @State private var triggerSearch: Bool = false
     @State private var isHistoryActive: Bool = false
     @State private var showSyntaxHelp: Bool = false
+    @State private var isFocoMemoriaActive: Bool = false
     
     private let syntaxHelp = """
     # Guía de Sintaxis
@@ -1123,6 +1124,18 @@ struct EditorAreaView: View {
                         .buttonStyle(.bordered)
                     }
                     
+                    if tab.isPreviewMode {
+                        Button {
+                            isFocoMemoriaActive = true
+                        } label: {
+                            Label("FocoMemoria", systemImage: "bolt.fill")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
+                        .help("Lectura rápida FocoMemoria (RSVP)")
+                    }
+                    
                     Button(tab.isPreviewMode ? "Editar" : "Ver") { 
                         tab.isPreviewMode.toggle() 
                         if tab.isPreviewMode {
@@ -1222,6 +1235,9 @@ struct EditorAreaView: View {
                 GitHistorySidebar(noteId: tab.id, content: $tab.content, isPresented: $isHistoryActive)
                     .transition(.move(edge: .trailing))
             }
+        }
+        .sheet(isPresented: $isFocoMemoriaActive) {
+            FocoMemoriaView(text: tab.content, isPresented: $isFocoMemoriaActive)
         }
     }
     
@@ -1941,6 +1957,167 @@ struct RoundedCornerTop: Shape {
         path.closeSubpath()
         
         return path
+    }
+}
+
+struct FocoMemoriaView: View {
+    let text: String
+    @Binding var isPresented: Bool
+    
+    @State private var words: [String] = []
+    @State private var currentIndex = 0
+    @State private var isPlaying = false
+    @State private var wpm = 350
+    @State private var timer: Timer? = nil
+    
+    var body: some View {
+        VStack(spacing: 24) {
+            HStack {
+                Text("FOCOMEMORIA — LECTURA RÁPIDA (RSVP)")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Cerrar") {
+                    pause()
+                    isPresented = false
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal)
+            .padding(.top)
+            
+            Spacer()
+            
+            if words.isEmpty {
+                Text("Sin texto para procesar")
+                    .font(.title)
+                    .foregroundColor(.secondary)
+            } else {
+                Text(words[currentIndex])
+                    .font(.system(size: 54, weight: .black, design: .default))
+                    .foregroundColor(.orange)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 120)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        togglePlay()
+                    }
+            }
+            
+            Spacer()
+            
+            VStack(spacing: 12) {
+                HStack(spacing: 16) {
+                    Button(action: togglePlay) {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    if !words.isEmpty {
+                        Slider(value: Binding(
+                            get: { Double(currentIndex) },
+                            set: { currentIndex = Int($0) }
+                        ), in: 0...Double(words.count - 1), step: 1)
+                        
+                        Text("\(currentIndex + 1) / \(words.count)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 70, alignment: .trailing)
+                    }
+                }
+                
+                HStack {
+                    Button(action: { wpm = max(100, wpm - 50) }) {
+                        Image(systemName: "minus.circle")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Text("\(wpm) PPM")
+                        .font(.headline)
+                        .frame(width: 120)
+                    
+                    Button(action: { wpm = min(1000, wpm + 50) }) {
+                        Image(systemName: "plus.circle")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.bottom)
+            }
+            .padding(.horizontal)
+        }
+        .frame(width: 600, height: 380)
+        .background(Rectangle().fill(.ultraThinMaterial))
+        .onAppear {
+            words = cleanMarkdownForSpeedReading(text)
+        }
+        .onDisappear {
+            stopTimer()
+        }
+        .onChange(of: wpm) { _ in
+            if isPlaying {
+                startTimer()
+            }
+        }
+        .background(
+            Button(action: togglePlay) { EmptyView() }
+                .keyboardShortcut(.space, modifiers: [])
+                .opacity(0)
+        )
+    }
+    
+    private func togglePlay() {
+        if isPlaying {
+            pause()
+        } else {
+            play()
+        }
+    }
+    
+    private func play() {
+        guard !words.isEmpty else { return }
+        if currentIndex >= words.count - 1 {
+            currentIndex = 0
+        }
+        isPlaying = true
+        startTimer()
+    }
+    
+    private func pause() {
+        isPlaying = false
+        stopTimer()
+    }
+    
+    private func startTimer() {
+        stopTimer()
+        let interval = 60.0 / Double(wpm)
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            if currentIndex < words.count - 1 {
+                currentIndex += 1
+            } else {
+                pause()
+            }
+        }
+    }
+    
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    private func cleanMarkdownForSpeedReading(_ text: String) -> [String] {
+        var cleaned = text
+        cleaned = cleaned.replacingOccurrences(of: "\\[([^\\]]+)\\]\\([^\\)]+\\)", with: "$1", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "^#+\\s+", with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "\\n#+\\s+", with: "\n", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "\\*\\*|\\*|_|~~", with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: "`", with: "")
+        cleaned = cleaned.replacingOccurrences(of: "```[a-zA-Z]*\\n[\\s\\S]*?\\n```", with: "", options: .regularExpression)
+        return cleaned.components(separatedBy: .whitespacesAndNewlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 }
 
