@@ -25,11 +25,36 @@ pub struct NoteRecord {
 }
 
 static DB_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
+static DB_QUERY_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-pub fn get_db_connection() -> Option<Connection> {
-    let guard = DB_CONN.lock().unwrap();
-    if let Some(c) = guard.as_ref() {
-        return c.try_clone().ok();
+pub struct DbConnectionGuard {
+    pub conn: Connection,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for DbConnectionGuard {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for DbConnectionGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.conn
+    }
+}
+
+pub fn get_db_connection() -> Option<DbConnectionGuard> {
+    let query_guard = DB_QUERY_MUTEX.lock().unwrap();
+    let conn_guard = DB_CONN.lock().unwrap();
+    if let Some(c) = conn_guard.as_ref() {
+        if let Ok(cloned) = c.try_clone() {
+            return Some(DbConnectionGuard {
+                conn: cloned,
+                _guard: query_guard,
+            });
+        }
     }
     None
 }
