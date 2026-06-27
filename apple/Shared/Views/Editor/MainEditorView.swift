@@ -1757,7 +1757,7 @@ struct GitHistorySidebar: View {
                     .padding()
                 }
             }
-            .frame(minWidth: 600, minHeight: 450)
+            .frame(minWidth: 950, minHeight: 650)
             .background(Rectangle().fill(.ultraThinMaterial))
         }
     }
