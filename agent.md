@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 13:46]
+Última actualización: [2026-06-27 14:09]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,10 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 14:09] RSVP Speed Reader (FocoMemoria)**:
+    - **Lector RSVP Nativo**: Creada la vista `FocoMemoriaView` en SwiftUI que proyecta palabras de manera secuencial e interactiva (RSVP) bajo la estética Liquid Glass (`.ultraThinMaterial`).
+    - **Limpieza de Markdown**: Implementado helper de expresiones regulares en Swift para purgar etiquetas HTML, formato de negritas/cursivas, bloques de código, encabezados y enlaces para alimentar el lector con texto depurado.
+    - **Acciones y Controles**: Incorporado ajuste de PPM (WPM) de 100 a 1000, slider de progresión (scrubber) e interactividad por espacio (Spacebar) para pausar o reproducir.
   - **[2026-06-27 13:46] Previsualización de Versiones de Cambios**:
     - **Panel de Previsualización**: Implementada la hoja emergente (.sheet) estilizada bajo Liquid Glass (`.ultraThinMaterial`) para visualizar el contenido exacto de una nota en un commit específico sin alterar el estado actual.
     - **Row Interaction**: Añadido `.onTapGesture` sobre las filas del listado de historial de cambios en `GitHistorySidebar` para cargar dinámicamente y abrir la previsualización del commit clicado.
