@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 19:31]
+Última actualización: [2026-06-27 19:49]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 19:49] Suavizado de Brillo en Lector RSVP**:
+    - **Atenuación de Opacidad**: Ajustada la opacidad del texto naranja del RSVP Reader a `0.85` en `MainEditorView.swift` para suavizar el contraste visual y mejorar la legibilidad prolongada.
   - **[2026-06-27 19:31] Eliminación del Crash Interno de Indexación DuckDB (ART Checkpoint Error)**:
     - **Remoción de Unique Constraints**: Eliminadas las restricciones `PRIMARY KEY` y `FOREIGN KEY` de todas las tablas de la base de datos DuckDB, previniendo el bug interno de DuckDB al serializar índices ART (`TransformToDeprecated` invalidation error). Se crearon índices estándares en `id` y `path` para mantener consultas ultra rápidas.
     - **Controlador de Borrado Preventivo**: Modificados los bloques de inserción en `scan_vault`, `start_watcher` e `import_domain_specs` para ejecutar una eliminación explícita (`DELETE WHERE id = ?`) previa a la inserción, emulando de forma segura el comportamiento de `INSERT OR REPLACE` / `INSERT OR IGNORE`.
