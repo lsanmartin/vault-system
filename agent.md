@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 19:49]
+Última actualización: [2026-06-27 19:57]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 19:57] Estilizado del Fondo RSVP**:
+    - **Fondo Sólido Oscuro**: Cambiado el color de fondo y el `.presentationBackground` de la hoja RSVP a un gris oscuro sólido `#1E1E1E` (`Color(red: 30/255, green: 30/255, blue: 30/255)`), ofreciendo una paleta contrastada y uniforme.
   - **[2026-06-27 19:49] Suavizado de Brillo en Lector RSVP**:
     - **Atenuación de Opacidad**: Ajustada la opacidad del texto naranja del RSVP Reader a `0.85` en `MainEditorView.swift` para suavizar el contraste visual y mejorar la legibilidad prolongada.
   - **[2026-06-27 19:31] Eliminación del Crash Interno de Indexación DuckDB (ART Checkpoint Error)**:
