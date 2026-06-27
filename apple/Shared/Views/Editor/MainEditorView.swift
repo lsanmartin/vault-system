@@ -1013,7 +1013,7 @@ struct EditorAreaView: View {
     @State private var triggerSearch: Bool = false
     @State private var isHistoryActive: Bool = false
     @State private var showSyntaxHelp: Bool = false
-    @State private var isFocoMemoriaActive: Bool = false
+    @State private var isRSVPActive: Bool = false
     
     private let syntaxHelp = """
     # Guía de Sintaxis
@@ -1126,14 +1126,14 @@ struct EditorAreaView: View {
                     
                     if tab.isPreviewMode {
                         Button {
-                            isFocoMemoriaActive = true
+                            isRSVPActive = true
                         } label: {
-                            Label("FocoMemoria", systemImage: "bolt.fill")
+                            Label("RSVP", systemImage: "bolt.fill")
                                 .font(.caption)
                         }
                         .buttonStyle(.bordered)
                         .tint(.orange)
-                        .help("Lectura rápida FocoMemoria (RSVP)")
+                        .help("Lectura rápida RSVP")
                     }
                     
                     Button(tab.isPreviewMode ? "Editar" : "Ver") { 
@@ -1236,8 +1236,11 @@ struct EditorAreaView: View {
                     .transition(.move(edge: .trailing))
             }
         }
-        .sheet(isPresented: $isFocoMemoriaActive) {
-            FocoMemoriaView(text: tab.content, isPresented: $isFocoMemoriaActive)
+        .blur(radius: isRSVPActive ? 3 : 0)
+        .opacity(isRSVPActive ? 0.45 : 1.0)
+        .overlay(isRSVPActive ? Color.black.opacity(0.3) : Color.clear)
+        .sheet(isPresented: $isRSVPActive) {
+            FocoMemoriaView(text: tab.content, backgroundColor: viewModel.noteBackgroundColor, isPresented: $isRSVPActive)
         }
     }
     
@@ -1962,6 +1965,7 @@ struct RoundedCornerTop: Shape {
 
 struct FocoMemoriaView: View {
     let text: String
+    let backgroundColor: Color
     @Binding var isPresented: Bool
     
     @State private var words: [String] = []
@@ -1973,7 +1977,7 @@ struct FocoMemoriaView: View {
     var body: some View {
         VStack(spacing: 24) {
             HStack {
-                Text("FOCOMEMORIA — LECTURA RÁPIDA (RSVP)")
+                Text("RSVP — LECTURA RÁPIDA")
                     .font(.caption)
                     .fontWeight(.bold)
                     .foregroundColor(.secondary)
@@ -1995,10 +1999,10 @@ struct FocoMemoriaView: View {
                     .foregroundColor(.secondary)
             } else {
                 Text(words[currentIndex])
-                    .font(.system(size: 54, weight: .black, design: .default))
+                    .font(.system(size: 64, weight: .black, design: .default))
                     .foregroundColor(.orange)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 120)
+                    .frame(height: 140)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         togglePlay()
@@ -2049,8 +2053,9 @@ struct FocoMemoriaView: View {
             }
             .padding(.horizontal)
         }
-        .frame(width: 600, height: 380)
-        .background(Rectangle().fill(.ultraThinMaterial))
+        .frame(width: 750, height: 480)
+        .presentationBackground(.ultraThinMaterial)
+        .background(backgroundColor.opacity(0.85))
         .onAppear {
             words = cleanMarkdownForSpeedReading(text)
         }
