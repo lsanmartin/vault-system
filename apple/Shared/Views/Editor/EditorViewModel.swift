@@ -414,6 +414,14 @@ class EditorViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.allFolders = newFolders
                 self.allNotes = newNotes
+                print("VaultSystem DEBUG: allFolders count: \(newFolders.count), allNotes count: \(newNotes.count)")
+                print("VaultSystem DEBUG: childrenByParent keys count: \(newChildrenMap.keys.count)")
+                if let rootPath = rootWorkspacePath {
+                    let normalizedRoot = rootPath.hasSuffix("/") && rootPath.count > 1 ? String(rootPath.dropLast()) : rootPath
+                    print("VaultSystem DEBUG: rootPath: \(rootPath), normalizedRoot: \(normalizedRoot)")
+                    print("VaultSystem DEBUG: children at rootPath: \(newChildrenMap[rootPath]?.count ?? 0)")
+                    print("VaultSystem DEBUG: children at normalizedRoot: \(newChildrenMap[normalizedRoot]?.count ?? 0)")
+                }
                 if !currentSearchText.isEmpty {
                     for path in newExpandedPaths {
                         self.expandedPaths.insert(path)

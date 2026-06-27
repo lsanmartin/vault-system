@@ -187,15 +187,37 @@ pub fn init_knowledge_base() -> String {
     let _ = std::fs::create_dir_all(&db_dir);
     let db_path = format!("{}/vault.duckdb", db_dir);
 
+    // FASE 0: Detección y recreación preventiva para evitar bugs de índices ART en DuckDB
+    let mut needs_recreate = false;
+    if std::path::Path::new(&db_path).exists() {
+        if let Ok(conn) = Connection::open(&db_path) {
+            // Verificar si el archivo está corrupto/invalidado o tiene restricciones antiguas
+            if conn.execute("SELECT id FROM notes LIMIT 1", []).is_err() {
+                needs_recreate = true;
+            } else {
+                // Verificar si tiene el flag del esquema libre de PRIMARY KEY
+                if conn.execute("SELECT * FROM _schema_no_pk LIMIT 1", []).is_err() {
+                    needs_recreate = true;
+                }
+            }
+        } else {
+            needs_recreate = true;
+        }
+    }
+
+    if needs_recreate {
+        let _ = std::fs::remove_file(&db_path);
+    }
+
     let conn = match Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
 
-    // Crear tablas de esquema básico y Arquitectura Dual-Brain
+    // Crear tablas sin restricciones PRIMARY KEY para evitar los fallos de serialización ART
     let schema_res = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
-            id VARCHAR PRIMARY KEY,
+            id VARCHAR,
             title VARCHAR,
             path VARCHAR,
             content TEXT,
@@ -205,14 +227,18 @@ pub fn init_knowledge_base() -> String {
             embedding FLOAT[384],
             modified_ts BIGINT DEFAULT 0
         );
+        CREATE INDEX IF NOT EXISTS notes_id_idx ON notes (id);
+        CREATE INDEX IF NOT EXISTS notes_path_idx ON notes (path);
+
         CREATE TABLE IF NOT EXISTS links (
             source_id VARCHAR,
             target_id VARCHAR,
             type VARCHAR,
             weight FLOAT DEFAULT 1.0,
-            created_at TIMESTAMP DEFAULT now(),
-            FOREIGN KEY (source_id) REFERENCES notes(id)
+            created_at TIMESTAMP DEFAULT now()
         );
+        CREATE INDEX IF NOT EXISTS links_source_idx ON links (source_id);
+
         CREATE TABLE IF NOT EXISTS telemetry (
             ts TIMESTAMP DEFAULT now(),
             context VARCHAR,
@@ -221,35 +247,34 @@ pub fn init_knowledge_base() -> String {
             metadata JSON
         );
         
-        -- FASE 2: ARQUITECTURA DUAL-BRAIN (Metadata Offloading)
-        -- Esta tabla almacena los resúmenes sintéticos generados por la IA Local (Daemon).
-        -- Es la ÚNICA tabla de contenido que el MCP expondrá a los LLMs Remotos.
         CREATE TABLE IF NOT EXISTS semantic_summaries (
-            note_id VARCHAR PRIMARY KEY,
+            note_id VARCHAR,
             synthetic_summary TEXT,
             extracted_entities VARCHAR[],
             cognitive_timestamp TIMESTAMP DEFAULT now(),
-            semantic_density FLOAT,
-            FOREIGN KEY (note_id) REFERENCES notes(id)
+            semantic_density FLOAT
         );
+        CREATE INDEX IF NOT EXISTS semantic_summaries_note_idx ON semantic_summaries (note_id);
         
-        -- FASE 3: GRAFO TEMPORAL Y NAVEGACIÓN
         CREATE TABLE IF NOT EXISTS entity_graphs (
             entity_name VARCHAR,
             note_id VARCHAR,
             relation_type VARCHAR,
-            discovered_at TIMESTAMP DEFAULT now(),
-            FOREIGN KEY (note_id) REFERENCES notes(id)
+            discovered_at TIMESTAMP DEFAULT now()
         );
+        CREATE INDEX IF NOT EXISTS entity_graphs_note_idx ON entity_graphs (note_id);
+
         CREATE TABLE IF NOT EXISTS memory_contexts (
-            dir_path VARCHAR PRIMARY KEY,
+            dir_path VARCHAR,
             hitos JSON,
             contexto TEXT,
             historial JSON,
             last_updated TIMESTAMP DEFAULT now()
         );
+        CREATE INDEX IF NOT EXISTS memory_contexts_path_idx ON memory_contexts (dir_path);
+
         CREATE TABLE IF NOT EXISTS domain_metadata (
-            dir_path VARCHAR PRIMARY KEY,
+            dir_path VARCHAR,
             memory_contexto TEXT,
             memory_hitos JSON,
             memory_historial JSON,
@@ -261,9 +286,15 @@ pub fn init_knowledge_base() -> String {
             lore_usuarios JSON,
             last_updated TIMESTAMP DEFAULT now()
         );
+        CREATE INDEX IF NOT EXISTS domain_metadata_path_idx ON domain_metadata (dir_path);
+
         CREATE TABLE IF NOT EXISTS _schema_version (
-            version INTEGER PRIMARY KEY,
+            version INTEGER,
             applied_at TIMESTAMP DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS _schema_no_pk (
+            flag BOOLEAN
         );"
     );
 
@@ -280,18 +311,14 @@ pub fn init_knowledge_base() -> String {
                 );
             }
 
-            // Future migrations go here:
-            // if current_version < 2 {
-            //     conn.execute("ALTER TABLE notes ADD COLUMN last_modified TIMESTAMP", [])?;
-            //     conn.execute("INSERT INTO _schema_version (version) VALUES (2)", [])?;
-            // }
-
             *conn_guard = Some(conn);
-            "Knowledge Base inicializada (DuckDB persistente)".to_string()
+            "Knowledge Base inicializada (DuckDB sin PK para evitar fallos de checkpoint)".to_string()
         },
         Err(e) => format!("Error de Esquema: {}", e),
     }
 }
+
+
 
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
@@ -396,14 +423,15 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                 for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
                     if tx_failed { continue; }
                     
+                    let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![p]);
                     let res = if is_dir {
                         conn.execute(
-                            "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
                             duckdb::params![p, t, p, c, mtime as i64]
                         )
                     } else {
                         let sql = format!(
-                            "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
                             vector_to_sql_array(&emb)
                         );
                         conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
@@ -449,14 +477,15 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
                 if tx_failed { continue; }
                 
+                let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![p]);
                 let res = if is_dir {
                     conn.execute(
-                        "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
                         duckdb::params![p, t, p, c, mtime as i64]
                     )
                 } else {
                     let sql = format!(
-                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
                         vector_to_sql_array(&emb)
                     );
                     conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
@@ -1048,23 +1077,24 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                             if let Some(conn) = get_db_connection() {
                                 let title = path.file_name().and_then(|s| s.to_str()).unwrap_or("Sin título");
                                 
+                                let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
                                 if is_dir {
                                     let _ = conn.execute(
-                                        "INSERT OR IGNORE INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
                                         duckdb::params![path_str, title, path_str, ""],
                                     );
                                 } else {
                                     let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                                    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
-                                    let emb = generate_embedding(&content);
-                                    let sql = format!(
-                                        "INSERT OR REPLACE INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
-                                        vector_to_sql_array(&emb)
-                                    );
-                                    let _ = conn.execute(
-                                        &sql,
-                                        duckdb::params![path_str, title, path_str, content, mtime as i64],
-                                    );
+                                     let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
+                                     let emb = generate_embedding(&content);
+                                     let sql = format!(
+                                         "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                                         vector_to_sql_array(&emb)
+                                     );
+                                     let _ = conn.execute(
+                                         &sql,
+                                         duckdb::params![path_str, title, path_str, content, mtime as i64],
+                                     );
                                 }
                                 update_sync_ts();
                             }
@@ -2344,7 +2374,8 @@ pub fn scan_domain_metadata(vault_path: String) -> String {
 
             let mut conn_guard = DB_CONN.lock().unwrap();
             if let Some(conn) = conn_guard.as_mut() {
-                let sql = "INSERT OR REPLACE INTO domain_metadata (
+                let _ = conn.execute("DELETE FROM domain_metadata WHERE dir_path = ?", params![parent_str]);
+                let sql = "INSERT INTO domain_metadata (
                     dir_path,
                     memory_contexto, memory_hitos, memory_historial,
                     specs_arquitectura, specs_reglas, specs_dependencias,
