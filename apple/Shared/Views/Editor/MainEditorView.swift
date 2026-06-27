@@ -2054,8 +2054,8 @@ struct FocoMemoriaView: View {
             .padding(.horizontal)
         }
         .frame(width: 750, height: 480)
-        .presentationBackground(.ultraThinMaterial)
-        .background(backgroundColor.opacity(0.85))
+        .presentationBackground(Color(red: 30/255.0, green: 30/255.0, blue: 30/255.0))
+        .background(Color(red: 30/255.0, green: 30/255.0, blue: 30/255.0))
         .onAppear {
             words = cleanMarkdownForSpeedReading(text)
         }
