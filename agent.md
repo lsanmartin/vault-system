@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 19:57]
+Última actualización: [2026-06-27 20:03]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 20:03] Reinicio de Filtro al Cambiar Workspace**:
+    - **Reinicio del Filtro de Exploración**: Modificado `resetToWorkspaceRoot` en `EditorViewModel.swift` para restablecer automáticamente `explorationFilter = .all` al cambiar de workspace en la barra lateral. Esto asegura que la vista siempre cargue la jerarquía completa de notas en lugar de quedarse atascada en filtros transitorios (como notas recientes o marcadas).
   - **[2026-06-27 19:57] Estilizado del Fondo RSVP**:
     - **Fondo Sólido Oscuro**: Cambiado el color de fondo y el `.presentationBackground` de la hoja RSVP a un gris oscuro sólido `#1E1E1E` (`Color(red: 30/255, green: 30/255, blue: 30/255)`), ofreciendo una paleta contrastada y uniforme.
   - **[2026-06-27 19:49] Suavizado de Brillo en Lector RSVP**:
