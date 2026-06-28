@@ -320,7 +320,7 @@ class EditorViewModel: ObservableObject {
                   let location = locations.first(where: { $0.id == id }) else { return }
             self.selectedItemIds.removeAll()
             self.explorationFilter = .all
-            let p = location.path
+            let p = URL(fileURLWithPath: location.path).resolvingSymlinksInPath().path
             self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
             self.refreshNotes(locations: locations)
         }
@@ -332,10 +332,11 @@ class EditorViewModel: ObservableObject {
             self.currentLocations = locations
             if self.currentPath.isEmpty {
                 if let id = self.selectedLocationId, let loc = locations.first(where: { $0.id == id }) {
-                    let p = loc.path
+                    let p = URL(fileURLWithPath: loc.path).resolvingSymlinksInPath().path
                     self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
                 } else if let first = locations.first {
-                    self.currentPath = first.path
+                    let p = URL(fileURLWithPath: first.path).resolvingSymlinksInPath().path
+                    self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
                 }
             }
         }

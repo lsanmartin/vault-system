@@ -177,6 +177,14 @@ fn vector_to_sql_array(vec: &[f32]) -> String {
     s
 }
 
+fn canonicalize_path(p: &str) -> String {
+    std::path::Path::new(p)
+        .canonicalize()
+        .ok()
+        .and_then(|cp| cp.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| p.to_string())
+}
+
 #[uniffi::export]
 pub fn init_knowledge_base() -> String {
     let mut conn_guard = DB_CONN.lock().unwrap();
@@ -327,9 +335,11 @@ pub fn init_knowledge_base() -> String {
 
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
+    let canonical_path = canonicalize_path(&path);
+    
     // Inicializar el progreso en 0%
     if let Ok(mut progress) = SCAN_PROGRESS.lock() {
-        progress.insert(path.clone(), 0.0);
+        progress.insert(canonical_path.clone(), 0.0);
     }
 
     // Ejecutar deduplicación preventiva antes del escaneo
@@ -339,7 +349,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
     }
 
-    let vault_path = Path::new(&path);
+    let vault_path = Path::new(&canonical_path);
 
     // Primera pasada: recolectar y contar todas las entradas válidas
     let mut entries = Vec::new();
@@ -374,7 +384,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     {
         if let Some(conn) = get_db_connection() {
             if let Ok(mut stmt) = conn.prepare("SELECT path, COALESCE(modified_ts, 0) FROM notes WHERE path = ? OR path LIKE ?") {
-                if let Ok(rows) = stmt.query_map(duckdb::params![&path, format!("{}/%", path)], |row| {
+                if let Ok(rows) = stmt.query_map(duckdb::params![&canonical_path, format!("{}/%", canonical_path)], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 }) {
                     for row in rows.flatten() {
@@ -466,14 +476,14 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
         // Actualizar progreso y check cancel
         if let Ok(mut progress) = SCAN_PROGRESS.lock() {
-            if let Some(&p) = progress.get(&path) {
+            if let Some(&p) = progress.get(&canonical_path) {
                 if p < 0.0 {
                     return "Escaneado cancelado.".to_string();
                 }
             }
             if total_entries > 0 {
                 let pct = ((idx + 1) as f32 / total_entries as f32) * 100.0;
-                progress.insert(path.clone(), pct);
+                progress.insert(canonical_path.clone(), pct);
             }
         }
     }
@@ -532,7 +542,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
     // Asegurar 100% al finalizar
     if let Ok(mut progress) = SCAN_PROGRESS.lock() {
-        progress.insert(path.clone(), 100.0);
+        progress.insert(canonical_path.clone(), 100.0);
     }
 
     update_sync_ts();
@@ -541,30 +551,31 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
 #[uniffi::export]
 pub fn remove_vault_path(path: String) -> String {
+    let canonical_path = canonicalize_path(&path);
     if let Some(conn) = get_db_connection() {
-        let clean_path = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
+        let clean_path = if canonical_path.ends_with('/') { canonical_path.clone() } else { format!("{}/", canonical_path) };
         
         // Limpieza completa en cascada manual
         let _ = conn.execute(
             "DELETE FROM semantic_summaries WHERE note_id = ? OR note_id LIKE ?",
-            params![path, format!("{}%", clean_path)],
+            params![canonical_path, format!("{}%", clean_path)],
         );
         let _ = conn.execute(
             "DELETE FROM entity_graphs WHERE note_id = ? OR note_id LIKE ?",
-            params![path, format!("{}%", clean_path)],
+            params![canonical_path, format!("{}%", clean_path)],
         );
         let _ = conn.execute(
             "DELETE FROM links WHERE source_id = ? OR source_id LIKE ? OR target_id = ? OR target_id LIKE ?",
-            params![path, format!("{}%", clean_path), path, format!("{}%", clean_path)],
+            params![canonical_path, format!("{}%", clean_path), canonical_path, format!("{}%", clean_path)],
         );
         let _ = conn.execute(
             "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-            params![path, format!("{}%", clean_path)],
+            params![canonical_path, format!("{}%", clean_path)],
         );
 
         // Remover del mapa de progreso si existe
         if let Ok(mut progress) = SCAN_PROGRESS.lock() {
-            progress.remove(&path);
+            progress.remove(&canonical_path);
         }
 
         "Directorio eliminado de la base de datos por completo (Cascada Semántica)".to_string()
@@ -684,7 +695,8 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     // Filtro por Workspace (Path)
     if let Some(path) = path_filter {
         if !path.is_empty() {
-            sql.push_str(&format!(" AND n.path LIKE '{}%'", path));
+            let canonical_path = canonicalize_path(&path);
+            sql.push_str(&format!(" AND n.path LIKE '{}%'", canonical_path));
         }
     }
 
@@ -746,7 +758,8 @@ pub fn query_recent_created(path_filter: Option<String>, limit: i32) -> Vec<Note
     let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
     if let Some(ref path) = path_filter {
         if !path.is_empty() {
-            let clean_path = path.trim_end_matches('/');
+            let canonical_path = canonicalize_path(path);
+            let clean_path = canonical_path.trim_end_matches('/');
             sql.push_str(&format!(" AND path LIKE '{}%'", clean_path));
         }
     }
@@ -779,7 +792,8 @@ pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<Not
     let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
     if let Some(ref path) = path_filter {
         if !path.is_empty() {
-            let clean_path = path.trim_end_matches('/');
+            let canonical_path = canonicalize_path(path);
+            let clean_path = canonical_path.trim_end_matches('/');
             sql.push_str(&format!(" AND path LIKE '{}%'", clean_path));
         }
     }
