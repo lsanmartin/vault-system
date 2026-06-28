@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 20:03]
+Última actualización: [2026-06-27 20:08]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 20:08] Corrección de Duplicación y Reinicio de Workspace**:
+    - **Observer de Selección en Sidebar**: Vinculado `resetToWorkspaceRoot` al observador de cambio `.onChange(of: viewModel.selectedLocationId)` en `MainEditorView.swift`. Esto soluciona un bug de SwiftUI en macOS donde la selección del Listado no ejecutaba el TapGesture del NavigationLink de forma confiable, previniendo que `currentPath` se quedara apuntando al workspace anterior y causara carpetas duplicadas.
   - **[2026-06-27 20:03] Reinicio de Filtro al Cambiar Workspace**:
     - **Reinicio del Filtro de Exploración**: Modificado `resetToWorkspaceRoot` en `EditorViewModel.swift` para restablecer automáticamente `explorationFilter = .all` al cambiar de workspace en la barra lateral. Esto asegura que la vista siempre cargue la jerarquía completa de notas en lugar de quedarse atascada en filtros transitorios (como notas recientes o marcadas).
   - **[2026-06-27 19:57] Estilizado del Fondo RSVP**:
