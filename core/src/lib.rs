@@ -311,6 +311,11 @@ pub fn init_knowledge_base() -> String {
                 );
             }
 
+            // Ejecutar deduplicación preventiva de rowids
+            let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
+            let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
+            let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
+
             *conn_guard = Some(conn);
             "Knowledge Base inicializada (DuckDB sin PK para evitar fallos de checkpoint)".to_string()
         },
@@ -327,7 +332,12 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         progress.insert(path.clone(), 0.0);
     }
 
-
+    // Ejecutar deduplicación preventiva antes del escaneo
+    if let Some(conn) = get_db_connection() {
+        let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
+        let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
+        let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
+    }
 
     let vault_path = Path::new(&path);
 
