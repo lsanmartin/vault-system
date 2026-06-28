@@ -195,7 +195,7 @@ pub fn init_knowledge_base() -> String {
     let _ = std::fs::create_dir_all(&db_dir);
     let db_path = format!("{}/vault.duckdb", db_dir);
 
-    // FASE 0: Detección y recreación preventiva para evitar bugs de índices ART en DuckDB
+    // FASE 0: Detección y recreación preventiva para evitar bugs de índices en DuckDB
     let mut needs_recreate = false;
     if std::path::Path::new(&db_path).exists() {
         if let Ok(conn) = Connection::open(&db_path) {
@@ -203,8 +203,8 @@ pub fn init_knowledge_base() -> String {
             if conn.execute("SELECT id FROM notes LIMIT 1", []).is_err() {
                 needs_recreate = true;
             } else {
-                // Verificar si tiene el flag del esquema libre de PRIMARY KEY
-                if conn.execute("SELECT * FROM _schema_no_pk LIMIT 1", []).is_err() {
+                // Verificar si tiene el flag del esquema libre de índices secundarios
+                if conn.execute("SELECT * FROM _schema_no_indices LIMIT 1", []).is_err() {
                     needs_recreate = true;
                 }
             }
@@ -222,7 +222,7 @@ pub fn init_knowledge_base() -> String {
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
 
-    // Crear tablas sin restricciones PRIMARY KEY para evitar los fallos de serialización ART
+    // Crear tablas sin restricciones PRIMARY KEY ni índices secundarios para evitar corrupción y crashes al borrar filas
     let schema_res = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
             id VARCHAR,
@@ -235,8 +235,6 @@ pub fn init_knowledge_base() -> String {
             embedding FLOAT[384],
             modified_ts BIGINT DEFAULT 0
         );
-        CREATE INDEX IF NOT EXISTS notes_id_idx ON notes (id);
-        CREATE INDEX IF NOT EXISTS notes_path_idx ON notes (path);
 
         CREATE TABLE IF NOT EXISTS links (
             source_id VARCHAR,
@@ -245,7 +243,6 @@ pub fn init_knowledge_base() -> String {
             weight FLOAT DEFAULT 1.0,
             created_at TIMESTAMP DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS links_source_idx ON links (source_id);
 
         CREATE TABLE IF NOT EXISTS telemetry (
             ts TIMESTAMP DEFAULT now(),
@@ -262,7 +259,6 @@ pub fn init_knowledge_base() -> String {
             cognitive_timestamp TIMESTAMP DEFAULT now(),
             semantic_density FLOAT
         );
-        CREATE INDEX IF NOT EXISTS semantic_summaries_note_idx ON semantic_summaries (note_id);
         
         CREATE TABLE IF NOT EXISTS entity_graphs (
             entity_name VARCHAR,
@@ -270,7 +266,6 @@ pub fn init_knowledge_base() -> String {
             relation_type VARCHAR,
             discovered_at TIMESTAMP DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS entity_graphs_note_idx ON entity_graphs (note_id);
 
         CREATE TABLE IF NOT EXISTS memory_contexts (
             dir_path VARCHAR,
@@ -279,7 +274,6 @@ pub fn init_knowledge_base() -> String {
             historial JSON,
             last_updated TIMESTAMP DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS memory_contexts_path_idx ON memory_contexts (dir_path);
 
         CREATE TABLE IF NOT EXISTS domain_metadata (
             dir_path VARCHAR,
@@ -294,14 +288,13 @@ pub fn init_knowledge_base() -> String {
             lore_usuarios JSON,
             last_updated TIMESTAMP DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS domain_metadata_path_idx ON domain_metadata (dir_path);
 
         CREATE TABLE IF NOT EXISTS _schema_version (
             version INTEGER,
             applied_at TIMESTAMP DEFAULT now()
         );
 
-        CREATE TABLE IF NOT EXISTS _schema_no_pk (
+        CREATE TABLE IF NOT EXISTS _schema_no_indices (
             flag BOOLEAN
         );"
     );
@@ -325,7 +318,7 @@ pub fn init_knowledge_base() -> String {
             let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
 
             *conn_guard = Some(conn);
-            "Knowledge Base inicializada (DuckDB sin PK para evitar fallos de checkpoint)".to_string()
+            "Knowledge Base inicializada (DuckDB sin índices secundarios para evitar corrupción)".to_string()
         },
         Err(e) => format!("Error de Esquema: {}", e),
     }

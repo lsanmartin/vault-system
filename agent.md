@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 20:21]
+Última actualización: [2026-06-27 20:26]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,9 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 20:26] Remoción Completa de Índices Secundarios**:
+    - **Evitar Invalidación de DuckDB**: Removidos todos los `CREATE INDEX` secundarios en columnas `VARCHAR` en `core/src/lib.rs`. Esto resuelve de forma definitiva el error interno de DuckDB al eliminar filas sobre índices de texto (`Failed to delete all rows from index. Only deleted 0 out of X rows`), manteniendo la base de datos estable. La velocidad se conserva óptima vía escaneo secuencial.
+    - **Recreación Automática**: Introducido el flag `_schema_no_indices` en `init_knowledge_base` para forzar la eliminación de la base de datos previa y asegurar una migración limpia libre de índices corruptos.
   - **[2026-06-27 20:21] Normalización y Resolución de Enlaces Simbólicos**:
     - **Compatibilidad con iCloud**: Implementada la resolución de enlaces simbólicos (`resolvingSymlinksInPath()` en Swift y `canonicalize()` en Rust) tanto en `EditorViewModel.swift` (`currentPath`) como en las funciones del core de Rust (`scan_vault`, `query_notes`, `query_recent_...`, `remove_vault_path`). Esto soluciona la discrepancia de rutas físicas y lógicas (ej: `/Users/lsanmartin/obsidian` vs `/Users/lsanmartin/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian`), previniendo grillas vacías.
   - **[2026-06-27 20:13] Deduplicación Preventiva de Indices en DuckDB**:
