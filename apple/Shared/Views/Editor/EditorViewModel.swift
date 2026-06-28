@@ -319,6 +319,7 @@ class EditorViewModel: ObservableObject {
                   let id = self.selectedLocationId,
                   let location = locations.first(where: { $0.id == id }) else { return }
             self.selectedItemIds.removeAll()
+            self.explorationFilter = .all
             let p = location.path
             self.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
             self.refreshNotes(locations: locations)
