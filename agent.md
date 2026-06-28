@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 20:13]
+Última actualización: [2026-06-27 20:21]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 20:21] Normalización y Resolución de Enlaces Simbólicos**:
+    - **Compatibilidad con iCloud**: Implementada la resolución de enlaces simbólicos (`resolvingSymlinksInPath()` en Swift y `canonicalize()` en Rust) tanto en `EditorViewModel.swift` (`currentPath`) como en las funciones del core de Rust (`scan_vault`, `query_notes`, `query_recent_...`, `remove_vault_path`). Esto soluciona la discrepancia de rutas físicas y lógicas (ej: `/Users/lsanmartin/obsidian` vs `/Users/lsanmartin/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian`), previniendo grillas vacías.
   - **[2026-06-27 20:13] Deduplicación Preventiva de Indices en DuckDB**:
     - **Limpieza de rowid**: Integrada una consulta de limpieza automatizada (`DELETE WHERE rowid NOT IN (SELECT MIN(rowid)...)`) que se ejecuta preventivamente tanto al iniciar la base de datos como al lanzar cualquier re-indexado (`scan_vault`). Esto elimina de forma definitiva e instantánea los registros duplicados remanentes en las tablas `notes`, `semantic_summaries` y `domain_metadata`, sin requerir borrado de base de datos.
   - **[2026-06-27 20:08] Corrección de Duplicación y Reinicio de Workspace**:
