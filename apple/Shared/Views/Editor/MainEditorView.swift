@@ -904,7 +904,9 @@ struct MainEditorView: View {
             }
         }
         .preferredColorScheme(viewModel.selectedTheme.colorScheme)
-        .onChange(of: viewModel.selectedLocationId) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
+        .onChange(of: viewModel.selectedLocationId) { _, _ in
+            viewModel.resetToWorkspaceRoot(locations: workspaceManager.allLocations)
+        }
         .onChange(of: viewModel.selectedTheme) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.debouncedSearchText) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
         .onChange(of: viewModel.sortOption) { _, _ in viewModel.refreshNotes(locations: workspaceManager.allLocations) }
