@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 20:08]
+Última actualización: [2026-06-27 20:13]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,8 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-06-27 20:13] Deduplicación Preventiva de Indices en DuckDB**:
+    - **Limpieza de rowid**: Integrada una consulta de limpieza automatizada (`DELETE WHERE rowid NOT IN (SELECT MIN(rowid)...)`) que se ejecuta preventivamente tanto al iniciar la base de datos como al lanzar cualquier re-indexado (`scan_vault`). Esto elimina de forma definitiva e instantánea los registros duplicados remanentes en las tablas `notes`, `semantic_summaries` y `domain_metadata`, sin requerir borrado de base de datos.
   - **[2026-06-27 20:08] Corrección de Duplicación y Reinicio de Workspace**:
     - **Observer de Selección en Sidebar**: Vinculado `resetToWorkspaceRoot` al observador de cambio `.onChange(of: viewModel.selectedLocationId)` en `MainEditorView.swift`. Esto soluciona un bug de SwiftUI en macOS donde la selección del Listado no ejecutaba el TapGesture del NavigationLink de forma confiable, previniendo que `currentPath` se quedara apuntando al workspace anterior y causara carpetas duplicadas.
   - **[2026-06-27 20:03] Reinicio de Filtro al Cambiar Workspace**:
