@@ -126,3 +126,13 @@
 - **Refinamiento de RAG Local**: Integrar la generación de embeddings nativos en Apple Silicon (MLX/Metal) directamente en la tabla `domain_metadata` para RAG local offline.
 - **Validación de Rendimiento**: Comprobar tiempo de respuesta del scanner en vaults de gran escala (>1000 carpetas).
 - **Consistencia UI**: Sincronizar el estado visual del botón del Scratchpad tras la consolidación exitosa.
+- **[AI Engine — Fase 1]**: Crear scaffolding `core/src/ai_engine/` + feature flag `local-ai` en `Cargo.toml`. Ver `docs/2026-07-02-plan-local-ai-engine.md` y `docs/ADR-001-local-inference-engine.md`.
+
+## Decisiones Arquitectónicas
+- **[ADR-001 — 2026-07-02]**: Motor de inferencia local `llama-cpp-2` (MIT) como engine in-process.
+  - Opt-in via feature flag `local-ai`. Sin impacto en binario base.
+  - Engine detrás de `trait InferenceEngine` (swappable cuando mlx-rs madure para LLM).
+  - Fine-tuning: contrato declarado, implementación es stub hasta Fase 5+.
+  - Modelos GGUF Apache 2.0/MIT únicamente. Catálogo en `docs/models/catalog.json`.
+  - Hook de inserción: `lib.rs` L1177 (comentario "// Aquí en un futuro se llamará al modelo local").
+  - Implementa Fase 2 del PLAN_ESTRATEGICO_DEV2 ("El Digestor").
