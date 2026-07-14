@@ -917,9 +917,12 @@ struct MainEditorView: View {
                 viewModel.launchWatcher(paths: workspaceManager.allLocations.map { $0.path }, ignorePatterns: [])
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("OpenWorkspaceFile"))) { notification in
+            if let userInfo = notification.userInfo, let url = userInfo["url"] as? URL {
+                viewModel.openNoteFromURL(url)
+            }
+        }
     }
-    
-
 }
 
 struct FileRowView: View {
@@ -1016,6 +1019,7 @@ struct EditorAreaView: View {
     @State private var isHistoryActive: Bool = false
     @State private var showSyntaxHelp: Bool = false
     @State private var isRSVPActive: Bool = false
+    @State private var selectedHelpTab: Int = 0
     
     private let syntaxHelp = """
     # Guía de Sintaxis
@@ -1042,6 +1046,28 @@ struct EditorAreaView: View {
     c & d
     \\end{pmatrix}
     $
+    """
+    
+    private let editorShortcutsHelp = """
+    # Atajos de Edición Avanzada
+    
+    ## Selección y Multi-cursor
+    - **Multi-cursor:** `Cmd` + Clic en el texto.
+    - **Siguiente Ocurrencia:** `Cmd + D`
+    
+    ## Manejo de Líneas
+    - **Mover línea(s):** `Option + ⬆/⬇`
+    - **Duplicar línea(s):** `Shift + Option + ⬆/⬇`
+    - **Borrar línea:** `Cmd + Shift + K`
+    
+    ## Formato y Bloques
+    - **Comentar (HTML):** `Cmd + /`
+    - **Identación:** `Tab` / `Shift + Tab`
+    - **Mayúsculas:** `Cmd + U` / `Cmd + Shift + U`
+    
+    ## Automatización
+    - **Auto-cierre:** Envoltura instantánea de texto al usar `[`, `(`, `"`.
+    - **Listas Inteligentes:** Continuación automática de viñetas al presionar Enter.
     """
     
     var body: some View {
@@ -1082,17 +1108,23 @@ struct EditorAreaView: View {
                             .font(.caption)
                     }
                     .buttonStyle(.bordered)
-                    .help("Ayuda de Sintaxis")
+                    .help("Ayuda de Sintaxis y Atajos")
                     .popover(isPresented: $showSyntaxHelp) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Sintaxis Soportada")
-                                .font(.headline)
-                                .padding([.top, .horizontal])
+                        VStack(spacing: 0) {
+                            Picker("", selection: $selectedHelpTab) {
+                                Text("Sintaxis").tag(0)
+                                Text("Atajos").tag(1)
+                            }
+                            .pickerStyle(.segmented)
+                            .padding()
+                            
                             Divider()
+                            
                             ScrollView {
-                                Text(syntaxHelp)
+                                Text(selectedHelpTab == 0 ? syntaxHelp : editorShortcutsHelp)
                                     .font(.system(.body, design: .monospaced))
                                     .padding()
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                         .frame(width: 350, height: 450)
@@ -1154,6 +1186,9 @@ struct EditorAreaView: View {
                     triggerSearch: $triggerSearch,
                     onNavigate: { url in
                         handleNavigation(url)
+                    },
+                    onCheckboxToggled: { index in
+                        viewModel.toggleMarkdownCheckbox(index: index, tabId: tab.id)
                     }
                 )
                 .id("\(tab.id)-\(tab.renderMode.rawValue)-\(selectedTheme.rawValue)-\(isHeatmapActive)")
@@ -1200,6 +1235,7 @@ struct EditorAreaView: View {
                             RoundedRectangle(cornerRadius: 15)
                                 .stroke(Color.orange.opacity(0.2), lineWidth: 1)
                         )
+                        .padding(15)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.vertical, 8)
                         .background(viewModel.noteBackgroundColor)
@@ -1402,6 +1438,16 @@ struct EditorAreaView: View {
                     throwOnError: false
                 });
             }
+            
+            // Habilitar checkboxes e inyectar mensaje Swift
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach((cb, index) => {
+                cb.removeAttribute('disabled');
+                cb.style.cursor = 'pointer';
+                cb.addEventListener('change', () => {
+                    window.webkit.messageHandlers.toggleCheckbox.postMessage({ index: index });
+                });
+            });
             
             // FASE 5: Inject Semantic Heatmap overlay
             \##(entitiesScript)
@@ -2064,7 +2110,7 @@ struct FocoMemoriaView: View {
         .onDisappear {
             stopTimer()
         }
-        .onChange(of: wpm) { _ in
+        .onChange(of: wpm) {
             if isPlaying {
                 startTimer()
             }

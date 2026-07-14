@@ -13,6 +13,8 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod mcp_server;
+
 uniffi::setup_scaffolding!();
 
 #[derive(uniffi::Record)]
@@ -2656,4 +2658,10 @@ mod tests {
             println!("Rows found: {}", count);
         }
     }
+}
+
+#[uniffi::export]
+pub fn run_mcp_server(workspace_root: String, token_id: Option<String>) {
+    let max_payload_bytes = 5 * 1024 * 1024;
+    let _ = mcp_server::run_mcp_server(std::path::PathBuf::from(workspace_root), max_payload_bytes, token_id);
 }

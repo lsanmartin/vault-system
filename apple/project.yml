@@ -6,6 +6,22 @@ targets:
     type: application
     platform: macOS
     deploymentTarget: "15.0"
+    info:
+      properties:
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: "Markdown Document"
+            CFBundleTypeRole: "Editor"
+            LSHandlerRank: "Alternate"
+            LSItemContentTypes:
+              - "net.daringfireball.markdown"
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: "net.daringfireball.markdown"
+            UTTypeConformsTo:
+              - "public.plain-text"
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - "md"
+                - "markdown"
     sources:
       - path: Shared
       - path: ../core/bindings/vault_core.swift

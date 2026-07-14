@@ -4,6 +4,8 @@ import SwiftUI
 class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     var lastLoadedHTML: String? = nil
     var onNavigate: ((URL) -> Void)? = nil
+    var onCheckboxToggled: ((Int) -> Void)? = nil
+    var isCheckboxToggleUpdate: Bool = false
     
     var lastFindNext: Bool = false
     var lastFindPrev: Bool = false
@@ -12,6 +14,12 @@ class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "consoleLog", let logStr = message.body as? String {
             Telemetry.shared.log("WebView", eventType: "JSConsole", message: logStr)
+        }
+        if message.name == "toggleCheckbox",
+           let body = message.body as? [String: Any],
+           let index = body["index"] as? Int {
+            isCheckboxToggleUpdate = true
+            onCheckboxToggled?(index)
         }
     }
     
@@ -30,6 +38,7 @@ struct WebView: View {
     let baseURL: URL?
     @Binding var triggerSearch: Bool
     var onNavigate: ((URL) -> Void)? = nil
+    var onCheckboxToggled: ((Int) -> Void)? = nil
     
     @State private var showSearchPanel: Bool = false
     @State private var searchQuery: String = ""
@@ -46,7 +55,8 @@ struct WebView: View {
                 findNextTrigger: $findNextTrigger,
                 findPrevTrigger: $findPrevTrigger,
                 clearSearchTrigger: $clearSearchTrigger,
-                onNavigate: onNavigate
+                onNavigate: onNavigate,
+                onCheckboxToggled: onCheckboxToggled
             )
             .onChange(of: triggerSearch) { _, newValue in
                 if newValue {
@@ -108,6 +118,7 @@ struct WebViewRepresentable: NSViewRepresentable {
     @Binding var findPrevTrigger: Bool
     @Binding var clearSearchTrigger: Bool
     var onNavigate: ((URL) -> Void)? = nil
+    var onCheckboxToggled: ((Int) -> Void)? = nil
     
     func makeCoordinator() -> WebViewModel { WebViewModel() }
     
@@ -121,6 +132,7 @@ struct WebViewRepresentable: NSViewRepresentable {
         """
         userContentController.addUserScript(WKUserScript(source: consoleScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         userContentController.add(context.coordinator, name: "consoleLog")
+        userContentController.add(context.coordinator, name: "toggleCheckbox")
         config.userContentController = userContentController
         
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -133,7 +145,11 @@ struct WebViewRepresentable: NSViewRepresentable {
     
     func updateNSView(_ nsView: WKWebView, context: Context) {
         context.coordinator.onNavigate = onNavigate
-        if context.coordinator.lastLoadedHTML != htmlContent {
+        context.coordinator.onCheckboxToggled = onCheckboxToggled
+        if context.coordinator.isCheckboxToggleUpdate {
+            context.coordinator.isCheckboxToggleUpdate = false
+            context.coordinator.lastLoadedHTML = htmlContent
+        } else if context.coordinator.lastLoadedHTML != htmlContent {
             context.coordinator.lastLoadedHTML = htmlContent
             nsView.loadHTMLString(htmlContent, baseURL: baseURL)
         }

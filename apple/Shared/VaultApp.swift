@@ -16,6 +16,30 @@ func syncTokensToUserDefaults() {
 struct VaultApp: App {
     @StateObject private var workspaceManager = WorkspaceManager()
 
+    init() {
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("--mcp") {
+            var token: String? = nil
+            var workspace: String? = nil
+            
+            for arg in args {
+                if arg.hasPrefix("--token=") {
+                    token = String(arg.dropFirst("--token=".count))
+                } else if arg.hasPrefix("--workspace=") {
+                    workspace = String(arg.dropFirst("--workspace=".count))
+                }
+            }
+            
+            if let ws = workspace {
+                runMcpServer(workspaceRoot: ws, tokenId: token)
+            } else {
+                fputs("Error: --workspace argument is required for MCP mode.\\n", stderr)
+            }
+            
+            exit(0)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -35,6 +59,22 @@ struct VaultApp: App {
                     
                     // Inicializar Observabilidad y Telemetría Nativa
                     _ = TelemetryManager.shared
+                }
+                .onOpenURL { url in
+                    if workspaceManager.verifyAndResolveWorkspace(for: url) {
+                        NotificationCenter.default.post(
+                            name: NSNotification.Name("OpenWorkspaceFile"),
+                            object: nil,
+                            userInfo: ["url": url]
+                        )
+                    } else {
+                        let alert = NSAlert()
+                        alert.messageText = "Acceso No Autorizado"
+                        alert.informativeText = "El archivo no pertenece a ningún Workspace (Vault) autorizado. Añade la carpeta padre al Vault primero."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "Entendido")
+                        alert.runModal()
+                    }
                 }
         }
         // Ocultar la barra de título en macOS para un look más moderno

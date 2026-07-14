@@ -833,6 +833,21 @@ class EditorViewModel: ObservableObject {
         Telemetry.shared.log("Editor", eventType: "OpenNote", message: "Abierta: \(note.title)")
     }
     
+    func openNoteFromURL(_ url: URL) {
+        let path = url.path
+        if !tabs.contains(where: { $0.id == path }) {
+            let initialMode: RenderMode = .universal
+            let title = url.lastPathComponent
+            let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            var newTab = TabItem(id: path, title: title, content: content, renderMode: initialMode)
+            let fileModDate = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
+            newTab.lastSavedAt = fileModDate
+            tabs.append(newTab)
+        }
+        activeTabId = path
+        Telemetry.shared.log("Editor", eventType: "OpenNote", message: "Abierta vía externa: \(url.lastPathComponent)")
+    }
+    
     func updateRenderMode(for tabId: String, mode: RenderMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: "render_mode_\(tabId)")
         if let index = tabs.firstIndex(where: { $0.id == tabId }) {
@@ -857,6 +872,52 @@ class EditorViewModel: ObservableObject {
         Telemetry.shared.log("Editor", eventType: "SaveNote", message: "Guardada: \(tab.title)")
         tabs[index].lastSavedAt = Date()
         refreshNotes(locations: locations)
+    }
+    
+    func toggleMarkdownCheckbox(index: Int, tabId: String) {
+        guard let tabIndex = tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        let currentContent = tabs[tabIndex].content
+        
+        var lines = currentContent.components(separatedBy: .newlines)
+        var checkboxCount = 0
+        var modified = false
+        
+        for (lineIdx, var line) in lines.enumerated() {
+            let pattern = "\\[([ xX])\\]"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            
+            let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            let matches = regex.matches(in: line, options: [], range: nsRange)
+            
+            if !matches.isEmpty {
+                for match in matches {
+                    let matchRange = match.range(at: 1)
+                    let currentCount = checkboxCount
+                    checkboxCount += 1
+                    
+                    if currentCount == index {
+                        let adjustedRange = NSRange(location: matchRange.location, length: matchRange.length)
+                        if let swiftRange = Range(adjustedRange, in: line) {
+                            let val = line[swiftRange]
+                            let newVal = (val == " " ? "x" : " ")
+                            line.replaceSubrange(swiftRange, with: newVal)
+                            lines[lineIdx] = line
+                            modified = true
+                            break
+                        }
+                    }
+                }
+            }
+            if modified { break }
+        }
+        
+        if modified {
+            let newContent = lines.joined(separator: "\n")
+            tabs[tabIndex].content = newContent
+            _ = saveNote(path: tabId, content: newContent)
+            tabs[tabIndex].lastSavedAt = Date()
+            Telemetry.shared.log("Editor", eventType: "ToggleCheckbox", message: "Checkbox \(index) alternado en \(tabs[tabIndex].title)")
+        }
     }
 }
 

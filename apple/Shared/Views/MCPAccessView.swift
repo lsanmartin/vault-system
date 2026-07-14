@@ -213,9 +213,28 @@ struct TokenListView: View {
                         
                         Divider().padding(.vertical, 4)
                         
-                        Text("Configuración JSON para el cliente:")
-                            .font(.caption).bold()
-                        TextEditor(text: .constant(getInstructions(token: token.tokenId)))
+                        HStack {
+                            Text("Configuración JSON para el cliente:")
+                                .font(.caption).bold()
+                            Spacer()
+                            Button(action: {
+                                let pasteboard = NSPasteboard.general
+                                pasteboard.clearContents()
+                                pasteboard.setString(getInstructions(token: token), forType: .string)
+                            }) {
+                                Label("Copiar", systemImage: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            
+                            Button(action: { exportConfig(token: token) }) {
+                                Label("Exportar JSON", systemImage: "square.and.arrow.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                        }
+                        
+                        TextEditor(text: .constant(getInstructions(token: token)))
                             .font(.system(.footnote, design: .monospaced))
                             .frame(height: 120)
                             .cornerRadius(6)
@@ -228,20 +247,33 @@ struct TokenListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    private func getInstructions(token: String) -> String {
-        """
+    private func getInstructions(token: McpTokenRecord) -> String {
+        let wsPath = token.workspaces.first ?? "/Users/lsanmartin/obsidian"
+        return """
         {
           "mcpServers": {
             "vault-system": {
-              "command": "/Users/lsanmartin/dev/vault-system/target/release/vault_daemon",
+              "command": "/Applications/VaultSystem.app/Contents/MacOS/VaultSystem",
               "args": [
-                "--client-token",
-                "\(token)"
+                "--mcp",
+                "--token=\(token.tokenId)",
+                "--workspace=\(wsPath)"
               ]
             }
           }
         }
         """
+    }
+    
+    private func exportConfig(token: McpTokenRecord) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "claude_desktop_config.json"
+        panel.prompt = "Guardar Configuración"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            let configString = getInstructions(token: token)
+            try? configString.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 }
 

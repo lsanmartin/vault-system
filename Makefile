@@ -7,6 +7,7 @@ BREW_PATH_X86 = /usr/local/opt/duckdb
 BREW_PATH_ARM = /opt/homebrew/opt/duckdb
 
 export LIBCLANG_PATH = /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
+export SDKROOT = $(shell xcrun --show-sdk-path)
 
 XCFRAMEWORK_DIR = target/apple_core.xcframework
 

@@ -283,4 +283,12 @@ class WorkspaceManager: ObservableObject {
             logger.info("Config backup exportado a: \(backupURL.path)")
         }
     }
+    
+    /// Verifica si un archivo pertenece a alguno de los workspaces autorizados
+    func verifyAndResolveWorkspace(for fileURL: URL) -> Bool {
+        let filePath = fileURL.path
+        return allLocations.contains { location in
+            filePath.hasPrefix(location.path)
+        }
+    }
 }
