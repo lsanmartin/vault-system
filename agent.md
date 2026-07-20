@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-06-27 20:26]
+Última actualización: [2026-07-20 23:00]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,20 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-07-20 ~22:00] Mitigación de Crash y Consumo de Recursos**:
+    - **Diagnóstico multifactorial**: Crashes y saturación de RAM/CPU/GPU durante build e indexación en MacBook M2 Pro. Causas: (1) embeddings MLX/GPU por cada nota en scan, (2) tormenta de eventos de iCloud Drive sin debounce, (3) hidratación masiva sin throttle, (4) cognitive daemon con polling fijo cada 10s, (5) build pipeline secuencial sin control de recursos.
+    - **Lazy Embeddings**: Flag `EMBEDDING_LAZY` (default true). `scan_vault()` ya no llama a MLX/GPU — almacena vector `[0;384]`. Embedding real solo bajo demanda en `query_notes()`. Reduce ~90% de GPU/CPU durante scan.
+    - **generate_embedding_mlx con try_lock**: Si GPU ocupada, fallback a `generate_embedding_fast()` (CPU hash determinístico).
+    - **SCANNING_PATHS + WATCHER_PENDING_EVENTS**: Watcher consulta flag de scan activo. Si hay scan, acumula eventos en cola; scan los procesa al terminar.
+    - **Batch inserts**: Reducido de 500→200. Dedup de rowid post-scan (no al inicio).
+    - **Stub detection**: Archivos .md con contenido <30 chars se omiten (stub de iCloud sin hidratar).
+    - **Watcher debounce 2s**: Coalescing por path + filtra eventos `Modify(Metadata)` de iCloud.
+    - **Cognitive daemon backoff**: 60s sin trabajo, 10s con trabajo. Usa `get_db_connection()` (no lockea `DB_CONN` directo).
+    - **get_db_connection timeout**: `try_lock` + retry 100ms. Watcher retorna `None` si no puede adquirir.
+    - **Makefile**: `make preflight` (RAM<8GB advierte), `make core` (solo Rust), `make app` (solo Swift). `release` depende de `preflight`.
+    - **Cargo jobs=4**: `core/.cargo/config.toml` limita compilación Rust.
+    - **WorkspaceManager**: `hydrateAll()` throttled (20 lote, 0.5s pausa). `scanAfterHydration()` nuevo. `addLocation()` resuelve symlinks.
+    - **Archivos**: `core/src/lib.rs`, `Makefile`, `core/.cargo/config.toml`, `apple/Shared/Storage/WorkspaceManager.swift`
   - **[2026-07-14 10:55] Checkboxes Interactivos Persistentes en Modo Vista**:
     - **Habilitación de Inputs en WebView**: Inyectado script de JavaScript en `generateSafeHTML` (`MainEditorView.swift`) para remover el atributo `disabled` de los checkboxes HTML generados por Marked, y adjuntar un event listener nativo al cambio de estado (`change`) que invoca a `window.webkit.messageHandlers.toggleCheckbox.postMessage({index: index})`.
     - **Registro de Canal Swift**: Registrada la interfaz de script `toggleCheckbox` en `WebView.swift` (`makeNSView`) e implementado el callback `onCheckboxToggled` en el `Coordinator` / `WebViewModel`.
@@ -129,10 +143,30 @@
     - Migración de tokens MCP a `UserDefaults` para evitar pérdida en recompilaciones.
 
 ## Pendientes Próxima Sesión
+- **Build release a /Applications**: `cd ~/dev/vault-system && make release`
 - **Refinamiento de RAG Local**: Integrar la generación de embeddings nativos en Apple Silicon (MLX/Metal) directamente en la tabla `domain_metadata` para RAG local offline.
 - **Validación de Rendimiento**: Comprobar tiempo de respuesta del scanner en vaults de gran escala (>1000 carpetas).
 - **Consistencia UI**: Sincronizar el estado visual del botón del Scratchpad tras la consolidación exitosa.
 - **[AI Engine — Fase 1]**: Crear scaffolding `core/src/ai_engine/` + feature flag `local-ai` en `Cargo.toml`. Ver `docs/2026-07-02-plan-local-ai-engine.md` y `docs/ADR-001-local-inference-engine.md`.
+
+## Análisis Estratégico (2026-07-20)
+### Portabilidad a Intel Mac
+- **Viable con ~30 min de trabajo**: MLX es el único blocker — no existe para x86_64.
+- **Solución**: Hacer `mlx-rs` opcional vía feature flag (`mlx-accel`) en `core/Cargo.toml`. Intel compila con `--no-default-features`, cae a `generate_embedding_fast()`.
+- **Makefile**: Agregar target `build-x86_64` con `--no-default-features`. Xcode cambiar `-arch arm64` → `-arch x86_64`.
+- **DuckDB y UI Swift** corren nativos en Intel sin cambios.
+
+### Portabilidad a iOS/iPadOS/Android
+- **Vault-system (SwiftUI nativo) → NO**: UI usa componentes exclusivos de AppKit (HSplitView, NSRulerView, NSTextView, NSApp). No hay atajo — requiere rewrite completo de UI.
+- **Alternativa real**: vault-app (Tauri + React, en ~/dev/vault-app/) ya compila para iOS/Android con el mismo core Rust. De hecho ya tiene código `#[cfg(target_os = "ios")]` y corre en iPad Simulator.
+- **Opción estratégica**: Extraer `vault-core` como crate independiente compartido entre vault-system (macOS) y vault-app (cross-platform). vault-app ganaría scan, indexación, búsqueda semántica y workspaces sin reescribir nada.
+- **Nota**: vault-app y vault-system son proyectos distintos. vault-app cambiará de nombre próximamente.
+
+### Relación vault-system ↔ vault-app
+- Son proyectos independientes con orígenes y stacks diferentes: vault-system (SwiftUI nativo macOS) vs vault-app (Tauri + React cross-platform).
+- Comparten concepto (gestión de vault/knowledge) pero no código base.
+- El core Rust (DuckDB, embeddings, scan) es conceptualmente similar pero implementado por separado en cada uno.
+- Decisión pendiente: unificar core, mantener separados, o converger bajo un proyecto. Ver `_lore.md` cuando se cree.
 
 ## Decisiones Arquitectónicas
 - **[ADR-001 — 2026-07-02]**: Motor de inferencia local `llama-cpp-2` (MIT) como engine in-process.
