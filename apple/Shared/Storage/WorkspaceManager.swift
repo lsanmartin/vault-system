@@ -107,24 +107,36 @@ class WorkspaceManager: ObservableObject {
     /// Crea y guarda un bookmark para una nueva URL.
     private func addLocation(for url: URL) {
         do {
-            let bookmarkData = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            // Symlink dedup: resolver symlinks antes de comparar
+            let resolvedURL: URL
+            if let canonical = (try? url.resolvingSymlinksInPath()) {
+                resolvedURL = canonical
+            } else {
+                resolvedURL = url
+            }
+
+            // Verificar que no exista ya (por ruta resuelta)
+            let resolvedPath = resolvedURL.path
+            if locations.contains(where: { $0.path == resolvedPath }) {
+                logger.info("Ubicación duplicada omitida (symlink resuelto): \(url.path) → \(resolvedPath)")
+                return
+            }
+
+            let bookmarkData = try resolvedURL.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
             let newLocation = VaultLocation(
                 id: UUID(),
-                name: url.lastPathComponent,
+                name: resolvedURL.lastPathComponent,
                 bookmarkData: bookmarkData,
-                path: url.path
+                path: resolvedPath
             )
-            
+
             DispatchQueue.main.async {
-                // Evitar duplicados por ruta
-                if !self.locations.contains(where: { $0.path == url.path }) {
-                    self.locations.append(newLocation)
-                    self.saveToDisk()
-                    _ = url.startAccessingSecurityScopedResource()
-                    self.isAuthorized = true
-                    self.logger.info("Nueva ubicación añadida e hidratada: \(url.path)")
-                    initGitRepo(workspacePath: url.path)
-                }
+                self.locations.append(newLocation)
+                self.saveToDisk()
+                _ = resolvedURL.startAccessingSecurityScopedResource()
+                self.isAuthorized = true
+                self.logger.info("Nueva ubicación añadida: \(resolvedPath)")
+                initGitRepo(workspacePath: resolvedPath)
             }
         } catch {
             logger.error("Error al crear el bookmark para \(url.path): \(error.localizedDescription)")
@@ -160,33 +172,72 @@ class WorkspaceManager: ObservableObject {
         }
     }
     
-    /// Fuerza la descarga de iCloud para todos los archivos en todas las ubicaciones.
+    /// Fuerza la descarga de iCloud para todos los archivos en lotes throttleados.
+    /// Cada lote de 20 archivos, con 0.5s de pausa entre lotes.
     func hydrateAll() {
-        logger.info("Iniciando hidratación masiva...")
+        logger.info("Iniciando hidratación masiva (throttle: 20 archivos/lote)...")
+
+        let batchSize = 20
+        let batchDelay: useconds_t = 500_000 // 0.5s
+
         for location in locations {
             guard let url = location.url else { continue }
-            
+
             let enumerator = FileManager.default.enumerator(
                 at: url,
                 includingPropertiesForKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
             )
-            
+
+            var pending: [URL] = []
+
             while let fileURL = enumerator?.nextObject() as? URL {
                 do {
                     let values = try fileURL.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
                     if values.isUbiquitousItem ?? false {
                         if values.ubiquitousItemDownloadingStatus != .current {
-                            self.logger.info("Hidratando: \(fileURL.lastPathComponent)")
-                            try FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
+                            pending.append(fileURL)
+                            if pending.count >= batchSize {
+                                flushDownloadBatch(pending)
+                                pending.removeAll()
+                                usleep(batchDelay)
+                            }
                         }
                     }
                 } catch {
                     logger.error("Error al hidratar \(fileURL.path): \(error.localizedDescription)")
                 }
             }
+
+            // Último lote parcial
+            if !pending.isEmpty {
+                flushDownloadBatch(pending)
+            }
         }
         logger.info("Hidratación completada.")
+    }
+
+    private func flushDownloadBatch(_ batch: [URL]) {
+        for fileURL in batch {
+            do {
+                logger.debug("Hidratando: \(fileURL.lastPathComponent)")
+                try FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
+            } catch {
+                logger.error("Error hidratando \(fileURL.path): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Escanea después de hidratar, esperando que iCloud complete descargas.
+    /// Reduce la probabilidad de indexar stubs vacíos.
+    func scanAfterHydration(for path: String) {
+        logger.info("Iniciando hidratación + scan postergado para: \(path)")
+        hydrateAll()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.logger.info("Hidratación completada, iniciando scan: \(path)")
+            self?.triggerScan(for: path)
+        }
     }
     
     func triggerScan(for path: String) {

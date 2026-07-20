@@ -2,6 +2,19 @@
 TARGET_X86 = x86_64-apple-darwin
 TARGET_ARM = aarch64-apple-darwin
 
+# --- Preflight (evita saturación en máquinas con <8GB RAM) ---
+.PHONY: preflight
+preflight:
+	@MEM_GB=$$(sysctl hw.memsize | awk '{print $$2/1024/1024/1024}'); \
+	FREE_PCT=$$(memory_pressure 2>/dev/null | awk '/System-wide memory free percentage:/ {print $$$$NF}' | tr -d '%'); \
+	if [ "$$MEM_GB" -lt 8 ]; then \
+		echo "⚠️  Mac con $$MEM_GB GB RAM — build puede saturar el sistema"; \
+		echo "   Usa 'make core' y 'make app' por separado para evitar pressure"; \
+	fi; \
+	if [ -n "$$FREE_PCT" ] && [ "$$FREE_PCT" -lt 20 ]; then \
+		echo "⚠️  Memoria libre <20% — libera memoria antes de compilar"; \
+	fi
+
 # --- Rutas de Homebrew ---
 BREW_PATH_X86 = /usr/local/opt/duckdb
 BREW_PATH_ARM = /opt/homebrew/opt/duckdb
@@ -90,8 +103,26 @@ deploy: xcode-build
 	@echo "✅ $(APP_NAME) v0.1.0 instalado en /Applications/"
 	@echo "   Ejecutar con: open /Applications/$(APP_NAME).app"
 
-release: build-universal xcode-build deploy
+# --- Targets parciales para builds en máquinas con recursos limitados ---
+
+.PHONY: core
+core: build-universal
+	@echo "=== Core Listo ==="
+	@echo "  ✅ Rust Core compilado + XCFramework empaquetado"
+	@echo "  Luego ejecuta: make app"
+
+.PHONY: app
+app: xcode-build
+	@echo "=== App Lista ==="
+	@echo "  ✅ App archivada en $(ARCHIVE_PATH)"
+	@echo "  Luego ejecuta: make install"
+
+.PHONY: install
+install: deploy
+
+release: preflight build-universal xcode-build deploy
 	@echo "=== Release Pipeline Completo ==="
+	@echo "  ✅ Preflight pasado"
 	@echo "  ✅ Rust Core compilado"
 	@echo "  ✅ XCFramework empaquetado"
 	@echo "  ✅ App archivada y desplegada"

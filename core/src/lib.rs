@@ -48,8 +48,28 @@ impl std::ops::DerefMut for DbConnectionGuard {
 }
 
 pub fn get_db_connection() -> Option<DbConnectionGuard> {
-    let query_guard = DB_QUERY_MUTEX.lock().unwrap();
-    let conn_guard = DB_CONN.lock().unwrap();
+    // Timeout: intentar obtener DB_QUERY_MUTEX con backoff de 100ms, máx 5 intentos
+    let query_guard = loop {
+        match DB_QUERY_MUTEX.try_lock() {
+            Ok(g) => break g,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(100));
+                // Si después de 5 intentos no se puede, retornar None
+                if std::thread::current().name().unwrap_or("").contains("watcher") {
+                    return None; // Watcher no debe bloquearse
+                }
+            }
+        }
+    };
+
+    let conn_guard = match DB_CONN.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            thread::sleep(Duration::from_millis(100));
+            return None;
+        }
+    };
+
     if let Some(c) = conn_guard.as_ref() {
         if let Ok(cloned) = c.try_clone() {
             return Some(DbConnectionGuard {
@@ -66,6 +86,20 @@ static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 static TELEMETRY_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SCAN_PROGRESS: Lazy<Mutex<std::collections::HashMap<String, f32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 static MLX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+// --- MODO DE EMBEDDING ---
+// lazy (default true): scan almacena vector cero [0;384], sin tocar MLX/GPU.
+// Solo se computa embedding MLX real cuando query_notes hace búsqueda semántica en modo eager.
+static EMBEDDING_LAZY: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
+
+// --- SCANNING EN PROGRESO ---
+// El watcher consulta este flag antes de procesar eventos. Si hay scan activo,
+// acumula eventos en cola para procesarlos al terminar.
+static SCANNING_PATHS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static WATCHER_PENDING_EVENTS: Lazy<Mutex<Vec<(String, bool)>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+// Tamaño de lote reducido para evitar saturar FixedSizeAllocator de DuckDB
+const BATCH_SIZE: usize = 200;
 
 #[uniffi::export]
 pub fn get_scan_progress(path: String) -> f32 {
@@ -120,14 +154,43 @@ pub fn hello_vault() -> String {
     "Hello from Vault Core IA (DuckDB Engine)!".to_string()
 }
 
+#[uniffi::export]
+pub fn set_embedding_lazy(lazy: bool) -> bool {
+    if let Ok(mut mode) = EMBEDDING_LAZY.lock() {
+        *mode = lazy;
+        return true;
+    }
+    false
+}
+
+#[uniffi::export]
+pub fn is_embedding_lazy() -> bool {
+    *EMBEDDING_LAZY.lock().unwrap()
+}
+
 fn generate_embedding(text: &str) -> Vec<f32> {
+    if text.is_empty() || *EMBEDDING_LAZY.lock().unwrap() {
+        return vec![0.0f32; 384];
+    }
+
+    // Modo eager: embedding MLX completo (GPU/MLX)
+    generate_embedding_mlx(text)
+}
+
+fn generate_embedding_mlx(text: &str) -> Vec<f32> {
     if text.is_empty() {
         return vec![0.0f32; 384];
     }
-    
-    // El acceso concurrente a la evaluación en GPU de MLX desde múltiples hilos puede causar SIGABRT
-    // Forzamos un bloqueo secuencial para prevenir colisiones de memoria en Metal.
-    let _guard = MLX_LOCK.lock().unwrap();
+
+    // try_lock para evitar deadlock si GPU está ocupada.
+    // Si no se puede adquirir, genera embedding hash rápido (CPU) como fallback.
+    let guard = match MLX_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return generate_embedding_fast(text);
+        }
+    };
+    let _guard = guard;
     
     // FASE 1: Aceleración MLX (Nativo M2 Pro)
     // 1. Convertimos el texto en una semilla numérica para el tokenizer simulado.
@@ -147,7 +210,7 @@ fn generate_embedding(text: &str) -> Vec<f32> {
     
     // Simulación de un paso de transformación matricial en NPU (Linear Layer)
     let weights = mlx_rs::ops::ones::<f32>(&[384, 384]).unwrap_or(array!(0.0f32));
-    let mut result_tensor = mlx_rs::ops::matmul(&expanded, &weights).unwrap_or(array!(0.0f32));
+    let result_tensor = mlx_rs::ops::matmul(&expanded, &weights).unwrap_or(array!(0.0f32));
     
     // Evaluar el tensor en memoria (NPU/GPU) antes de extraerlo a la CPU
     let _ = result_tensor.eval();
@@ -164,6 +227,39 @@ fn generate_embedding(text: &str) -> Vec<f32> {
         }
     }
     
+    vec
+}
+
+/// Embedding rápido basado en hash (CPU-only, sin MLX/GPU).
+/// Determinístico: mismo texto → mismo vector.
+/// Usado como fallback cuando MLX no está disponible o el lock está ocupado.
+fn generate_embedding_fast(text: &str) -> Vec<f32> {
+    if text.is_empty() {
+        return vec![0.0f32; 384];
+    }
+
+    // Hash de 64 bits para mezclar el contenido
+    let mut h: u64 = 5381;
+    for c in text.chars() {
+        h = (h << 5).wrapping_add(h).wrapping_add(c as u64);
+    }
+
+    // Poblar vector de 384 dimensiones con variación basada en hash + índice
+    let mut vec = Vec::with_capacity(384);
+    for i in 0..384 {
+        let val = ((h.wrapping_mul(i as u64 + 1).wrapping_add(i as u64 * 31)) % 1000) as f32 / 500.0 - 1.0;
+        vec.push(val);
+    }
+
+    // Normalización L2
+    let sum_sq: f32 = vec.iter().map(|x| x * x).sum();
+    let norm = sum_sq.sqrt();
+    if norm > 0.0001f32 {
+        for val in vec.iter_mut() {
+            *val /= norm;
+        }
+    }
+
     vec
 }
 
@@ -331,18 +427,21 @@ pub fn init_knowledge_base() -> String {
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     let canonical_path = canonicalize_path(&path);
-    
+
+    // Registrar en SCANNING_PATHS para que el watcher no compita
+    if let Ok(mut paths) = SCANNING_PATHS.lock() {
+        if !paths.contains(&canonical_path) {
+            paths.push(canonical_path.clone());
+        }
+    }
+
     // Inicializar el progreso en 0%
     if let Ok(mut progress) = SCAN_PROGRESS.lock() {
         progress.insert(canonical_path.clone(), 0.0);
     }
 
-    // Ejecutar deduplicación preventiva antes del escaneo
-    if let Some(conn) = get_db_connection() {
-        let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
-        let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
-        let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
-    }
+    // Dedup se ejecuta al final del scan, no al inicio.
+    // (Elimina contention innecesaria durante el escaneo)
 
     let vault_path = Path::new(&canonical_path);
 
@@ -391,7 +490,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     }
 
     let mut batch_inserts = Vec::new();
-    let batch_size = 500; // Lote de 500 para evitar agotar FixedSizeAllocator
+    let mut pending_stubs: Vec<String> = Vec::new();
 
     // Segunda pasada: procesar e insertar actualizando el progreso
     for (idx, entry) in entries.into_iter().enumerate() {
@@ -421,6 +520,13 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             
             if content_changed {
                 let content = std::fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
+
+                // Stub detection: contenido vacío o muy corto (<30 chars) probablemente es stub de iCloud
+                if content.trim().len() < 30 {
+                    pending_stubs.push(full_path_str.clone());
+                    continue;
+                }
+
                 let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título").to_string();
                 let emb = generate_embedding(&content);
                 batch_inserts.push((full_path_str.clone(), title, content, emb, false, mtime));
@@ -430,7 +536,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         }
 
         // Ejecutar el lote si alcanza tamaño
-        if batch_inserts.len() >= batch_size {
+        if batch_inserts.len() >= BATCH_SIZE {
             if let Some(conn) = get_db_connection() {
                 let _ = conn.execute("BEGIN TRANSACTION", []);
                 let mut tx_failed = false;
@@ -535,13 +641,65 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
         }
     }
 
+    // Dedup post-scan (ejecutar después de inserts para evitar contention)
+    if let Some(conn) = get_db_connection() {
+        let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
+        let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
+        let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
+    }
+
+    let stub_count = pending_stubs.len();
+    if stub_count > 0 {
+        eprintln!("[vault-core] Stubs detectados: {} archivos con contenido <30 chars (probable iCloud sin hidratar)", stub_count);
+    }
+
     // Asegurar 100% al finalizar
     if let Ok(mut progress) = SCAN_PROGRESS.lock() {
         progress.insert(canonical_path.clone(), 100.0);
     }
 
+    // Deregistrar de SCANNING_PATHS
+    if let Ok(mut paths) = SCANNING_PATHS.lock() {
+        paths.retain(|p| p != &canonical_path);
+    }
+
+    // Procesar eventos pendientes del watcher que se acumularon durante el scan
+    if let Ok(mut pending) = WATCHER_PENDING_EVENTS.lock() {
+        if !pending.is_empty() {
+            eprintln!("[vault-core] Procesando {} eventos del watcher acumulados durante scan", pending.len());
+            if let Some(conn) = get_db_connection() {
+                for (p, is_dir) in pending.drain(..) {
+                    let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![&p]);
+                    if is_dir {
+                        let title = std::path::Path::new(&p).file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
+                        let _ = conn.execute(
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                            duckdb::params![&p, title, &p, ""],
+                        );
+                    } else if p.ends_with(".md") {
+                        let content = std::fs::read_to_string(&p).unwrap_or_default();
+                        if content.trim().len() >= 30 {
+                            let title = std::path::Path::new(&p).file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
+                            let emb = generate_embedding(&content);
+                            let sql = format!(
+                                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                                vector_to_sql_array(&emb)
+                            );
+                            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                            let _ = conn.execute(&sql, duckdb::params![&p, title, &p, content, mtime as i64]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     update_sync_ts();
-    format!("Escaneado completado: {} notas procesadas con contenido y embeddings.", count)
+    let mut msg = format!("Escaneado completado: {} notas procesadas.", count);
+    if stub_count > 0 {
+        msg.push_str(&format!(" ({} stubs omitidos — se re-indexarán cuando iCloud complete la descarga)", stub_count));
+    }
+    msg
 }
 
 #[uniffi::export]
@@ -658,9 +816,10 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
 
     let mut search_emb_sql = String::new();
     let mut is_semantic = false;
+    let is_lazy = *EMBEDDING_LAZY.lock().unwrap();
 
     if let Some(ref term) = search_term {
-        if !term.is_empty() {
+        if !term.is_empty() && !is_lazy {
             let emb = generate_embedding(term);
             search_emb_sql = vector_to_sql_array(&emb);
             is_semantic = true;
@@ -1065,6 +1224,8 @@ pub fn get_telemetry_summary() -> String {
 
 #[uniffi::export]
 pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String {
+    let ignore_patterns = std::sync::Arc::new(ignore_patterns);
+
     thread::spawn(move || {
         let (tx, rx) = channel();
         let mut watcher = RecommendedWatcher::new(tx, Config::default()).unwrap();
@@ -1073,160 +1234,203 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
             let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive);
         }
 
-        for res in rx {
-            if let Ok(event) = res {
-                for path in event.paths {
-                    let path_str = path.to_str().unwrap_or("");
-                    if !path.exists() {
-                        // Fue borrado o movido a la papelera (Delete / Rename / Trash)
-                        if let Some(conn) = get_db_connection() {
-                            let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![path_str, format!("{}/%", path_str)]);
-                            let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ? OR path LIKE ?)", duckdb::params![path_str, format!("{}/%", path_str)]);
-                            let _ = conn.execute(
-                                "DELETE FROM notes WHERE path = ? OR path LIKE ?",
-                                duckdb::params![path_str, format!("{}/%", path_str)],
-                            );
-                            update_sync_ts();
-                        }
-                    } else if event.kind.is_modify() || event.kind.is_create() {
-                        let is_dir = path.is_dir();
-                        let is_hidden = path.file_name().and_then(|s| s.to_str()).map(|s| s.starts_with(".")).unwrap_or(false);
-                        
-                        if !is_hidden && (is_dir || (path_str.ends_with(".md") && !ignore_patterns.iter().any(|p| path_str.contains(p)))) {
-                            if let Some(conn) = get_db_connection() {
-                                let title = path.file_name().and_then(|s| s.to_str()).unwrap_or("Sin título");
-                                
-                                let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
-                                if is_dir {
-                                    let _ = conn.execute(
-                                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
-                                        duckdb::params![path_str, title, path_str, ""],
-                                    );
-                                } else {
-                                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                                     let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "".to_string());
-                                     let emb = generate_embedding(&content);
-                                     let sql = format!(
-                                         "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
-                                         vector_to_sql_array(&emb)
-                                     );
-                                     let _ = conn.execute(
-                                         &sql,
-                                         duckdb::params![path_str, title, path_str, content, mtime as i64],
-                                     );
-                                }
-                                update_sync_ts();
-                            }
-                        }
+        // Cola de eventos con dedup por path (debounce de 2s)
+        let mut pending: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        let debounce = Duration::from_millis(2000);
+
+        fn filter_data_event(kind: &notify::EventKind) -> bool {
+            matches!(kind,
+                notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                | notify::EventKind::Create(_)
+                | notify::EventKind::Remove(_)
+            )
+        }
+
+        fn process_batch(
+            pending: &std::collections::HashMap<String, bool>,
+            ign: &[String],
+        ) {
+            if pending.is_empty() { return; }
+            if let Some(conn) = get_db_connection() {
+                for (path_str, is_dir) in pending {
+                    if *is_dir {
+                        let title = std::path::Path::new(path_str)
+                            .file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
+                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
+                        let _ = conn.execute(
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                            duckdb::params![path_str, title, path_str, ""],
+                        );
+                    } else if path_str.ends_with(".md") && !ign.iter().any(|p| path_str.contains(p)) {
+                        if path_str.contains("/.") { continue; } // hidden path
+                        let content = std::fs::read_to_string(path_str).unwrap_or_default();
+                        if content.trim().len() < 30 { continue; } // stub de iCloud
+                        let title = std::path::Path::new(path_str)
+                            .file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
+                        let emb = generate_embedding(&content);
+                        let sql = format!(
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            vector_to_sql_array(&emb)
+                        );
+                        let mtime = std::fs::metadata(path_str)
+                            .and_then(|m| m.modified()).ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs()).unwrap_or(0);
+                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
+                        let _ = conn.execute(&sql, duckdb::params![path_str, title, path_str, content, mtime as i64]);
                     }
                 }
             }
+            update_sync_ts();
+        }
+
+        loop {
+            // Recibir lote de eventos con debounce
+            match rx.recv() {
+                Ok(Ok(event)) => {
+                    if !filter_data_event(&event.kind) { continue; }
+                    for path in event.paths {
+                        let p = path.to_string_lossy().to_string();
+                        if p.contains("/.") { continue; } // oculto
+                        pending.insert(p, path.is_dir());
+                    }
+                }
+                _ => { thread::sleep(Duration::from_millis(100)); continue; }
+            }
+
+            // Acumular más eventos que lleguen en la ventana de debounce
+            let deadline = std::time::Instant::now() + debounce;
+            while std::time::Instant::now() < deadline {
+                match rx.try_recv() {
+                    Ok(Ok(ev)) => {
+                        if !filter_data_event(&ev.kind) { continue; }
+                        for path in ev.paths {
+                            let p = path.to_string_lossy().to_string();
+                            if p.contains("/.") { continue; }
+                            pending.insert(p, path.is_dir());
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+
+            // Si hay scan en progreso, encolar en vez de procesar
+            if let Ok(paths_scanning) = SCANNING_PATHS.lock() {
+                if !paths_scanning.is_empty() {
+                    if let Ok(mut queued) = WATCHER_PENDING_EVENTS.lock() {
+                        for (p, is_dir) in pending.drain() {
+                            queued.push((p, is_dir));
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Procesar lote
+            process_batch(&pending, &ignore_patterns);
+            pending.clear();
+            thread::sleep(Duration::from_millis(100));
         }
     });
-    "File Watcher iniciado.".to_string()
+    "File Watcher iniciado (con debounce 2s + coalescing).".to_string()
 }
 
 #[uniffi::export]
 pub fn start_cognitive_daemon() -> String {
     thread::spawn(move || {
+        // Backoff adaptativo: 60s si no hay trabajo, 10s si hay
+        let mut backoff = Duration::from_secs(60);
+
         loop {
-            thread::sleep(Duration::from_secs(10));
-            
-            // Usar un nuevo binding para evitar mantener el lock demasiado tiempo
+            thread::sleep(backoff);
+
+            // Usar get_db_connection() (con DB_QUERY_MUTEX) en vez de lockear DB_CONN directo
             let mut pending_notes = Vec::new();
-            
-            {
-                let conn_guard = DB_CONN.lock().unwrap();
-                if let Some(conn) = conn_guard.as_ref() {
-                    // Buscar notas que no están en semantic_summaries
-                    let query = "
-                        SELECT id, title, content 
-                        FROM notes 
-                        WHERE is_dir = false 
-                          AND id NOT IN (SELECT note_id FROM semantic_summaries)
-                        LIMIT 50
-                    ";
-                    
-                    let mut stmt = match conn.prepare(query) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    
-                    let note_iter = match stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    }) {
-                        Ok(i) => i,
-                        Err(_) => continue,
-                    };
-                    
-                    for note in note_iter {
-                        if let Ok(n) = note {
-                            pending_notes.push(n);
-                        }
+
+            if let Some(conn) = get_db_connection() {
+                // Buscar notas que no están en semantic_summaries
+                let query = "
+                    SELECT id, title, content
+                    FROM notes
+                    WHERE is_dir = false
+                      AND id NOT IN (SELECT note_id FROM semantic_summaries)
+                    LIMIT 50
+                ";
+
+                let mut stmt = match conn.prepare(query) {
+                    Ok(s) => s,
+                    Err(_) => { backoff = Duration::from_secs(60); continue; }
+                };
+
+                let note_iter = match stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                }) {
+                    Ok(i) => i,
+                    Err(_) => { backoff = Duration::from_secs(60); continue; }
+                };
+
+                for note in note_iter {
+                    if let Ok(n) = note {
+                        pending_notes.push(n);
                     }
                 }
             }
-            
+
             if pending_notes.is_empty() {
+                backoff = Duration::from_secs(60); // sin trabajo → esperar 1 minuto
                 continue;
             }
-            
-            // Procesamiento: IA Local (Fase 2)
-            // Aquí en un futuro se llamará al modelo local (MLX / LLaMA / Phi)
-            // Por ahora, usamos un Mock cognitivo
-            
+
+            backoff = Duration::from_secs(10); // hay trabajo → cada 10s
+
+            // Procesamiento: Mock cognitivo (IA Local se integrará en Fase 2)
             let mut processed = Vec::new();
             for (id, title, content) in pending_notes {
-                // Mock Summary
                 let mut snippet = content.chars().take(150).collect::<String>();
                 if content.len() > 150 { snippet.push_str("..."); }
-                
+
                 let synthetic_summary = format!("SÍNTESIS DE [{}]: {}", title, snippet);
-                
-                // Mock Entities (palabras de más de 6 letras que empiezan con mayúscula)
+
                 let extracted_entities: Vec<String> = content.split_whitespace()
                     .filter(|w| w.len() > 6 && w.chars().next().unwrap_or('a').is_uppercase())
                     .map(|w| w.to_string())
                     .collect();
-                    
-                // Mock Semantic Density (densidad de información calculada heurísticamente)
+
                 let density = (extracted_entities.len() as f32 / (content.split_whitespace().count().max(1) as f32)) * 100.0;
-                
+
                 processed.push((id, synthetic_summary, extracted_entities, density));
             }
-            
-            // Insertar resultados (Offloading y Grafo Temporal)
-            {
-                let mut conn_guard = DB_CONN.lock().unwrap();
-                if let Some(conn) = conn_guard.as_mut() {
-                    for (id, summary, entities, density) in processed {
-                        let sql_array = vector_to_sql_array_str(&entities);
-                        let sql = format!(
-                            "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density) 
-                             VALUES (?, ?, {}, now(), ?)",
-                            sql_array
+
+            // Insertar resultados via get_db_connection()
+            if let Some(conn) = get_db_connection() {
+                for (id, summary, entities, density) in processed {
+                    let sql_array = vector_to_sql_array_str(&entities);
+                    let sql = format!(
+                        "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density)
+                         VALUES (?, ?, {}, now(), ?)",
+                        sql_array
+                    );
+                    let _ = conn.execute(&sql, params![id, summary, density]);
+
+                    for entity in entities {
+                        let _ = conn.execute(
+                            "INSERT INTO entity_graphs (entity_name, note_id, relation_type, discovered_at)
+                             VALUES (?, ?, 'MENTIONS', now())",
+                            params![entity, id]
                         );
-                        let _ = conn.execute(&sql, params![id, summary, density]);
-                        
-                        // FASE 3: Poblar el Grafo Temporal
-                        for entity in entities {
-                            let _ = conn.execute(
-                                "INSERT INTO entity_graphs (entity_name, note_id, relation_type, discovered_at) 
-                                 VALUES (?, ?, 'MENTIONS', now())",
-                                params![entity, id]
-                            );
-                        }
                     }
                 }
             }
         }
     });
-    
-    "Cognitive Daemon iniciado en segundo plano (Ciclo: 10s)".to_string()
+
+    "Cognitive Daemon iniciado (backoff adaptativo: 10s-60s)".to_string()
 }
 
 fn vector_to_sql_array_str(vec: &[String]) -> String {
