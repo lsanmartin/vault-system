@@ -358,9 +358,9 @@ class EditorViewModel: ObservableObject {
             case .all:
                 rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
             case .recentCreated:
-                rawItems = queryRecentCreated(pathFilter: rootWorkspacePath, limit: 50)
+                rawItems = queryRecentCreated(pathFilter: rootWorkspacePath, limit: 30)
             case .recentModified:
-                rawItems = queryRecentModified(pathFilter: rootWorkspacePath, limit: 50)
+                rawItems = queryRecentModified(pathFilter: rootWorkspacePath, limit: 30)
             case .pinned:
                 let allRaw = queryNotes(searchTerm: "", pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
                 rawItems = allRaw.filter { self.pinnedPaths.contains($0.path) }
@@ -823,8 +823,16 @@ class EditorViewModel: ObservableObject {
         if !tabs.contains(where: { $0.id == note.id }) {
             // Modo Universal por defecto para todas las nuevas pestañas
             let initialMode: RenderMode = .universal
-            
-            var newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: initialMode)
+
+            // Cargar content desde disco si viene vacío (optimización listados)
+            let noteContent: String
+            if note.content.isEmpty {
+                noteContent = (try? String(contentsOf: URL(fileURLWithPath: note.id), encoding: .utf8)) ?? ""
+            } else {
+                noteContent = note.content
+            }
+
+            var newTab = TabItem(id: note.id, title: note.title, content: noteContent, renderMode: initialMode)
             let fileModDate = (try? FileManager.default.attributesOfItem(atPath: note.id)[.modificationDate] as? Date)
             newTab.lastSavedAt = fileModDate
             tabs.append(newTab)

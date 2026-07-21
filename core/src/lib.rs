@@ -843,7 +843,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
             search_emb_sql
         )
     } else {
-        "SELECT n.id, n.title, n.path, n.content, n.is_dir FROM notes n WHERE 1=1".to_string()
+        "SELECT n.id, n.title, n.path, '' as content, n.is_dir FROM notes n WHERE 1=1".to_string()
     };
     
     // Filtro por Workspace (Path)
@@ -909,7 +909,7 @@ pub fn query_recent_created(path_filter: Option<String>, limit: i32) -> Vec<Note
         Some(c) => c,
         None => return Vec::new(),
     };
-    let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
+    let mut sql = "SELECT id, title, path, '' as content, is_dir FROM notes WHERE is_dir = false".to_string();
     if let Some(ref path) = path_filter {
         if !path.is_empty() {
             let canonical_path = canonicalize_path(path);
@@ -943,7 +943,7 @@ pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<Not
         Some(c) => c,
         None => return Vec::new(),
     };
-    let mut sql = "SELECT id, title, path, content, is_dir FROM notes WHERE is_dir = false".to_string();
+    let mut sql = "SELECT id, title, path, '' as content, is_dir FROM notes WHERE is_dir = false".to_string();
     if let Some(ref path) = path_filter {
         if !path.is_empty() {
             let canonical_path = canonicalize_path(path);
