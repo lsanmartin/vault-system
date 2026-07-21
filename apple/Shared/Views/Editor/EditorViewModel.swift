@@ -660,17 +660,26 @@ class EditorViewModel: ObservableObject {
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(fileName).path
 
         if createItem(path: fullPath, isDir: false) {
-            // Insertar inmediatamente en DuckDB (con retry + timeout, ~2s máximo)
-            _ = upsertNoteItem(path: fullPath, title: fileName, content: "", isDir: false)
-            print("DEBUG createNewNote: path = \(fullPath)")
+            // Insertar en DuckDB inmediatamente (retry + timeout, ~2s máx)
+            let dbOk = upsertNoteItem(path: fullPath, title: fileName, content: "", isDir: false)
+            print("DEBUG createNewNote: path = \(fullPath), upsertOk = \(dbOk)")
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
 
-            // syncAll: refreshNotes background leerá desde DuckDB que ya tiene la nota
-            // porque upsertNoteItem la insertó. Elimina race conditions con arrays manuales.
+            // syncAll: refreshNotes background lee desde DuckDB (debe tener la nota si upsertOk)
             syncAll(locations: locations)
 
-            // Abrir pestaña inmediatamente (content se carga desde disco en openNote)
+            // PATCH MANUAL INMEDIATO: garantiza que la nota sea visible aunque upsert haya fallado
+            // syncAll luego sobrescribe arrays con datos reales de DB.
             let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
+            self.allNotes.append(tempNote)
+            self.childrenByParent[targetPath, default: []].append(tempNote)
+
+            if self.currentPath != targetPath {
+                self.currentPath = targetPath
+            } else {
+                self.updateGridForCurrentPath()
+            }
+
             openNote(tempNote)
             selectItem(tempNote)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -700,15 +709,23 @@ class EditorViewModel: ObservableObject {
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(folderName).path
         
         if createItem(path: fullPath, isDir: true) {
-            // Insertar inmediatamente en DuckDB (con retry + timeout)
-            _ = upsertNoteItem(path: fullPath, title: folderName, content: "", isDir: true)
-            print("DEBUG createNewFolder: path = \(fullPath)")
+            // Insertar en DuckDB inmediatamente (retry + timeout)
+            let dbOk = upsertNoteItem(path: fullPath, title: folderName, content: "", isDir: true)
+            print("DEBUG createNewFolder: path = \(fullPath), upsertOk = \(dbOk)")
 
-            // syncAll: refreshNotes background encuentra la carpeta en DuckDB
             syncAll(locations: locations)
 
-            // Destacar y renombrar
+            // Safety net: parche manual inmediato
             let tempFolder = NoteRecord(id: fullPath, title: folderName, path: fullPath, content: "", isDir: true)
+            self.allFolders.append(tempFolder)
+            self.childrenByParent[targetPath, default: []].append(tempFolder)
+
+            if self.currentPath != targetPath {
+                self.currentPath = targetPath
+            } else {
+                self.updateGridForCurrentPath()
+            }
+
             selectItem(tempFolder)
             self.expandedPaths.insert(targetPath)
             self.expandedPaths.insert(fullPath)

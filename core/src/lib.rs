@@ -177,11 +177,13 @@ pub fn set_embedding_lazy(lazy: bool) -> bool {
 
 #[uniffi::export]
 pub fn is_embedding_lazy() -> bool {
-    *EMBEDDING_LAZY.lock().unwrap()
+    EMBEDDING_LAZY.lock().map(|m| *m).unwrap_or(true)
 }
 
 fn generate_embedding(text: &str) -> Vec<f32> {
-    if text.is_empty() || *EMBEDDING_LAZY.lock().unwrap() {
+    // Defensivo: si lock está poisoned, asumir lazy y retornar vector cero
+    let is_lazy = EMBEDDING_LAZY.lock().map(|m| *m).unwrap_or(true);
+    if text.is_empty() || is_lazy {
         return vec![0.0f32; 384];
     }
 
@@ -858,7 +860,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
 
     let mut search_emb_sql = String::new();
     let mut is_semantic = false;
-    let is_lazy = *EMBEDDING_LAZY.lock().unwrap();
+    let is_lazy = EMBEDDING_LAZY.lock().map(|m| *m).unwrap_or(true);
 
     if let Some(ref term) = search_term {
         if !term.is_empty() && !is_lazy {
