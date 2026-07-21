@@ -402,10 +402,10 @@ struct MainContentColumn: View {
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
-                        .onTapGesture { 
+                        .onTapGesture {
                             isSearchFocused = false
                             NSApp.keyWindow?.makeFirstResponder(nil)
-                            viewModel.selectedItemIds.removeAll()
+                            viewModel.deselectAll()
                         }
                 )
             } else {
@@ -437,10 +437,10 @@ struct MainContentColumn: View {
                 .background(
                     viewModel.macBackground
                         .contentShape(Rectangle())
-                        .onTapGesture { 
+                        .onTapGesture {
                             isSearchFocused = false
                             NSApp.keyWindow?.makeFirstResponder(nil)
-                            viewModel.selectedItemIds.removeAll()
+                            viewModel.deselectAll()
                         }
                 )
             }

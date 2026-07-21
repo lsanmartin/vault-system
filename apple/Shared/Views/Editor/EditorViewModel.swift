@@ -128,7 +128,12 @@ class EditorViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     @Published var selectedItemIds: Set<String> = []
     @Published var pinnedPaths: Set<String> = []
-    
+
+    func deselectAll() {
+        selectedItemIds.removeAll()
+        lastSelectedId = nil
+    }
+
     @Published var showLineNumbers: Bool = false {
         didSet {
             if let tabId = activeTabId {
@@ -638,14 +643,11 @@ class EditorViewModel: ObservableObject {
         
         print("DEBUG createNewNote: specificPath = \(String(describing: specificPath)), currentPath = \(currentPath)")
         if specificPath == nil {
+            // Solo override con selección si es carpeta (no archivo)
             if let lastId = lastSelectedId ?? selectedItemIds.first {
                 let allItems = allFolders + allNotes
-                if let selectedItem = allItems.first(where: { $0.path == lastId }) {
-                    if selectedItem.isDir {
-                        targetPath = selectedItem.path
-                    } else {
-                        targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
-                    }
+                if let selectedItem = allItems.first(where: { $0.path == lastId }), selectedItem.isDir {
+                    targetPath = selectedItem.path
                 }
             } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
                 targetPath = location.path
@@ -685,14 +687,11 @@ class EditorViewModel: ObservableObject {
         var targetPath = specificPath ?? currentPath
         
         if specificPath == nil {
+            // Solo override con selección si es carpeta (no archivo)
             if let lastId = lastSelectedId ?? selectedItemIds.first {
                 let allItems = allFolders + allNotes
-                if let selectedItem = allItems.first(where: { $0.path == lastId }) {
-                    if selectedItem.isDir {
-                        targetPath = selectedItem.path
-                    } else {
-                        targetPath = URL(fileURLWithPath: selectedItem.path).deletingLastPathComponent().path
-                    }
+                if let selectedItem = allItems.first(where: { $0.path == lastId }), selectedItem.isDir {
+                    targetPath = selectedItem.path
                 }
             } else if targetPath.isEmpty, let location = locations.first(where: { $0.id == selectedLocationId }) {
                 targetPath = location.path
