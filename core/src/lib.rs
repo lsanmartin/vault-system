@@ -48,25 +48,37 @@ impl std::ops::DerefMut for DbConnectionGuard {
 }
 
 pub fn get_db_connection() -> Option<DbConnectionGuard> {
-    // Timeout: intentar obtener DB_QUERY_MUTEX con backoff de 100ms, máx 5 intentos
+    // Timeout: ~1.5s total en DB_QUERY_MUTEX, luego None
+    let mut retries = 0;
     let query_guard = loop {
         match DB_QUERY_MUTEX.try_lock() {
             Ok(g) => break g,
             Err(_) => {
-                thread::sleep(Duration::from_millis(100));
-                // Si después de 5 intentos no se puede, retornar None
+                // Watcher no debe bloquearse
                 if std::thread::current().name().unwrap_or("").contains("watcher") {
-                    return None; // Watcher no debe bloquearse
+                    return None;
                 }
+                retries += 1;
+                if retries >= 15 {
+                    return None; // Timeout después de ~1.5s
+                }
+                thread::sleep(Duration::from_millis(100));
             }
         }
     };
 
-    let conn_guard = match DB_CONN.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
-            thread::sleep(Duration::from_millis(100));
-            return None;
+    // Timeout: ~500ms en DB_CONN, luego None
+    let mut retries = 0;
+    let conn_guard = loop {
+        match DB_CONN.try_lock() {
+            Ok(g) => break g,
+            Err(_) => {
+                retries += 1;
+                if retries >= 5 {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     };
 
@@ -753,29 +765,31 @@ pub fn create_item(path: String, is_dir: bool) -> bool {
 #[uniffi::export]
 pub fn upsert_note_item(path: String, title: String, content: String, is_dir: bool) -> bool {
     // Inserta o actualiza inmediatamente en DuckDB sin esperar al watcher.
-    // Usado por Swift tras createItem() para que la nota/carpeta aparezca de inmediato.
-    if let Some(conn) = get_db_connection() {
-        let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&path]);
-        if is_dir {
-            conn.execute(
-                "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
-                params![&path, &title, &path, &content],
-            ).is_ok()
-        } else {
-            let mtime = std::fs::metadata(&path)
-                .and_then(|m| m.modified()).ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs()).unwrap_or(0);
-            let emb = generate_embedding(&content);
-            let sql = format!(
-                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
-                vector_to_sql_array(&emb)
-            );
-            conn.execute(&sql, params![&path, &title, &path, &content, mtime as i64]).is_ok()
+    // Retry hasta 10 veces si DB_CONN está lockeado.
+    for attempt in 0..10 {
+        if let Some(conn) = get_db_connection() {
+            let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&path]);
+            if is_dir {
+                return conn.execute(
+                    "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                    params![&path, &title, &path, &content],
+                ).is_ok();
+            } else {
+                let mtime = std::fs::metadata(&path)
+                    .and_then(|m| m.modified()).ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()).unwrap_or(0);
+                let emb = generate_embedding(&content);
+                let sql = format!(
+                    "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                    vector_to_sql_array(&emb)
+                );
+                return conn.execute(&sql, params![&path, &title, &path, &content, mtime as i64]).is_ok();
+            }
         }
-    } else {
-        false
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    false
 }
 
 #[uniffi::export]

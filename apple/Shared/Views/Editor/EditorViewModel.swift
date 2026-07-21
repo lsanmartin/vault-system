@@ -662,8 +662,13 @@ class EditorViewModel: ObservableObject {
         if createItem(path: fullPath, isDir: false) {
             // Insertar inmediatamente en DuckDB para que aparezca sin esperar al watcher
             _ = upsertNoteItem(path: fullPath, title: fileName, content: "", isDir: false)
+            print("DEBUG createNewNote: path = \(fullPath)")
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
-            syncAll(locations: locations)
+
+            // No llamamos syncAll aquí: upsertNoteItem pudo fallar si DB_CONN está lockeado,
+            // y syncAll arrancaría un refreshNotes asíncrono que eventualmente sobrescribe
+            // la inserción manual con datos que quizás no incluyen esta nota nueva.
+            // La consistencia eventual la garantiza el polling timer + watcher.
 
             let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
             self.allNotes.append(tempNote)
@@ -706,7 +711,9 @@ class EditorViewModel: ObservableObject {
         if createItem(path: fullPath, isDir: true) {
             // Insertar inmediatamente en DuckDB para que aparezca sin esperar al watcher
             _ = upsertNoteItem(path: fullPath, title: folderName, content: "", isDir: true)
-            syncAll(locations: locations)
+            print("DEBUG createNewFolder: path = \(fullPath)")
+
+            // No llamamos syncAll (misma razón que createNewNote)
 
             let tempFolder = NoteRecord(id: fullPath, title: folderName, path: fullPath, content: "", isDir: true)
             self.allFolders.append(tempFolder)
