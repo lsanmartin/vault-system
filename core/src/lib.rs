@@ -751,6 +751,34 @@ pub fn create_item(path: String, is_dir: bool) -> bool {
 }
 
 #[uniffi::export]
+pub fn upsert_note_item(path: String, title: String, content: String, is_dir: bool) -> bool {
+    // Inserta o actualiza inmediatamente en DuckDB sin esperar al watcher.
+    // Usado por Swift tras createItem() para que la nota/carpeta aparezca de inmediato.
+    if let Some(conn) = get_db_connection() {
+        let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&path]);
+        if is_dir {
+            conn.execute(
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                params![&path, &title, &path, &content],
+            ).is_ok()
+        } else {
+            let mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            let emb = generate_embedding(&content);
+            let sql = format!(
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                vector_to_sql_array(&emb)
+            );
+            conn.execute(&sql, params![&path, &title, &path, &content, mtime as i64]).is_ok()
+        }
+    } else {
+        false
+    }
+}
+
+#[uniffi::export]
 pub fn rename_item(old_path: String, new_path: String) -> bool {
     // Borrar registros viejos de la DB (el sync posterior creará los nuevos)
     {

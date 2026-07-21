@@ -656,11 +656,13 @@ class EditorViewModel: ObservableObject {
 
         let fileName = "Nueva Nota \(Int(Date().timeIntervalSince1970)).md"
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(fileName).path
-        
+
         if createItem(path: fullPath, isDir: false) {
+            // Insertar inmediatamente en DuckDB para que aparezca sin esperar al watcher
+            _ = upsertNoteItem(path: fullPath, title: fileName, content: "", isDir: false)
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
             syncAll(locations: locations)
-            
+
             let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
             self.allNotes.append(tempNote)
             self.childrenByParent[targetPath, default: []].append(tempNote)
@@ -703,8 +705,10 @@ class EditorViewModel: ObservableObject {
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(folderName).path
         
         if createItem(path: fullPath, isDir: true) {
+            // Insertar inmediatamente en DuckDB para que aparezca sin esperar al watcher
+            _ = upsertNoteItem(path: fullPath, title: folderName, content: "", isDir: true)
             syncAll(locations: locations)
-            
+
             let tempFolder = NoteRecord(id: fullPath, title: folderName, path: fullPath, content: "", isDir: true)
             self.allFolders.append(tempFolder)
             self.childrenByParent[targetPath, default: []].append(tempFolder)
