@@ -21,7 +21,7 @@ struct VaultApp: App {
         if args.contains("--mcp") {
             var token: String? = nil
             var workspace: String? = nil
-            
+
             for arg in args {
                 if arg.hasPrefix("--token=") {
                     token = String(arg.dropFirst("--token=".count))
@@ -29,13 +29,16 @@ struct VaultApp: App {
                     workspace = String(arg.dropFirst("--workspace=".count))
                 }
             }
-            
+
+            // Cargar tokens desde UserDefaults ANTES de iniciar el server MCP
+            loadTokensFromUserDefaults()
+
             if let ws = workspace {
                 runMcpServer(workspaceRoot: ws, tokenId: token)
             } else {
                 fputs("Error: --workspace argument is required for MCP mode.\\n", stderr)
             }
-            
+
             exit(0)
         }
     }

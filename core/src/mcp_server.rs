@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -119,13 +120,50 @@ fn handle_method(method: &str, _params: Option<serde_json::Value>, workspace_roo
             Ok(serde_json::Value::Null)
         }
         "tools/list" => {
-            // Actualmente sin herramientas implementadas, preparadas para el futuro
-            Ok(serde_json::json!({
-                "tools": []
-            }))
+            // Delegar a mcp_handle_request (lib.rs) que tiene la lista completa de herramientas
+            let internal_req = json!({
+                "jsonrpc": "2.0",
+                "method": "tools/list",
+                "params": {},
+                "id": 1,
+                "mcp_client_token": token.token_id
+            });
+            let response_str = crate::mcp_handle_request(internal_req.to_string());
+            match serde_json::from_str::<serde_json::Value>(&response_str) {
+                Ok(resp) => {
+                    if let Some(result) = resp.get("result") {
+                        Ok(result.clone())
+                    } else if let Some(err) = resp.get("error") {
+                        Err(anyhow::anyhow!("{}", err.get("message").and_then(|m| m.as_str()).unwrap_or("Error MCP")))
+                    } else {
+                        Ok(json!({"tools": []}))
+                    }
+                }
+                Err(_) => Ok(json!({"tools": []}))
+            }
         }
         "tools/call" => {
-            Err(anyhow::anyhow!("Herramienta no encontrada o no implementada"))
+            let params = _params.unwrap_or(json!({}));
+            let internal_req = json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": params,
+                "id": 1,
+                "mcp_client_token": token.token_id
+            });
+            let response_str = crate::mcp_handle_request(internal_req.to_string());
+            match serde_json::from_str::<serde_json::Value>(&response_str) {
+                Ok(resp) => {
+                    if let Some(result) = resp.get("result") {
+                        Ok(result.clone())
+                    } else if let Some(err) = resp.get("error") {
+                        Err(anyhow::anyhow!("{}", err.get("message").and_then(|m| m.as_str()).unwrap_or("Error MCP")))
+                    } else {
+                        Err(anyhow::anyhow!("Respuesta MCP vacía"))
+                    }
+                }
+                Err(e) => Err(anyhow::anyhow!("Error parseando respuesta MCP: {}", e))
+            }
         }
         _ => Err(anyhow::anyhow!("Método no soportado: {}", method)),
     }

@@ -2043,7 +2043,16 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     if results.is_empty() {
                         "No se encontraron resultados.".to_string()
                     } else {
-                        results.into_iter().map(|r| format!("Ruta: {}\nTipo: {}\nTítulo: {}\nContenido:\n{}\n---", r.path, if r.is_dir { "Carpeta" } else { "Archivo" }, r.title, r.content)).collect::<Vec<String>>().join("\n\n")
+                        results.into_iter().map(|r| {
+                            // Cargar content desde disco si la query retorna vacío (optimización listados)
+                            let display_content = if r.content.is_empty() && !r.is_dir {
+                                std::fs::read_to_string(&r.path).unwrap_or_default()
+                            } else {
+                                r.content.clone()
+                            };
+                            format!("Ruta: {}\nTipo: {}\nTítulo: {}\nContenido:\n{}\n---",
+                                r.path, if r.is_dir { "Carpeta" } else { "Archivo" }, r.title, display_content)
+                        }).collect::<Vec<String>>().join("\n\n")
                     }
                 },
                 "vault_read" => {
