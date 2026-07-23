@@ -346,7 +346,7 @@ class EditorViewModel: ObservableObject {
             }
         }
 
-        let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git"]
+        let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git", "target/", "node_modules/"]
         let currentSearchText = debouncedSearchText
         let currentDeletedPaths = deletedPathsThisSession
         
@@ -421,6 +421,14 @@ class EditorViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.allFolders = newFolders
                 self.allNotes = newNotes
+                
+                addSwiftTelemetryLog(log: "refreshNotes (main): allFolders=\(newFolders.count), allNotes=\(newNotes.count)")
+                if let newNote = newNotes.first(where: { $0.title.contains("Nueva Nota") }) {
+                    addSwiftTelemetryLog(log: "refreshNotes: ¡Nueva Nota ENCONTRADA en allNotes! Path=\(newNote.path)")
+                } else {
+                    addSwiftTelemetryLog(log: "refreshNotes: Nueva Nota NO ESTÁ en allNotes")
+                }
+                
                 print("VaultSystem DEBUG: allFolders count: \(newFolders.count), allNotes count: \(newNotes.count)")
                 print("VaultSystem DEBUG: childrenByParent keys count: \(newChildrenMap.keys.count)")
                 if let rootPath = rootWorkspacePath {
@@ -435,6 +443,8 @@ class EditorViewModel: ObservableObject {
                     }
                 }
                 self.childrenByParent = newChildrenMap
+                
+                addSwiftTelemetryLog(log: "refreshNotes: Llamando a updateGridForCurrentPath. currentPath=\(self.currentPath)")
                 self.updateGridForCurrentPath()
             }
         }
@@ -456,6 +466,13 @@ class EditorViewModel: ObservableObject {
             results = Array(uniqueItems.values)
         } else {
             results = self.childrenByParent[normalizedCurrentPath] ?? []
+            addSwiftTelemetryLog(log: "updateGrid: currentPath=\(normalizedCurrentPath). results=\(results.count)")
+            if let newNote = results.first(where: { $0.title.contains("Nueva Nota") }) {
+                addSwiftTelemetryLog(log: "updateGrid: ¡Nueva Nota ENCONTRADA en results! Path=\(newNote.path)")
+            } else {
+                addSwiftTelemetryLog(log: "updateGrid: Nueva Nota NO ESTÁ en results")
+            }
+            print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
         }
         
         // Aplicar ordenamiento
@@ -654,18 +671,26 @@ class EditorViewModel: ObservableObject {
             }
         }
         
-        if targetPath.isEmpty { return }
-
-        let fileName = "Nueva Nota \(Int(Date().timeIntervalSince1970)).md"
+              let fileName = "Nueva Nota \(Int(Date().timeIntervalSince1970)).md"
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(fileName).path
+        addSwiftTelemetryLog(log: "createNewNote: Generando \(fullPath)")
 
         if createItem(path: fullPath, isDir: false) {
+            let initialContent = "# \(fileName.replacingOccurrences(of: ".md", with: ""))\n\n"
+            do {
+                try initialContent.write(to: URL(fileURLWithPath: fullPath), atomically: true, encoding: .utf8)
+            } catch {
+                print("⚠️ Error al escribir contenido inicial: \(error)")
+            }
+
             // Insertar en DuckDB inmediatamente (retry + timeout, ~2s máx)
-            let dbOk = upsertNoteItem(path: fullPath, title: fileName, content: "", isDir: false)
+            let dbOk = upsertNoteItem(path: fullPath, title: fileName, content: initialContent, isDir: false)
+            addSwiftTelemetryLog(log: "createNewNote: upsertNoteItem para \(fullPath) retornó \(dbOk)")
             print("DEBUG createNewNote: path = \(fullPath), upsertOk = \(dbOk)")
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
 
             // syncAll: refreshNotes background lee desde DuckDB (debe tener la nota si upsertOk)
+            addSwiftTelemetryLog(log: "createNewNote: Ejecutando syncAll")
             syncAll(locations: locations)
 
             // PATCH MANUAL INMEDIATO: garantiza que la nota sea visible aunque upsert haya fallado
@@ -673,6 +698,7 @@ class EditorViewModel: ObservableObject {
             let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
             self.allNotes.append(tempNote)
             self.childrenByParent[targetPath, default: []].append(tempNote)
+            addSwiftTelemetryLog(log: "createNewNote: PATCH manual inyectado en targetPath=\(targetPath)")
 
             if self.currentPath != targetPath {
                 self.currentPath = targetPath
@@ -685,6 +711,8 @@ class EditorViewModel: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.beginRename(for: tempNote)
             }
+        } else {
+            addSwiftTelemetryLog(log: "createNewNote: createItem FAYO para \(fullPath)")
         }
     }
     

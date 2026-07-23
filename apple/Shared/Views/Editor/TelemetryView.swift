@@ -15,6 +15,22 @@ struct TelemetryView: View {
                     .foregroundColor(.white)
                 Spacer()
                 Button {
+                    let fullText = viewModel.telemetryLogs.joined(separator: "\n")
+                    #if os(macOS)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(fullText, forType: .string)
+                    #else
+                    UIPasteboard.general.string = fullText
+                    #endif
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .foregroundColor(.gray)
+                }
+                .buttonStyle(.plain)
+                .help("Copiar logs al portapapeles")
+                .padding(.trailing, 8)
+                
+                Button {
                     withAnimation { isPresented = false }
                 } label: {
                     Image(systemName: "xmark.circle.fill")

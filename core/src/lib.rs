@@ -30,68 +30,63 @@ static DB_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None))
 static DB_QUERY_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub struct DbConnectionGuard {
-    pub conn: Connection,
-    _guard: std::sync::MutexGuard<'static, ()>,
+    conn_guard: std::sync::MutexGuard<'static, Option<Connection>>,
+    _query_guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl std::ops::Deref for DbConnectionGuard {
     type Target = Connection;
     fn deref(&self) -> &Self::Target {
-        &self.conn
+        self.conn_guard.as_ref().unwrap()
     }
 }
 
 impl std::ops::DerefMut for DbConnectionGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.conn
+        self.conn_guard.as_mut().unwrap()
     }
 }
 
 pub fn get_db_connection() -> Option<DbConnectionGuard> {
-    // Timeout: ~1.5s total en DB_QUERY_MUTEX, luego None
+    // Wait up to 3 seconds for the query mutex
     let mut retries = 0;
     let query_guard = loop {
         match DB_QUERY_MUTEX.try_lock() {
             Ok(g) => break g,
             Err(_) => {
-                // Watcher no debe bloquearse
-                if std::thread::current().name().unwrap_or("").contains("watcher") {
+                retries += 1;
+                if retries >= 60 { // 3 seconds timeout (60 * 50ms)
                     return None;
                 }
-                retries += 1;
-                if retries >= 15 {
-                    return None; // Timeout después de ~1.5s
-                }
-                thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     };
 
-    // Timeout: ~500ms en DB_CONN, luego None
+    // Wait up to 3 seconds for the DB connection mutex
     let mut retries = 0;
     let conn_guard = loop {
         match DB_CONN.try_lock() {
             Ok(g) => break g,
             Err(_) => {
                 retries += 1;
-                if retries >= 5 {
+                if retries >= 60 { // 3 seconds timeout
                     return None;
                 }
-                thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     };
 
-    if let Some(c) = conn_guard.as_ref() {
-        if let Ok(cloned) = c.try_clone() {
-            return Some(DbConnectionGuard {
-                conn: cloned,
-                _guard: query_guard,
-            });
-        }
+    if conn_guard.is_some() {
+        return Some(DbConnectionGuard {
+            conn_guard: conn_guard,
+            _query_guard: query_guard,
+        });
     }
     None
 }
+
 static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
 // --- COLA DE TELEMETRÍA ---
@@ -141,6 +136,11 @@ pub fn add_telemetry_log(log: String) {
 }
 
 #[uniffi::export]
+pub fn add_swift_telemetry_log(log: String) {
+    add_telemetry_log(format!("SWIFT: {}", log));
+}
+
+#[uniffi::export]
 pub fn poll_telemetry_logs() -> Vec<String> {
     if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
         let extracted = logs.clone();
@@ -156,9 +156,9 @@ pub fn get_last_sync_ts() -> u64 {
 }
 
 fn update_sync_ts() {
-    let mut ts = LAST_SYNC_TS.lock().unwrap();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    *ts = now;
+    if let Ok(mut ts) = LAST_SYNC_TS.lock() {
+        *ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    }
 }
 
 #[uniffi::export]
@@ -278,6 +278,9 @@ fn generate_embedding_fast(text: &str) -> Vec<f32> {
 }
 
 fn vector_to_sql_array(vec: &[f32]) -> String {
+    if vec.is_empty() {
+        return "NULL".to_string();
+    }
     let mut s = "ARRAY[".to_string();
     for (i, val) in vec.iter().enumerate() {
         if i > 0 {
@@ -310,23 +313,32 @@ pub fn init_knowledge_base() -> String {
     // FASE 0: Detección y recreación preventiva para evitar bugs de índices en DuckDB
     let mut needs_recreate = false;
     if std::path::Path::new(&db_path).exists() {
-        if let Ok(conn) = Connection::open(&db_path) {
-            // Verificar si el archivo está corrupto/invalidado o tiene restricciones antiguas
-            if conn.execute("SELECT id FROM notes LIMIT 1", []).is_err() {
-                needs_recreate = true;
-            } else {
-                // Verificar si tiene el flag del esquema libre de índices secundarios
-                if conn.execute("SELECT * FROM _schema_no_indices LIMIT 1", []).is_err() {
+        match Connection::open(&db_path) {
+            Ok(conn) => {
+                // Verificar si el archivo está corrupto/invalidado o tiene restricciones antiguas
+                if conn.execute("SELECT id FROM notes LIMIT 1", []).is_err() {
+                    needs_recreate = true;
+                } else {
+                    // Verificar si tiene el flag del esquema libre de índices secundarios
+                    if conn.execute("SELECT * FROM _schema_no_indices LIMIT 1", []).is_err() {
+                        needs_recreate = true;
+                    }
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("lock") || err_str.contains("io error") {
+                    return format!("Error CRITICO: La base de datos está bloqueada por otra instancia. Por favor cierre la otra aplicación o proceso (posible zombie). Detalle: {}", e);
+                } else {
                     needs_recreate = true;
                 }
             }
-        } else {
-            needs_recreate = true;
         }
     }
 
     if needs_recreate {
         let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&format!("{}.wal", db_path));
     }
 
     let conn = match Connection::open(&db_path) {
@@ -535,12 +547,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             if content_changed {
                 let content = std::fs::read_to_string(file_path).unwrap_or_else(|_| "".to_string());
 
-                // Stub detection: contenido vacío o muy corto (<30 chars) probablemente es stub de iCloud
-                if content.trim().len() < 30 {
-                    pending_stubs.push(full_path_str.clone());
-                    continue;
-                }
-
+                // Removed stub detection to allow empty notes created by the user to exist in the database.
                 let title = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título").to_string();
                 let emb = generate_embedding(&content);
                 batch_inserts.push((full_path_str.clone(), title, content, emb, false, mtime));
@@ -648,9 +655,24 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     if orphans_count > 0 {
         if let Some(conn) = get_db_connection() {
             for orphan in db_mtimes.keys() {
-                let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
-                let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
-                let _ = conn.execute("DELETE FROM notes WHERE path = ?", duckdb::params![orphan]);
+                let mut exists_now = std::path::Path::new(orphan).exists();
+                if !exists_now && orphan.contains("Library/Mobile Documents") {
+                    for _ in 0..3 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if std::path::Path::new(orphan).exists() {
+                            exists_now = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if !exists_now {
+                    let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
+                    let _ = conn.execute("DELETE FROM links WHERE source_id IN (SELECT id FROM notes WHERE path = ?)", duckdb::params![orphan]);
+                    let _ = conn.execute("DELETE FROM notes WHERE path = ?", duckdb::params![orphan]);
+                } else {
+                    crate::add_telemetry_log(format!("sync_vault: AVISO: el huérfano reapareció, no se borra: {}", orphan));
+                }
             }
         }
     }
@@ -692,16 +714,14 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                         );
                     } else if p.ends_with(".md") {
                         let content = std::fs::read_to_string(&p).unwrap_or_default();
-                        if content.trim().len() >= 30 {
-                            let title = std::path::Path::new(&p).file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
-                            let emb = generate_embedding(&content);
-                            let sql = format!(
-                                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
-                                vector_to_sql_array(&emb)
-                            );
-                            let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
-                            let _ = conn.execute(&sql, duckdb::params![&p, title, &p, content, mtime as i64]);
-                        }
+                        let title = std::path::Path::new(&p).file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
+                        let emb = generate_embedding(&content);
+                        let sql = format!(
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            vector_to_sql_array(&emb)
+                        );
+                        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+                        let _ = conn.execute(&sql, duckdb::params![&p, title, &p, content, mtime as i64]);
                     }
                 }
             }
@@ -753,43 +773,66 @@ pub fn remove_vault_path(path: String) -> String {
 
 #[uniffi::export]
 pub fn create_item(path: String, is_dir: bool) -> bool {
+    crate::add_telemetry_log(format!("create_item: intentando crear {} (is_dir={})", path, is_dir));
     let target = Path::new(&path);
-    if is_dir {
+    let success = if is_dir {
         fs::create_dir_all(target).is_ok()
     } else {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        fs::write(target, "").is_ok()
-    }
+        match fs::write(target, "") {
+            Ok(_) => true,
+            Err(e) => {
+                crate::add_telemetry_log(format!("create_item: Error fs::write en {}: {}", path, e));
+                false
+            }
+        }
+    };
+    crate::add_telemetry_log(format!("create_item: finalizado para {} -> éxito={}", path, success));
+    success
 }
 
 #[uniffi::export]
 pub fn upsert_note_item(path: String, title: String, content: String, is_dir: bool) -> bool {
     // Inserta o actualiza inmediatamente en DuckDB sin esperar al watcher.
-    // Retry hasta 10 veces si DB_CONN está lockeado.
-    for attempt in 0..10 {
-        if let Some(conn) = get_db_connection() {
-            let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&path]);
-            if is_dir {
-                return conn.execute(
-                    "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
-                    params![&path, &title, &path, &content],
-                ).is_ok();
-            } else {
-                let mtime = std::fs::metadata(&path)
-                    .and_then(|m| m.modified()).ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()).unwrap_or(0);
-                let emb = generate_embedding(&content);
-                let sql = format!(
-                    "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
-                    vector_to_sql_array(&emb)
-                );
-                return conn.execute(&sql, params![&path, &title, &path, &content, mtime as i64]).is_ok();
+    crate::add_telemetry_log(format!("upsert_note_item: INICIO para path={}", path));
+    if let Some(conn) = get_db_connection() {
+        let canonical = canonicalize_path(&path);
+        crate::add_telemetry_log(format!("upsert_note_item: canonical_path={}", canonical));
+        let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&canonical]);
+        if is_dir {
+            return conn.execute(
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                params![&canonical, &title, &canonical, &content],
+            ).is_ok();
+        } else {
+            let mtime = std::fs::metadata(&canonical)
+                .and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            let emb = generate_embedding(&content);
+            let sql_array = vector_to_sql_array(&emb);
+            let sql = format!(
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                sql_array
+            );
+            crate::add_telemetry_log(format!("upsert_note_item: Ejecutando SQL: {}", sql));
+            match conn.execute(&sql, params![&canonical, &title, &canonical, &content, mtime as i64]) {
+                Ok(_) => {
+                    crate::add_telemetry_log(format!("upsert_note_item: EXITOSO para {}", canonical));
+                    return true;
+                }
+                Err(e) => {
+                    println!("VaultSystem Rust Error inserting note {}: {}", canonical, e);
+                    crate::add_telemetry_log(format!("DB Insert Error {}: {}", canonical, e));
+                    return false;
+                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    } else {
+        println!("VaultSystem Rust Error: get_db_connection returned None in upsert_note_item");
+        crate::add_telemetry_log("upsert_note_item: get_db_connection returned None".to_string());
     }
     false
 }
@@ -1278,16 +1321,15 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
             let _ = watcher.watch(Path::new(path), RecursiveMode::Recursive);
         }
 
-        // Cola de eventos con dedup por path (debounce de 2s)
+        // Cola de eventos con dedup por path (debounce corto para responsiveness)
         let mut pending: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-        let debounce = Duration::from_millis(2000);
+        let debounce = Duration::from_millis(300);
 
         fn filter_data_event(kind: &notify::EventKind) -> bool {
-            matches!(kind,
-                notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
-                | notify::EventKind::Create(_)
-                | notify::EventKind::Remove(_)
-            )
+            match kind {
+                notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_)) => false,
+                _ => true,
+            }
         }
 
         fn process_batch(
@@ -1297,31 +1339,59 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
             if pending.is_empty() { return; }
             if let Some(conn) = get_db_connection() {
                 for (path_str, is_dir) in pending {
+                    let canonical = canonicalize_path(path_str);
+                    let path_obj = std::path::Path::new(&canonical);
+                    
+                    if !path_obj.exists() {
+                        let mut exists_now = false;
+                        if canonical.contains("Library/Mobile Documents") {
+                            crate::add_telemetry_log(format!("process_batch: AVISO: path iCloud no encontrado, reintentando... {}", canonical));
+                            for _ in 0..3 {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                if path_obj.exists() {
+                                    exists_now = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !exists_now {
+                            crate::add_telemetry_log(format!("process_batch: OJO, path NO existe, ejecutando DELETE para {}", canonical));
+                            let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
+                            continue;
+                        }
+                    }
+
                     if *is_dir {
-                        let title = std::path::Path::new(path_str)
-                            .file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
-                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
+                        let title = path_obj.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
+                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
                         let _ = conn.execute(
                             "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
-                            duckdb::params![path_str, title, path_str, ""],
+                            duckdb::params![canonical, title, canonical, ""],
                         );
-                    } else if path_str.ends_with(".md") && !ign.iter().any(|p| path_str.contains(p)) {
-                        if path_str.contains("/.") { continue; } // hidden path
-                        let content = std::fs::read_to_string(path_str).unwrap_or_default();
-                        if content.trim().len() < 30 { continue; } // stub de iCloud
-                        let title = std::path::Path::new(path_str)
-                            .file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
+                    } else if canonical.ends_with(".md") && !ign.iter().any(|p| canonical.contains(p)) {
+                        if canonical.contains("/.") { continue; } // hidden path
+                        let content = std::fs::read_to_string(&canonical).unwrap_or_default();
+                        
+                        let title = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
                         let emb = generate_embedding(&content);
                         let sql = format!(
                             "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
                             vector_to_sql_array(&emb)
                         );
-                        let mtime = std::fs::metadata(path_str)
+                        let mtime = std::fs::metadata(&canonical)
                             .and_then(|m| m.modified()).ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs()).unwrap_or(0);
-                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![path_str]);
-                        let _ = conn.execute(&sql, duckdb::params![path_str, title, path_str, content, mtime as i64]);
+                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
+                        match conn.execute(&sql, duckdb::params![canonical, title, canonical, content, mtime as i64]) {
+                            Ok(_) => {
+                                // Exitoso, no saturemos el log si no es necesario, pero para debugear este caso en específico:
+                                crate::add_telemetry_log(format!("process_batch: INSERT EXITOSO para {}", canonical));
+                            }
+                            Err(e) => {
+                                crate::add_telemetry_log(format!("process_batch: ERROR INSERTANDO {}: {}", canonical, e));
+                            }
+                        }
                     }
                 }
             }

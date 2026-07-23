@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-07-20 23:00]
+Última actualización: [2026-07-22 12:45]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,15 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-07-23 11:15] Protección contra Race Conditions de iCloud y Ghost Notes**:
+    - **Diagnóstico**: Las notas recién creadas desde la UI desaparecían ("ghost notes") debido a una carrera entre Swift, iCloud y los procesos asíncronos de Rust (`sync_vault` y `process_batch`). iCloud sustituye brevemente los nuevos archivos `.md` por placeholders de carga (`.sb-*`), lo que provocaba que las comprobaciones de existencia en Rust fallaran, disparando borrados de la nota en DuckDB justo después de ser creada. Además, la lógica antigua borraba intencionalmente archivos con menos de 30 caracteres asumiéndolos "stubs" de iCloud.
+    - **Mitigación de Stubs**: Se eliminó la regla que borraba e ignoraba archivos de menos de 30 caracteres en `sync_vault`, permitiendo la existencia de notas vacías.
+    - **Mitigación Swift**: Inyectado de contenido inicial (`# Titulo\n\n`) en `EditorViewModel.swift` al invocar `createNewNote`, previniendo que el archivo nazca vacío.
+    - **Mitigación Rust**: Añadido bucle de reintento (espera de hasta 1.5s) en `lib.rs`, aplicado en la cola de eventos `process_batch` y en el Limpiador de Huérfanos de `sync_vault`. Esto otorga a Rust tolerancia para esperar a que iCloud devuelva el archivo real `.md` en lugar de ejecutar el `DELETE` en la base de datos de manera precipitada.
+    - **Estado actual**: Desplegado en local, pero pendiente de revisión y debug adicional ya que el error reportó persistir según el usuario.
+  - **[2026-07-22 12:45] Consistencia de Rutas y Solución a Notas Ocultas**:
+    - **Rutas Canonicalizadas**: Corregido bug recurrente de desaparición inmediata de notas y carpetas al crearse/renombrarse/eliminarse. Las funciones `upsert_note_item`, `rename_item` y `delete_item` de Rust en `core/src/lib.rs` insertaban o eliminaban usando rutas tal como venían de Swift (que podían contener symlinks como `/Users/lsanmartin/obsidian`). Dado que `scan_vault` y `query_notes` canonicalizan todas las rutas internamente mediante `canonicalize_path` (ej. apuntando a la ruta física de iCloud), esto creaba discrepancias que hacían que las notas recién creadas quedaran invisibles en la UI hasta un escaneo completo posterior. Se introdujo `canonicalize_path` en estas funciones en el Core Rust para asegurar la consistencia.
+    - **Compilación y Despliegue**: Compilado el núcleo de Rust (`make core`) y reconstruido/desplegado el paquete Swift nativo (`make deploy`) a `/Applications/VaultSystem.app`.
   - **[2026-07-20 ~22:00] Mitigación de Crash y Consumo de Recursos**:
     - **Diagnóstico multifactorial**: Crashes y saturación de RAM/CPU/GPU durante build e indexación en MacBook M2 Pro. Causas: (1) embeddings MLX/GPU por cada nota en scan, (2) tormenta de eventos de iCloud Drive sin debounce, (3) hidratación masiva sin throttle, (4) cognitive daemon con polling fijo cada 10s, (5) build pipeline secuencial sin control de recursos.
     - **Lazy Embeddings**: Flag `EMBEDDING_LAZY` (default true). `scan_vault()` ya no llama a MLX/GPU — almacena vector `[0;384]`. Embedding real solo bajo demanda en `query_notes()`. Reduce ~90% de GPU/CPU durante scan.
@@ -143,6 +152,7 @@
     - Migración de tokens MCP a `UserDefaults` para evitar pérdida en recompilaciones.
 
 ## Pendientes Próxima Sesión
+- **Debug Ghost Notes**: Continuar investigando por qué la nota recién creada desaparece de la UI a pesar del exitoso `INSERT EXITOSO` en `process_batch` y de las mitigaciones implementadas (stub-removal, retry loop, content injection). Identificar dónde y cómo se elimina o filtra el registro en DuckDB.
 - **Build release a /Applications**: `cd ~/dev/vault-system && make release`
 - **Refinamiento de RAG Local**: Integrar la generación de embeddings nativos en Apple Silicon (MLX/Metal) directamente en la tabla `domain_metadata` para RAG local offline.
 - **Validación de Rendimiento**: Comprobar tiempo de respuesta del scanner en vaults de gran escala (>1000 carpetas).

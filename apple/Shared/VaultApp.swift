@@ -56,6 +56,15 @@ struct VaultApp: App {
                     let status = initKnowledgeBase()
                     print("Vault Core Status: \(status)")
                     
+                    if status.contains("Error CRITICO") {
+                        let alert = NSAlert()
+                        alert.messageText = "Error Crítico de Inicialización"
+                        alert.informativeText = status
+                        alert.alertStyle = .critical
+                        alert.addButton(withTitle: "Entendido")
+                        alert.runModal()
+                    }
+                    
                     // Iniciar el Cognitive Daemon (Arquitectura Dual-Brain)
                     let daemonStatus = startCognitiveDaemon()
                     print("Daemon: \(daemonStatus)")
