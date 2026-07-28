@@ -937,7 +937,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     if let Some(path) = path_filter {
         if !path.is_empty() {
             let canonical_path = canonicalize_path(&path);
-            sql.push_str(&format!(" AND n.path LIKE '{}%'", canonical_path));
+            sql.push_str(&format!(" AND (n.path = '{}' OR n.path LIKE '{}/%')", canonical_path, canonical_path));
         }
     }
 
@@ -1344,18 +1344,42 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                     
                     if !path_obj.exists() {
                         let mut exists_now = false;
-                        if canonical.contains("Library/Mobile Documents") {
-                            crate::add_telemetry_log(format!("process_batch: AVISO: path iCloud no encontrado, reintentando... {}", canonical));
-                            for _ in 0..3 {
-                                std::thread::sleep(std::time::Duration::from_millis(500));
+                        let is_icloud = canonical.contains("Library/Mobile Documents");
+
+                        if is_icloud {
+                            // iCloud puede poner el archivo en estado transitorio durante sync.
+                            // Reintento extendido: hasta 5x con 600ms = 3s de espera total.
+                            crate::add_telemetry_log(format!("process_batch: AVISO: path iCloud no encontrado en disco, reintentando... {}", canonical));
+                            for attempt in 0..5 {
+                                std::thread::sleep(std::time::Duration::from_millis(600));
                                 if path_obj.exists() {
                                     exists_now = true;
+                                    crate::add_telemetry_log(format!("process_batch: path iCloud aparecio en disco (intento {}): {}", attempt + 1, canonical));
                                     break;
                                 }
                             }
                         }
+
                         if !exists_now {
-                            crate::add_telemetry_log(format!("process_batch: OJO, path NO existe, ejecutando DELETE para {}", canonical));
+                            if is_icloud {
+                                // Antes de borrar, verificar si el registro existe en DB.
+                                // Si existe, es probable que iCloud esté en sync (no un borrado real).
+                                // Saltamos el DELETE para no provocar "ghost note".
+                                let in_db = conn.query_row(
+                                    "SELECT COUNT(*) FROM notes WHERE id = ?",
+                                    duckdb::params![canonical],
+                                    |r| r.get::<_, i64>(0),
+                                ).unwrap_or(0) > 0;
+
+                                if in_db {
+                                    crate::add_telemetry_log(format!(
+                                        "process_batch: SKIP DELETE — path iCloud en DB pero ausente en disco (sync en progreso, se conserva el registro): {}",
+                                        canonical
+                                    ));
+                                    continue; // No borrar; el siguiente evento del watcher lo confirmará
+                                }
+                            }
+                            crate::add_telemetry_log(format!("process_batch: DELETE confirmado para {}", canonical));
                             let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
                             continue;
                         }

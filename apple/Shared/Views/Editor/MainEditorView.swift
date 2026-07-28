@@ -110,7 +110,28 @@ struct SidebarColumn: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     @State private var workspaceToRemove: VaultLocation?
-    
+
+    // Devuelve el SF Symbol para cada opción de sort
+    private func sortIcon(_ opt: SortOption) -> String {
+        switch opt {
+        case .nameAsc:  return "arrow.up.doc"
+        case .nameDesc: return "arrow.down.doc"
+        case .dateDesc: return "arrow.down.clock"
+        case .dateAsc:  return "arrow.up.clock"
+        }
+    }
+
+    // Ícono dinámico del botón Menu según sort activo
+    private func treeSortIcon(_ opt: SortOption) -> String {
+        switch opt {
+        case .nameAsc:  return "arrow.up.arrow.down.circle"
+        case .nameDesc: return "arrow.up.arrow.down.circle.fill"
+        case .dateDesc: return "clock.arrow.circlepath"
+        case .dateAsc:  return "clock"
+        }
+    }
+
+
     var body: some View {
         List(selection: Binding(
             get: { viewModel.selectedLocationId },
@@ -283,7 +304,7 @@ struct SidebarColumn: View {
                 .listRowBackground(viewModel.macSidebar)
             }
             
-            Section("Explorar") {
+            Section {
                 Picker(selection: $viewModel.treeMode) {
                     ForEach(TreeMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
@@ -300,6 +321,38 @@ struct SidebarColumn: View {
                 case .heatmap:
                     HeatmapView(viewModel: viewModel)
                 }
+            } header: {
+                HStack(spacing: 4) {
+                    Text("Explorar")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .textCase(nil)
+                    Spacer()
+                    // Sort del árbol
+                    Menu {
+                        Picker("Ordenar árbol", selection: $viewModel.treeSortOption) {
+                            ForEach(SortOption.allCases) { opt in
+                                Label(opt.rawValue, systemImage: sortIcon(opt)).tag(opt)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: treeSortIcon(viewModel.treeSortOption))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Ordenar árbol de carpetas")
+                    // Colapsar todo
+                    Button(action: { viewModel.collapseAll() }) {
+                        Image(systemName: "rectangle.compress.vertical")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Colapsar todas las carpetas")
+                }
+                .padding(.trailing, 4)
             }
             
             Section("Apariencia") {
@@ -356,7 +409,17 @@ struct MainContentColumn: View {
     @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     @FocusState private var isSearchFocused: Bool
     @Binding var isNoteHidden: Bool
-    
+
+    private func mainSortIcon(_ opt: SortOption) -> String {
+        switch opt {
+        case .nameAsc:  return "arrow.up.doc"
+        case .nameDesc: return "arrow.down.doc"
+        case .dateDesc: return "arrow.down.clock"
+        case .dateAsc:  return "arrow.up.clock"
+        }
+    }
+
+
     var body: some View {
         VStack(spacing: 0) {
             headerView
@@ -513,12 +576,35 @@ struct MainContentColumn: View {
                 }
                 
                 Menu {
-                    Picker("Ordenar", selection: $viewModel.sortOption) { ForEach(SortOption.allCases) { Text($0.rawValue).tag($0) } }
-                } label: { 
-                    Image(systemName: "arrow.up.arrow.down")
+                    Picker("Ordenar", selection: $viewModel.sortOption) {
+                        ForEach(SortOption.allCases) { opt in
+                            Label(opt.rawValue, systemImage: mainSortIcon(opt)).tag(opt)
+                        }
+                    }
+                } label: {
+                    Image(systemName: mainSortIcon(viewModel.sortOption))
                         .foregroundColor(viewModel.macControlIcon)
                 }
                 .menuStyle(.borderlessButton).fixedSize()
+                .help("Ordenar notas")
+
+
+                // Toggle: mostrar todos los archivos (no solo .md)
+                Button(action: { viewModel.showAllFiles.toggle() }) {
+                    Image(systemName: viewModel.showAllFiles ? "doc.badge.gearshape.fill" : "doc.badge.gearshape")
+                        .foregroundColor(viewModel.showAllFiles ? viewModel.macAccent : viewModel.macControlIcon)
+                }
+                .buttonStyle(.borderless)
+                .help(viewModel.showAllFiles ? "Mostrando todos los archivos — clic para ocultar" : "Mostrar todos los archivos (.py, .sh, .yaml, etc.)")
+
+                // Toggle: mostrar archivos ocultos (solo disponible con showAllFiles activo)
+                Button(action: { viewModel.showHiddenFiles.toggle() }) {
+                    Image(systemName: viewModel.showHiddenFiles ? "eye.fill" : "eye.slash")
+                        .foregroundColor(viewModel.showHiddenFiles ? viewModel.macAccent : viewModel.macControlIcon.opacity(viewModel.showAllFiles ? 1.0 : 0.35))
+                }
+                .buttonStyle(.borderless)
+                .disabled(!viewModel.showAllFiles)
+                .help(viewModel.showHiddenFiles ? "Ocultando archivos ocultos — clic para mostrar" : "Mostrar archivos ocultos (requiere 'Todos los archivos')")
                 
                 Button(action: { viewModel.createNewNote(locations: workspaceManager.allLocations) }) { 
                     Image(systemName: "note.text.badge.plus")
@@ -563,13 +649,12 @@ struct VaultTreeView: View {
         return combined.sorted { a, b in
             let aPinned = viewModel.pinnedPaths.contains(a.path)
             let bPinned = viewModel.pinnedPaths.contains(b.path)
-            if aPinned != bPinned {
-                return aPinned
-            }
-            if a.isDir != b.isDir {
-                return a.isDir
-            }
-            return a.title.lowercased() < b.title.lowercased()
+            if aPinned != bPinned { return aPinned }
+            if a.isDir != b.isDir { return a.isDir }
+            let ascending = !viewModel.treeSortOption.isDescending
+            return ascending
+                ? a.title.lowercased() < b.title.lowercased()
+                : a.title.lowercased() > b.title.lowercased()
         }
     }
     
@@ -652,13 +737,12 @@ struct VaultTreeRow: View {
         return combined.sorted { a, b in
             let aPinned = viewModel.pinnedPaths.contains(a.path)
             let bPinned = viewModel.pinnedPaths.contains(b.path)
-            if aPinned != bPinned {
-                return aPinned
-            }
-            if a.isDir != b.isDir {
-                return a.isDir
-            }
-            return a.title.lowercased() < b.title.lowercased()
+            if aPinned != bPinned { return aPinned }
+            if a.isDir != b.isDir { return a.isDir }
+            let ascending = !viewModel.treeSortOption.isDescending
+            return ascending
+                ? a.title.lowercased() < b.title.lowercased()
+                : a.title.lowercased() > b.title.lowercased()
         }
     }
     

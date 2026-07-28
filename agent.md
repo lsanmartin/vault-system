@@ -10,7 +10,13 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
-  - **[2026-07-23 11:15] Protección contra Race Conditions de iCloud y Ghost Notes**:
+  - **[2026-07-27 18:44] Fix Definitivo Ghost Notes — iCloud Race Condition (v2)**:
+    - **Root cause**: `process_batch` ejecutaba `DELETE FROM notes` cuando `path_obj.exists()` era `false` durante sync transitorio de iCloud. Borraba el registro que `upsert_note_item` acababa de insertar. Swift polling detectaba `update_sync_ts()` → `refreshNotes` leía DB ya sin la nota → ghost note.
+    - **Fix #1 — process_batch iCloud guard** (`core/src/lib.rs`): Reintento 3×500ms → 5×600ms (3s). Si path ausente en disco, es iCloud, Y existe en DuckDB → **SKIP DELETE**. Loguea `SKIP DELETE — sync en progreso`.
+    - **Fix #2 — Second-chance refresh** (`EditorViewModel.swift`): `createNewNote` y `createNewFolder` disparan un segundo `syncAll` a los 2.5s post-creación. Captura el estado real de DB después de que el watcher de Rust confirma el INSERT.
+    - **Compilación**: `make build-aarch64` OK. `make xcode-build` → `ARCHIVE SUCCEEDED`.
+  - **[2026-07-23 11:15] Protección contra Race Conditions de iCloud y Ghost Notes** *(mitigación previa, superada por fix 2026-07-27)*:
+
     - **Diagnóstico**: Las notas recién creadas desde la UI desaparecían ("ghost notes") debido a una carrera entre Swift, iCloud y los procesos asíncronos de Rust (`sync_vault` y `process_batch`). iCloud sustituye brevemente los nuevos archivos `.md` por placeholders de carga (`.sb-*`), lo que provocaba que las comprobaciones de existencia en Rust fallaran, disparando borrados de la nota en DuckDB justo después de ser creada. Además, la lógica antigua borraba intencionalmente archivos con menos de 30 caracteres asumiéndolos "stubs" de iCloud.
     - **Mitigación de Stubs**: Se eliminó la regla que borraba e ignoraba archivos de menos de 30 caracteres en `sync_vault`, permitiendo la existencia de notas vacías.
     - **Mitigación Swift**: Inyectado de contenido inicial (`# Titulo\n\n`) en `EditorViewModel.swift` al invocar `createNewNote`, previniendo que el archivo nazca vacío.

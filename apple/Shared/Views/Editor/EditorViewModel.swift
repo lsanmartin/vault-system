@@ -71,9 +71,14 @@ enum AppTheme: String, CaseIterable, Identifiable {
 }
 
 enum SortOption: String, CaseIterable, Identifiable {
-    case name = "Nombre"
-    case date = "Fecha"
+    case nameAsc  = "Nombre A→Z"
+    case nameDesc = "Nombre Z→A"
+    case dateDesc = "Fecha (reciente)"
+    case dateAsc  = "Fecha (antigua)"
     var id: String { self.rawValue }
+
+    var isDescending: Bool { self == .nameDesc || self == .dateDesc }
+    var isName: Bool      { self == .nameAsc  || self == .nameDesc }
 }
 
 enum LayoutMode: String, CaseIterable, Identifiable {
@@ -215,15 +220,37 @@ class EditorViewModel: ObservableObject {
     @Published var currentLocations: [VaultLocation]? // Referencia temporal para el didSet
     
     @Published var selectedFolderId: String? // Mantenemos para resaltar seleccionadas si es necesario
-    @Published var showSystemFiles: Bool = true 
+    @Published var showSystemFiles: Bool = true
+
+    /// Toggle: muestra archivos no-.md (py, sh, yaml, etc.) vía FileManager overlay.
+    @Published var showAllFiles: Bool = UserDefaults.standard.bool(forKey: "vault_show_all_files") {
+        didSet {
+            UserDefaults.standard.set(showAllFiles, forKey: "vault_show_all_files")
+            if !showAllFiles { showHiddenFiles = false }
+            updateGridForCurrentPath()
+        }
+    }
+    /// Toggle: muestra archivos/carpetas ocultos (empiezan con '.') via FileManager overlay.
+    /// Solo activo cuando showAllFiles está activo.
+    @Published var showHiddenFiles: Bool = UserDefaults.standard.bool(forKey: "vault_show_hidden_files") {
+        didSet {
+            UserDefaults.standard.set(showHiddenFiles, forKey: "vault_show_hidden_files")
+            updateGridForCurrentPath()
+        }
+    }
     @Published var selectedTheme: AppTheme = .system {
         didSet {
             UserDefaults.standard.set(selectedTheme.rawValue, forKey: "vault_selected_theme")
             updateAppAppearance()
         }
     }
-    @Published var sortOption: SortOption = .name
-    
+    @Published var sortOption: SortOption = .nameAsc
+
+    /// Orden del árbol de carpetas en la sidebar (independiente del sort de la columna central).
+    @Published var treeSortOption: SortOption = .nameAsc {
+        didSet { objectWillChange.send() } // Fuerza re-render del árbol
+    }
+
     @AppStorage("vault_layout_mode") var layoutMode: LayoutMode = .list
     @AppStorage("vault_tactical_sidebar_width") var tacticalSidebarWidth: Double = 250.0
     @AppStorage("vault_render_mode_v3") var defaultRenderModeStr: String = RenderMode.universal.rawValue
@@ -332,6 +359,13 @@ class EditorViewModel: ObservableObject {
     }
 
     func refreshNotes(locations: [VaultLocation]) {
+        // CRÍTICO: capturar propiedades @Published en main thread ANTES del dispatch.
+        // selectedLocationId y explorationFilter son Main Actor y no pueden leerse
+        // desde DispatchQueue.global — hacerlo retorna nil intermitentemente.
+        let capturedLocationId = self.selectedLocationId
+        let capturedFilter = self.explorationFilter
+        let capturedDeletedPaths = self.deletedPathsThisSession
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.currentLocations = locations
@@ -348,18 +382,18 @@ class EditorViewModel: ObservableObject {
 
         let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git", "target/", "node_modules/"]
         let currentSearchText = debouncedSearchText
-        let currentDeletedPaths = deletedPathsThisSession
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            var rootWorkspacePath = locations.first(where: { $0.id == self.selectedLocationId })?.path
+            // Usar el locationId capturado en main thread (no self.selectedLocationId desde background)
+            var rootWorkspacePath = locations.first(where: { $0.id == capturedLocationId })?.path
             if let rwp = rootWorkspacePath, rwp.hasSuffix("/") && rwp.count > 1 {
                 rootWorkspacePath = String(rwp.dropLast())
             }
             
-            // Obtenemos solo los datos según el filtro activo
+            // Obtenemos solo los datos según el filtro activo (capturado en main thread)
             let rawItems: [NoteRecord]
-            switch self.explorationFilter {
+            switch capturedFilter {
             case .all:
                 rawItems = queryNotes(searchTerm: currentSearchText, pathFilter: rootWorkspacePath, ignorePatterns: ignorePatterns)
             case .recentCreated:
@@ -371,14 +405,15 @@ class EditorViewModel: ObservableObject {
                 rawItems = allRaw.filter { self.pinnedPaths.contains($0.path) }
             }
             
-            // Aplicar filtro de sesión GLOBAL
+            // Aplicar filtro de sesión GLOBAL (usando capturedDeletedPaths del main thread)
             let allItems = rawItems.filter { item in
-                if currentDeletedPaths.contains(item.path) || 
-                   currentDeletedPaths.contains(where: { item.path.hasPrefix("\($0)/") }) { 
+                if capturedDeletedPaths.contains(item.path) || 
+                   capturedDeletedPaths.contains(where: { item.path.hasPrefix("\($0)/") }) { 
                     return false 
                 }
                 return true
             }
+
             
             var newFolders: [NoteRecord] = []
             var newNotes: [NoteRecord] = []
@@ -449,6 +484,85 @@ class EditorViewModel: ObservableObject {
             }
         }
     }
+
+    // MARK: - FileManager Overlay — Blacklists
+
+    /// Directorios de dependencias: se excluyen siempre aunque el toggle esté activo.
+    private static let ignoredDirNames: Set<String> = [
+        "node_modules", "venv", "venv311", ".venv", "env",
+        "site-packages", "__pycache__", ".git",
+        "vendor", "target", "build", "dist",
+        ".next", ".nuxt", "DerivedData", "Pods",
+        ".gradle", ".mvn", "bower_components", ".tox",
+        "coverage", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        ".sass-cache", ".parcel-cache", ".turbo"
+    ]
+
+    /// Extensiones binarias: ilegibles como texto, nunca mostrar.
+    private static let binaryExtBlacklist: Set<String> = [
+        "xlsx", "xls", "pdf",
+        "png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "tiff", "heic",
+        "mp4", "mov", "mp3", "wav", "avi", "mkv", "m4v", "m4a", "aac",
+        "pyc", "pyo", "o", "a", "dylib", "so", "class", "jar",
+        "parquet", "ibd", "rda", "wt", "archive", "backup",
+        "map", "lock", "zip", "tar", "gz", "bz2", "rar", "7z", "dmg", "pkg",
+        "db", "sqlite", "sqlite3",
+        "DS_Store", "sdi"
+    ]
+
+    /// Extensiones de seguridad: claves y certificados, nunca mostrar.
+    private static let securityExtBlacklist: Set<String> = [
+        "pem", "key", "p12", "pfx", "cer", "crt", "der", "p8"
+    ]
+
+    /// Overlay FileManager: agrega archivos no-.md al array de results.
+    /// Solo corre cuando showAllFiles == true.
+    private func appendFileSystemItems(to results: inout [NoteRecord], in dirPath: String) {
+        let existingPaths = Set(results.map { $0.path })
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: dirPath) else { return }
+
+        for item in items {
+            let isHidden = item.hasPrefix(".")
+
+            // Archivos ocultos: respetar toggle
+            if isHidden && !showHiddenFiles { continue }
+
+            // SEGURIDAD: .env* y archivos de credenciales — SIEMPRE excluidos
+            if item == ".env" || item.hasPrefix(".env.") { continue }
+            if item == "credentials.json" || item == "secrets.json" { continue }
+
+            let ext = (item as NSString).pathExtension.lowercased()
+
+            // Extensiones de seguridad — SIEMPRE excluidas
+            if EditorViewModel.securityExtBlacklist.contains(ext) { continue }
+
+            let fullPath = dirPath + "/" + item
+
+            // Ya gestionado por DuckDB (.md y carpetas ya indexadas)
+            if existingPaths.contains(fullPath) { continue }
+
+            // Determinar si es directorio
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: fullPath, isDirectory: &isDir)
+
+            if isDir.boolValue {
+                // Directorios de dependencias — siempre excluidos
+                if EditorViewModel.ignoredDirNames.contains(item) { continue }
+            } else {
+                // Extensiones binarias — siempre excluidas
+                if EditorViewModel.binaryExtBlacklist.contains(ext) { continue }
+            }
+
+            results.append(NoteRecord(
+                id: fullPath,
+                title: item,
+                path: fullPath,
+                content: "",
+                isDir: isDir.boolValue
+            ))
+        }
+    }
     
     func updateGridForCurrentPath() {
         // Obtenemos la lista plana base desde allFolders y allNotes (que ya están filtrados por la búsqueda)
@@ -473,29 +587,52 @@ class EditorViewModel: ObservableObject {
                 addSwiftTelemetryLog(log: "updateGrid: Nueva Nota NO ESTÁ en results")
             }
             print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
+
+            // FileManager overlay: agrega archivos no-.md cuando el toggle está activo
+            if showAllFiles && !normalizedCurrentPath.isEmpty {
+                appendFileSystemItems(to: &results, in: normalizedCurrentPath)
+            }
         }
         
         // Aplicar ordenamiento
         if self.explorationFilter == .all {
             switch sortOption {
-            case .name:
+            case .nameAsc, .nameDesc:
+                let desc = sortOption.isDescending
                 results.sort { a, b in
                     let aPinned = self.pinnedPaths.contains(a.path)
                     let bPinned = self.pinnedPaths.contains(b.path)
-                    if aPinned != bPinned {
-                        return aPinned
-                    }
-                    if a.isDir != b.isDir { return a.isDir } // Carpetas primero
-                    return a.title.lowercased() < b.title.lowercased()
+                    if aPinned != bPinned { return aPinned }
+                    if a.isDir != b.isDir { return a.isDir } // Carpetas siempre primero
+                    let cmp = a.title.lowercased() < b.title.lowercased()
+                    return desc ? !cmp : cmp
                 }
-            case .date:
-                break 
+            case .dateDesc:
+                // DuckDB ya retorna ORDER BY created_at DESC — solo garantizamos carpetas primero
+                results.sort { a, b in
+                    if a.isDir != b.isDir { return a.isDir }
+                    return false // mantener orden DB
+                }
+            case .dateAsc:
+                results.sort { a, b in
+                    if a.isDir != b.isDir { return a.isDir }
+                    return false
+                }
+                // Invertir solo notas (no carpetas) para orden ascendente
+                let folders = results.filter { $0.isDir }
+                let notes   = results.filter { !$0.isDir }.reversed()
+                results = folders + Array(notes)
             }
         }
         
         // Separar carpetas y notas para el layout táctico
         self.folders = results.filter { $0.isDir }
         self.notes = results.filter { !$0.isDir }
+    }
+
+    /// Colapsa todas las carpetas expandidas en el árbol del sidebar.
+    func collapseAll() {
+        expandedPaths.removeAll()
     }
     
     func navigateTo(path: String) {
@@ -683,18 +820,13 @@ class EditorViewModel: ObservableObject {
                 print("⚠️ Error al escribir contenido inicial: \(error)")
             }
 
-            // Insertar en DuckDB inmediatamente (retry + timeout, ~2s máx)
+            // Insertar en DuckDB inmediatamente
             let dbOk = upsertNoteItem(path: fullPath, title: fileName, content: initialContent, isDir: false)
             addSwiftTelemetryLog(log: "createNewNote: upsertNoteItem para \(fullPath) retornó \(dbOk)")
             print("DEBUG createNewNote: path = \(fullPath), upsertOk = \(dbOk)")
             UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
 
-            // syncAll: refreshNotes background lee desde DuckDB (debe tener la nota si upsertOk)
-            addSwiftTelemetryLog(log: "createNewNote: Ejecutando syncAll")
-            syncAll(locations: locations)
-
-            // PATCH MANUAL INMEDIATO: garantiza que la nota sea visible aunque upsert haya fallado
-            // syncAll luego sobrescribe arrays con datos reales de DB.
+            // PATCH MANUAL INMEDIATO: la nota aparece en la UI al instante.
             let tempNote = NoteRecord(id: fullPath, title: fileName, path: fullPath, content: "", isDir: false)
             self.allNotes.append(tempNote)
             self.childrenByParent[targetPath, default: []].append(tempNote)
@@ -710,6 +842,49 @@ class EditorViewModel: ObservableObject {
             selectItem(tempNote)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.beginRename(for: tempNote)
+            }
+
+            let capturedTargetPath = targetPath
+            let capturedLocations = locations
+            let capturedFullPath = fullPath
+            let capturedTitle = fileName
+
+            // Refresh diferido: mismo patrón que saveActiveTab (que sí funciona).
+            // 400ms: suficiente para que upsertNoteItem libere DB_QUERY_MUTEX.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self else { return }
+                addSwiftTelemetryLog(log: "createNewNote: refreshNotes post-mutex para \(capturedFullPath)")
+                self.refreshNotes(locations: capturedLocations)
+            }
+
+            // Second-chance con re-inyección garantizada:
+            // Si el refresh de 400ms no incluyó la nota (iCloud lento), la re-inyectamos.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                guard let self = self else { return }
+                self.refreshNotes(locations: capturedLocations)
+                // Re-inyectar PATCH si la nota no apareció en el mapa tras el refresh
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self = self else { return }
+                    let notaEnMapa = self.childrenByParent[capturedTargetPath]?.contains { $0.path == capturedFullPath } ?? false
+                    if !notaEnMapa {
+                        addSwiftTelemetryLog(log: "createNewNote: Re-inyectando PATCH (nota no en mapa tras refresh)")
+                        let reNote = NoteRecord(id: capturedFullPath, title: capturedTitle, path: capturedFullPath, content: "", isDir: false)
+                        if !self.allNotes.contains(where: { $0.path == capturedFullPath }) {
+                            self.allNotes.append(reNote)
+                        }
+                        if !(self.childrenByParent[capturedTargetPath]?.contains { $0.path == capturedFullPath } ?? false) {
+                            self.childrenByParent[capturedTargetPath, default: []].append(reNote)
+                        }
+                        if self.currentPath == capturedTargetPath {
+                            self.updateGridForCurrentPath()
+                        }
+                    } else {
+                        addSwiftTelemetryLog(log: "createNewNote: Nota confirmada en mapa ✔️")
+                        if self.currentPath == capturedTargetPath {
+                            self.updateGridForCurrentPath()
+                        }
+                    }
+                }
             }
         } else {
             addSwiftTelemetryLog(log: "createNewNote: createItem FAYO para \(fullPath)")
@@ -737,13 +912,12 @@ class EditorViewModel: ObservableObject {
         let fullPath = URL(fileURLWithPath: targetPath).appendingPathComponent(folderName).path
         
         if createItem(path: fullPath, isDir: true) {
-            // Insertar en DuckDB inmediatamente (retry + timeout)
+            // Insertar en DuckDB inmediatamente
             let dbOk = upsertNoteItem(path: fullPath, title: folderName, content: "", isDir: true)
+            addSwiftTelemetryLog(log: "createNewFolder: upsertNoteItem para \(fullPath) retornó \(dbOk)")
             print("DEBUG createNewFolder: path = \(fullPath), upsertOk = \(dbOk)")
 
-            syncAll(locations: locations)
-
-            // Safety net: parche manual inmediato
+            // PATCH MANUAL INMEDIATO: la carpeta aparece en la UI al instante.
             let tempFolder = NoteRecord(id: fullPath, title: folderName, path: fullPath, content: "", isDir: true)
             self.allFolders.append(tempFolder)
             self.childrenByParent[targetPath, default: []].append(tempFolder)
@@ -757,9 +931,45 @@ class EditorViewModel: ObservableObject {
             selectItem(tempFolder)
             self.expandedPaths.insert(targetPath)
             self.expandedPaths.insert(fullPath)
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.beginRename(for: tempFolder)
+            }
+
+            let capturedTargetPath = targetPath
+            let capturedFullPath = fullPath
+            let capturedFolderName = folderName
+            let capturedLocations = locations
+
+            // Refresh diferido igual que saveActiveTab.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self else { return }
+                addSwiftTelemetryLog(log: "createNewFolder: refreshNotes post-mutex para \(capturedFullPath)")
+                self.refreshNotes(locations: capturedLocations)
+            }
+
+            // Second-chance con re-inyección garantizada.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                guard let self = self else { return }
+                self.refreshNotes(locations: capturedLocations)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self = self else { return }
+                    let enMapa = self.childrenByParent[capturedTargetPath]?.contains { $0.path == capturedFullPath } ?? false
+                    if !enMapa {
+                        let reFolder = NoteRecord(id: capturedFullPath, title: capturedFolderName, path: capturedFullPath, content: "", isDir: true)
+                        if !self.allFolders.contains(where: { $0.path == capturedFullPath }) {
+                            self.allFolders.append(reFolder)
+                        }
+                        if !(self.childrenByParent[capturedTargetPath]?.contains { $0.path == capturedFullPath } ?? false) {
+                            self.childrenByParent[capturedTargetPath, default: []].append(reFolder)
+                        }
+                        self.expandedPaths.insert(capturedTargetPath)
+                        self.expandedPaths.insert(capturedFullPath)
+                    }
+                    if self.currentPath == capturedTargetPath {
+                        self.updateGridForCurrentPath()
+                    }
+                }
             }
         }
     }
