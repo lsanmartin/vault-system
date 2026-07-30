@@ -3,6 +3,8 @@ use serde_json::json;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+fn default_true() -> bool { true }
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct McpTokenRecord {
     pub token_id: String,
@@ -20,6 +22,8 @@ pub struct McpTokenRecord {
     pub allow_telemetry_human: bool,
     #[serde(default)]
     pub allow_telemetry_agent: bool,
+    #[serde(default = "default_true")]
+    pub allow_raw: bool,
 }
 
 #[derive(Deserialize)]

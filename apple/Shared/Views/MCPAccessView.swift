@@ -3,10 +3,11 @@ import SwiftUI
 struct MCPAccessView: View {
     @State private var selectedTab: Int = 0
     @State private var tokens: [McpTokenRecord] = []
+    @ObservedObject var brain = LocalBrain.shared
     
     var body: some View {
         VStack(spacing: 20) {
-            Text("Vault Config / Administrador MCP")
+            Text("Vault System — Configuración de Inteligencia")
                 .font(.title2)
                 .bold()
                 .padding(.top, 24)
@@ -14,9 +15,10 @@ struct MCPAccessView: View {
             Picker("", selection: $selectedTab) {
                 Text("Nuevo Acceso").tag(0)
                 Text("Accesos Activos").tag(1)
+                Text("Cerebro Local").tag(2)
             }
             .pickerStyle(.segmented)
-            .frame(width: 350)
+            .frame(width: 450)
             .padding(.bottom, 8)
             
             if selectedTab == 0 {
@@ -25,8 +27,11 @@ struct MCPAccessView: View {
                     selectedTab = 1
                 })
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
+            } else if selectedTab == 1 {
                 TokenListView(tokens: $tokens)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                LocalBrainConfigView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -290,6 +295,108 @@ struct PermissionBadge: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
+    }
+}
+
+/// Vista de control y descarga del Cerebro Local Gemma
+struct LocalBrainConfigView: View {
+    @ObservedObject var brain = LocalBrain.shared
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Cerebro Local (Gemma 4)")
+                    .font(.headline)
+                Text("Inferencia y procesamiento on-device 100% nativo sobre Metal/GPU, sin conexión a servidores externos para máxima privacidad.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.bottom, 10)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Modelo Configurado:")
+                        .bold()
+                    Spacer()
+                    Text("mlx-community/gemma-4-12B-it-4bit")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                }
+                
+                HStack {
+                    Text("Tamaño del Modelo:")
+                        .bold()
+                    Spacer()
+                    Text("7.7 GB (Quantized 4-bit)")
+                        .foregroundColor(.secondary)
+                }
+                
+                HStack {
+                    Text("Estado de Carga:")
+                        .bold()
+                    Spacer()
+                    if brain.isDownloading {
+                        Text("Descargando pesos...")
+                            .foregroundColor(.orange)
+                            .bold()
+                    } else if brain.downloadProgress == 1.0 {
+                        Text("Listo en Caché ✔️")
+                            .foregroundColor(.green)
+                            .bold()
+                    } else {
+                        Text("No Inicializado / Pendiente")
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(16)
+            .background(Color.secondary.opacity(0.05))
+            .cornerRadius(8)
+            
+            if brain.isDownloading {
+                VStack(spacing: 8) {
+                    ProgressView(value: brain.downloadProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+                    
+                    HStack {
+                        Text("Descargando de Hugging Face...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(String(format: "%.1f%%", brain.downloadProgress * 100))
+                            .font(.caption)
+                            .bold()
+                            .foregroundColor(.accentColor)
+                    }
+                    
+                    Button(action: {
+                        brain.cancelDownload()
+                    }) {
+                        Label("Cancelar Descarga", systemImage: "xmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .foregroundColor(.red)
+                    .controlSize(.regular)
+                    .padding(.top, 6)
+                }
+                .padding(.vertical, 10)
+            } else {
+                Button(action: {
+                    brain.preloadModel()
+                }) {
+                    Label(brain.downloadProgress == 1.0 ? "Re-descargar / Forzar Carga" : "Descargar e Inicializar Modelo Local", systemImage: "arrow.down.circle.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+            
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
     }
 }
 

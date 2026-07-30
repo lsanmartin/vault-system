@@ -85,6 +85,8 @@ xcode-build:
 		-configuration Release \
 		-archivePath $(ARCHIVE_PATH) \
 		-arch arm64 \
+		-skipPackagePluginValidation \
+		-skipMacroValidation \
 		archive \
 		ONLY_ACTIVE_ARCH=YES \
 		CODE_SIGN_IDENTITY="-" \

@@ -89,6 +89,23 @@ pub fn get_db_connection() -> Option<DbConnectionGuard> {
 
 static LAST_SYNC_TS: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(0));
 
+#[uniffi::export(callback_interface)]
+pub trait UiActionListener: Send + Sync {
+    fn create_note(&self, title: String, content: String);
+    fn open_note(&self, path: String);
+    fn set_editor_mode(&self, mode: String);
+}
+
+static UI_LISTENER: Lazy<Mutex<Option<Box<dyn UiActionListener>>>> = Lazy::new(|| Mutex::new(None));
+
+#[uniffi::export]
+pub fn register_ui_listener(listener: Box<dyn UiActionListener>) {
+    if let Ok(mut guard) = UI_LISTENER.lock() {
+        *guard = Some(listener);
+    }
+}
+
+
 // --- COLA DE TELEMETRÍA ---
 static TELEMETRY_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SCAN_PROGRESS: Lazy<Mutex<std::collections::HashMap<String, f32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -490,7 +507,8 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             continue;
         }
 
-        if file_path.is_dir() || (file_path.is_file() && file_path.extension().and_then(|s| s.to_str()) == Some("md")) {
+        let ext = file_path.extension().and_then(|s| s.to_str());
+        if file_path.is_dir() || (file_path.is_file() && (ext == Some("md") || (ext == Some("log") && !full_path_str.ends_with("telemetria.log")))) {
             entries.push(entry);
         }
     }
@@ -712,7 +730,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                             "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
                             duckdb::params![&p, title, &p, ""],
                         );
-                    } else if p.ends_with(".md") {
+                    } else if p.ends_with(".md") || p.ends_with(".log") {
                         let content = std::fs::read_to_string(&p).unwrap_or_default();
                         let title = std::path::Path::new(&p).file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
                         let emb = generate_embedding(&content);
@@ -1392,8 +1410,9 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                             "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
                             duckdb::params![canonical, title, canonical, ""],
                         );
-                    } else if canonical.ends_with(".md") && !ign.iter().any(|p| canonical.contains(p)) {
-                        if canonical.contains("/.") { continue; } // hidden path
+                    } else if (canonical.ends_with(".md") || canonical.ends_with(".log")) && !ign.iter().any(|p| canonical.contains(p)) {
+                        if canonical.contains("/.") && !canonical.contains("/.vault_system") { continue; } // hidden path
+                        if canonical.ends_with("telemetria.log") { continue; } // evitar bucle infinito de logs
                         let content = std::fs::read_to_string(&canonical).unwrap_or_default();
                         
                         let title = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
@@ -1429,7 +1448,7 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                     if !filter_data_event(&event.kind) { continue; }
                     for path in event.paths {
                         let p = path.to_string_lossy().to_string();
-                        if p.contains("/.") { continue; } // oculto
+                        if p.contains("/.") && !p.contains("/.vault_system") { continue; } // oculto
                         pending.insert(p, path.is_dir());
                     }
                 }
@@ -1444,7 +1463,7 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                         if !filter_data_event(&ev.kind) { continue; }
                         for path in ev.paths {
                             let p = path.to_string_lossy().to_string();
-                            if p.contains("/.") { continue; }
+                            if p.contains("/.") && !p.contains("/.vault_system") { continue; }
                             pending.insert(p, path.is_dir());
                         }
                     }
@@ -1477,99 +1496,84 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
 
 #[uniffi::export]
 pub fn start_cognitive_daemon() -> String {
-    thread::spawn(move || {
-        // Backoff adaptativo: 60s si no hay trabajo, 10s si hay
-        let mut backoff = Duration::from_secs(60);
-
-        loop {
-            thread::sleep(backoff);
-
-            // Usar get_db_connection() (con DB_QUERY_MUTEX) en vez de lockear DB_CONN directo
-            let mut pending_notes = Vec::new();
-
-            if let Some(conn) = get_db_connection() {
-                // Buscar notas que no están en semantic_summaries
-                let query = "
-                    SELECT id, title, content
-                    FROM notes
-                    WHERE is_dir = false
-                      AND id NOT IN (SELECT note_id FROM semantic_summaries)
-                    LIMIT 50
-                ";
-
-                let mut stmt = match conn.prepare(query) {
-                    Ok(s) => s,
-                    Err(_) => { backoff = Duration::from_secs(60); continue; }
-                };
-
-                let note_iter = match stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                }) {
-                    Ok(i) => i,
-                    Err(_) => { backoff = Duration::from_secs(60); continue; }
-                };
-
-                for note in note_iter {
-                    if let Ok(n) = note {
-                        pending_notes.push(n);
-                    }
-                }
-            }
-
-            if pending_notes.is_empty() {
-                backoff = Duration::from_secs(60); // sin trabajo → esperar 1 minuto
-                continue;
-            }
-
-            backoff = Duration::from_secs(10); // hay trabajo → cada 10s
-
-            // Procesamiento: Mock cognitivo (IA Local se integrará en Fase 2)
-            let mut processed = Vec::new();
-            for (id, title, content) in pending_notes {
-                let mut snippet = content.chars().take(150).collect::<String>();
-                if content.len() > 150 { snippet.push_str("..."); }
-
-                let synthetic_summary = format!("SÍNTESIS DE [{}]: {}", title, snippet);
-
-                let extracted_entities: Vec<String> = content.split_whitespace()
-                    .filter(|w| w.len() > 6 && w.chars().next().unwrap_or('a').is_uppercase())
-                    .map(|w| w.to_string())
-                    .collect();
-
-                let density = (extracted_entities.len() as f32 / (content.split_whitespace().count().max(1) as f32)) * 100.0;
-
-                processed.push((id, synthetic_summary, extracted_entities, density));
-            }
-
-            // Insertar resultados via get_db_connection()
-            if let Some(conn) = get_db_connection() {
-                for (id, summary, entities, density) in processed {
-                    let sql_array = vector_to_sql_array_str(&entities);
-                    let sql = format!(
-                        "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density)
-                         VALUES (?, ?, {}, now(), ?)",
-                        sql_array
-                    );
-                    let _ = conn.execute(&sql, params![id, summary, density]);
-
-                    for entity in entities {
-                        let _ = conn.execute(
-                            "INSERT INTO entity_graphs (entity_name, note_id, relation_type, discovered_at)
-                             VALUES (?, ?, 'MENTIONS', now())",
-                            params![entity, id]
-                        );
-                    }
-                }
-            }
-        }
-    });
-
-    "Cognitive Daemon iniciado (backoff adaptativo: 10s-60s)".to_string()
+    // Daemon pasivo: Swift gestiona la generación con mlx-swift local.
+    "Cognitive Daemon iniciado de forma pasiva (Swift controla la inferencia local)".to_string()
 }
+
+#[derive(uniffi::Record)]
+pub struct PendingSummaryNote {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+}
+
+#[uniffi::export]
+pub fn get_pending_summary_notes(limit: u32) -> Vec<PendingSummaryNote> {
+    let conn = match get_db_connection() {
+        Some(c) => c,
+        None => return vec![],
+    };
+    let query = "
+        SELECT id, title, content
+        FROM notes
+        WHERE is_dir = false
+          AND id NOT IN (SELECT note_id FROM semantic_summaries)
+        LIMIT ?
+    ";
+    let mut stmt = match conn.prepare(query) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let note_iter = match stmt.query_map(params![limit], |row| {
+        Ok(PendingSummaryNote {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            content: row.get(2)?,
+        })
+    }) {
+        Ok(i) => i,
+        Err(_) => return vec![],
+    };
+    note_iter.flatten().collect()
+}
+
+#[uniffi::export]
+pub fn save_note_summary(
+    note_id: String,
+    synthetic_summary: String,
+    entities: Vec<String>,
+    density: f32,
+) -> bool {
+    let conn = match get_db_connection() {
+        Some(c) => c,
+        None => return false,
+    };
+    // 1. Eliminar previos para evitar duplicaciones
+    let _ = conn.execute("DELETE FROM semantic_summaries WHERE note_id = ?", params![note_id]);
+    let _ = conn.execute("DELETE FROM entity_graphs WHERE note_id = ?", params![note_id]);
+
+    // 2. Insertar resumen sintético real
+    let sql_array = vector_to_sql_array_str(&entities);
+    let sql = format!(
+        "INSERT INTO semantic_summaries (note_id, synthetic_summary, extracted_entities, cognitive_timestamp, semantic_density)
+         VALUES (?, ?, {}, now(), ?)",
+        sql_array
+    );
+    if conn.execute(&sql, params![note_id, synthetic_summary, density]).is_err() {
+        return false;
+    }
+
+    // 3. Insertar entidades en entity_graphs
+    for entity in entities {
+        let _ = conn.execute(
+            "INSERT INTO entity_graphs (entity_name, note_id, relation_type, discovered_at)
+             VALUES (?, ?, 'MENTIONS', now())",
+            params![entity, note_id]
+        );
+    }
+    true
+}
+
 
 fn vector_to_sql_array_str(vec: &[String]) -> String {
     if vec.is_empty() {
@@ -1909,6 +1913,29 @@ pub fn get_workspace_activity(workspace_path: String, days_back: u32) -> Vec<Not
 // Las consultas MCP actúan SOLAMENTE sobre los metadatos sintéticos, NUNCA sobre la tabla notes.
 // ------------------------------------------------------------------------------------------------
 
+fn get_synthetic_summary_by_id(id: &str) -> String {
+    let conn_guard = match DB_CONN.lock() {
+        Ok(g) => g,
+        Err(_) => return "[Resumen semántico no disponible - DB Bloqueada]".to_string(),
+    };
+    if let Some(conn) = conn_guard.as_ref() {
+        let mut stmt = match conn.prepare("SELECT synthetic_summary FROM semantic_summaries WHERE note_id = ? LIMIT 1") {
+            Ok(s) => s,
+            Err(_) => return "[Resumen semántico no disponible - Error Query]".to_string(),
+        };
+        let mut rows = match stmt.query(duckdb::params![id]) {
+            Ok(r) => r,
+            Err(_) => return "[Resumen semántico no disponible - Error Ejecución]".to_string(),
+        };
+        if let Ok(Some(row)) = rows.next() {
+            if let Ok(sum) = row.get::<_, String>(0) {
+                return sum;
+            }
+        }
+    }
+    "[Resumen semántico no disponible]".to_string()
+}
+
 #[uniffi::export]
 pub fn mcp_handle_request(json_request: String) -> String {
     let req: Value = match serde_json::from_str(&json_request) {
@@ -2077,6 +2104,40 @@ pub fn mcp_handle_request(json_request: String) -> String {
                                 "since_seconds": { "type": "integer", "description": "Filtrar por registros actualizados desde este timestamp epoch en segundos (por defecto 0)." }
                             }
                         }
+                    },
+                    {
+                        "name": "vault_ui_create_note",
+                        "description": "Crea una nueva nota en el sistema y la abre inmediatamente en el editor en modo de edicion.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Titulo de la nota a crear." },
+                                "content": { "type": "string", "description": "Contenido inicial de la nota en markdown." }
+                            },
+                            "required": ["title", "content"]
+                        }
+                    },
+                    {
+                        "name": "vault_ui_open_note",
+                        "description": "Abre una nota existente del Vault en la pantalla del usuario dentro de la aplicacion.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta absoluta de la nota a abrir." }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "vault_ui_set_editor_mode",
+                        "description": "Cambia el modo de visualizacion del editor en pantalla (ej. 'edit', 'preview').",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "mode": { "type": "string", "description": "El modo del editor: 'edit' o 'preview'." }
+                            },
+                            "required": ["mode"]
+                        }
                     }
                 ]
             });
@@ -2144,6 +2205,7 @@ pub fn mcp_handle_request(json_request: String) -> String {
             };
 
             let can_write = token_record.as_ref().map(|r| r.can_write).unwrap_or(false);
+            let allow_raw = token_record.as_ref().map(|r| r.allow_raw).unwrap_or(true);
 
             crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
 
@@ -2182,11 +2244,14 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         "No se encontraron resultados.".to_string()
                     } else {
                         results.into_iter().map(|r| {
-                            // Cargar content desde disco si la query retorna vacío (optimización listados)
-                            let display_content = if r.content.is_empty() && !r.is_dir {
-                                std::fs::read_to_string(&r.path).unwrap_or_default()
+                            let display_content = if allow_raw {
+                                if r.content.is_empty() && !r.is_dir {
+                                    std::fs::read_to_string(&r.path).unwrap_or_default()
+                                } else {
+                                    r.content.clone()
+                                }
                             } else {
-                                r.content.clone()
+                                get_synthetic_summary_by_id(&r.id)
                             };
                             format!("Ruta: {}\nTipo: {}\nTítulo: {}\nContenido:\n{}\n---",
                                 r.path, if r.is_dir { "Carpeta" } else { "Archivo" }, r.title, display_content)
@@ -2194,17 +2259,36 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     }
                 },
                 "vault_read" => {
-                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                    if let Ok(canon_path) = std::fs::canonicalize(path) {
-                        if !is_path_allowed(&canon_path.to_string_lossy(), &token_record) {
-                            "Error de Seguridad: Acceso denegado. El enlace simbólico apunta fuera del workspace.".to_string()
-                        } else if let Ok(meta) = std::fs::metadata(&canon_path) {
+                    if !allow_raw {
+                        "Error de Seguridad: Acceso restringido. Ceguera de datos activa para este token. Usa metadatos sintéticos.".to_string()
+                    } else {
+                        let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                        if let Ok(canon_path) = std::fs::canonicalize(path) {
+                            if !is_path_allowed(&canon_path.to_string_lossy(), &token_record) {
+                                "Error de Seguridad: Acceso denegado. El enlace simbólico apunta fuera del workspace.".to_string()
+                            } else if let Ok(meta) = std::fs::metadata(&canon_path) {
+                                if !meta.is_file() {
+                                    "Error de Seguridad: Solo se permiten archivos regulares (no FIFOs, directorios ni dispositivos especiales).".to_string()
+                                } else if meta.len() > 5 * 1024 * 1024 {
+                                    "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
+                                } else {
+                                    match std::fs::read_to_string(&canon_path) {
+                                        Ok(content) => content,
+                                        Err(e) => format!("Error al leer el archivo {}: {}", path, e)
+                                    }
+                                }
+                            } else {
+                                "Error al leer metadatos del archivo.".to_string()
+                            }
+                        } else if !is_path_allowed(path, &token_record) {
+                            "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
+                        } else if let Ok(meta) = std::fs::metadata(path) {
                             if !meta.is_file() {
                                 "Error de Seguridad: Solo se permiten archivos regulares (no FIFOs, directorios ni dispositivos especiales).".to_string()
                             } else if meta.len() > 5 * 1024 * 1024 {
                                 "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
                             } else {
-                                match std::fs::read_to_string(&canon_path) {
+                                match std::fs::read_to_string(path) {
                                     Ok(content) => content,
                                     Err(e) => format!("Error al leer el archivo {}: {}", path, e)
                                 }
@@ -2212,21 +2296,6 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         } else {
                             "Error al leer metadatos del archivo.".to_string()
                         }
-                    } else if !is_path_allowed(path, &token_record) {
-                        "Error de Seguridad: Acceso denegado a esta ruta. El directorio no pertenece a un workspace permitido.".to_string()
-                    } else if let Ok(meta) = std::fs::metadata(path) {
-                        if !meta.is_file() {
-                            "Error de Seguridad: Solo se permiten archivos regulares (no FIFOs, directorios ni dispositivos especiales).".to_string()
-                        } else if meta.len() > 5 * 1024 * 1024 {
-                            "Error de Seguridad: El archivo es demasiado grande (>5MB) para leerse por IPC.".to_string()
-                        } else {
-                            match std::fs::read_to_string(path) {
-                                Ok(content) => content,
-                                Err(e) => format!("Error al leer el archivo {}: {}", path, e)
-                            }
-                        }
-                    } else {
-                        "Error al leer metadatos del archivo.".to_string()
                     }
                 },
                 "vault_write" => {
@@ -2372,6 +2441,46 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         "Error: Base de datos no inicializada.".to_string()
                     }
                 },
+                "vault_ui_create_note" => {
+                    let title = arguments.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                    let content = arguments.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.create_note(title.to_string(), content.to_string());
+                            "Comando de UI de creacion de nota enviado con exito.".to_string()
+                        } else {
+                            "Error: No hay una instancia de la aplicacion macOS escuchando eventos de interfaz.".to_string()
+                        }
+                    } else {
+                        "Error al adquirir bloqueo del listener de interfaz.".to_string()
+                    }
+                },
+                "vault_ui_open_note" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.open_note(path.to_string());
+                            "Comando de UI de apertura de nota enviado con exito.".to_string()
+                        } else {
+                            "Error: No hay una instancia de la aplicacion macOS escuchando eventos de interfaz.".to_string()
+                        }
+                    } else {
+                        "Error al adquirir bloqueo del listener de interfaz.".to_string()
+                    }
+                },
+                "vault_ui_set_editor_mode" => {
+                    let mode = arguments.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.set_editor_mode(mode.to_string());
+                            "Comando de UI de cambio de modo enviado con exito.".to_string()
+                        } else {
+                            "Error: No hay una instancia de la aplicacion macOS escuchando eventos de interfaz.".to_string()
+                        }
+                    } else {
+                        "Error al adquirir bloqueo del listener de interfaz.".to_string()
+                    }
+                },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
             };
 
@@ -2451,7 +2560,9 @@ pub fn start_ipc_server() -> String {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(uniffi::Record, Serialize, Deserialize, Clone)]
+fn default_true() -> bool { true }
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, uniffi::Record)]
 pub struct McpTokenRecord {
     pub token_id: String,
     pub client_name: String,
@@ -2459,6 +2570,8 @@ pub struct McpTokenRecord {
     pub can_write: bool,
     pub allow_metadata: bool,
     pub allow_system: bool,
+    #[serde(default = "default_true")]
+    pub allow_raw: bool,
 }
 
 static MCP_TOKENS: Lazy<Mutex<Vec<McpTokenRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -2502,6 +2615,7 @@ pub fn create_mcp_token(client_name: String, workspaces: Vec<String>, can_write:
         can_write,
         allow_metadata,
         allow_system,
+        allow_raw: true,
     };
     
     if let Ok(mut guard) = MCP_TOKENS.lock() {

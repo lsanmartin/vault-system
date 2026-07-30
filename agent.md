@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-07-22 12:45]
+Última actualización: [2026-07-29 20:23]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,13 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-07-29 20:23] Integración de Inferencia de Cerebro Local en Swift/MLX**:
+    - **Rust Core**: Desactivado el mock de resúmenes del daemon cognitivo interno en `core/src/lib.rs`.
+    - **FFI**: Expuestas funciones FFI `get_pending_summary_notes` y `save_note_summary` vía UniFFI para que Swift controle la inserción de resúmenes reales en DuckDB.
+    - **Swift UI App**: Implementada la clase `LocalBrain.swift` para orquestar la generación de resúmenes semánticos y extracción de entidades.
+    - **VaultApp.swift**: Integrado el arranque asíncrono y la actualización del conteo del cerebro local.
+    - **XcodeGen**: Corregido bug de parsing `path` en `apple/project.yml` al añadir `path: Info.plist`.
+    - **Compilación**: `make install` OK. `ARCHIVE SUCCEEDED` y app instalada en `/Applications/VaultSystem.app`.
   - **[2026-07-27 18:44] Fix Definitivo Ghost Notes — iCloud Race Condition (v2)**:
     - **Root cause**: `process_batch` ejecutaba `DELETE FROM notes` cuando `path_obj.exists()` era `false` durante sync transitorio de iCloud. Borraba el registro que `upsert_note_item` acababa de insertar. Swift polling detectaba `update_sync_ts()` → `refreshNotes` leía DB ya sin la nota → ghost note.
     - **Fix #1 — process_batch iCloud guard** (`core/src/lib.rs`): Reintento 3×500ms → 5×600ms (3s). Si path ausente en disco, es iCloud, Y existe en DuckDB → **SKIP DELETE**. Loguea `SKIP DELETE — sync en progreso`.

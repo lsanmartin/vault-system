@@ -309,6 +309,7 @@ class EditorViewModel: ObservableObject {
             updateAppAppearance()
         }
         
+        setupUiCommandSubscriptions()
         startPolling()
     }
     
@@ -1174,6 +1175,71 @@ class EditorViewModel: ObservableObject {
             _ = saveNote(path: tabId, content: newContent)
             tabs[tabIndex].lastSavedAt = Date()
             Telemetry.shared.log("Editor", eventType: "ToggleCheckbox", message: "Checkbox \(index) alternado en \(tabs[tabIndex].title)")
+        }
+    }
+    
+    // --- INTEGRACIÓN DE CONTROL DE INTERFAZ FFI / MCP ---
+    private func setupUiCommandSubscriptions() {
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("UiCreateNote"), object: nil, queue: .main) { [weak self] notif in
+            guard let userInfo = notif.userInfo,
+                  let title = userInfo["title"] as? String,
+                  let content = userInfo["content"] as? String else { return }
+            self?.createNoteFromUiCommand(title: title, content: content)
+        }
+        
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("UiOpenNote"), object: nil, queue: .main) { [weak self] notif in
+            guard let userInfo = notif.userInfo,
+                  let path = userInfo["path"] as? String else { return }
+            self?.openNoteFromURL(URL(fileURLWithPath: path))
+        }
+        
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("UiSetEditorMode"), object: nil, queue: .main) { [weak self] notif in
+            guard let userInfo = notif.userInfo,
+                  let mode = userInfo["mode"] as? String else { return }
+            guard let activeId = self?.activeTabId,
+                  let index = self?.tabs.firstIndex(where: { $0.id == activeId }) else { return }
+            
+            let renderMode: RenderMode = (mode.lowercased() == "edit" || mode.lowercased() == "md") ? .md : .universal
+            self?.tabs[index].renderMode = renderMode
+            UserDefaults.standard.set(renderMode.rawValue, forKey: "render_mode_\(activeId)")
+        }
+    }
+    
+    func createNoteFromUiCommand(title: String, content: String) {
+        // Carpeta destino: systemLocation, primer workspace, o temporal.
+        let targetDir: String
+        if let sys = WorkspaceManager.shared.systemLocation {
+            targetDir = sys.path
+        } else if let loc = WorkspaceManager.shared.locations.first {
+            targetDir = loc.path
+        } else {
+            targetDir = NSTemporaryDirectory()
+        }
+        
+        let sanitizedTitle = title.hasSuffix(".md") ? title : "\(title).md"
+        let fullPath = URL(fileURLWithPath: targetDir).appendingPathComponent(sanitizedTitle).path
+        
+        if createItem(path: fullPath, isDir: false) {
+            do {
+                try content.write(to: URL(fileURLWithPath: fullPath), atomically: true, encoding: .utf8)
+            } catch {
+                print("⚠️ Error al escribir contenido inicial del comando UI: \(error)")
+            }
+            
+            // Insertar en DuckDB
+            _ = upsertNoteItem(path: fullPath, title: sanitizedTitle, content: content, isDir: false)
+            
+            // Abrir la nota
+            let note = NoteRecord(id: fullPath, title: sanitizedTitle, path: fullPath, content: content, isDir: false)
+            openNote(note)
+            
+            // Activar modo edición
+            UserDefaults.standard.set(RenderMode.md.rawValue, forKey: "render_mode_\(fullPath)")
+            if let index = tabs.firstIndex(where: { $0.id == fullPath }) {
+                tabs[index].renderMode = .md
+            }
+            
+            updateGridForCurrentPath()
         }
     }
 }

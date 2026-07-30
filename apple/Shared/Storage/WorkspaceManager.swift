@@ -26,6 +26,7 @@ struct VaultLocation: Identifiable, Codable {
 /// Administrador central del espacio de trabajo.
 /// Gestiona los permisos de acceso seguro (Security-Scoped Bookmarks) requeridos por el App Sandbox de macOS.
 class WorkspaceManager: ObservableObject {
+    public static let shared = WorkspaceManager()
     @Published var locations: [VaultLocation] = []
     @Published var systemLocation: VaultLocation?
     @Published var isAuthorized: Bool = false
@@ -83,6 +84,7 @@ class WorkspaceManager: ObservableObject {
                 path: systemVaultURL.path
             )
             initGitRepo(workspacePath: systemVaultURL.path)
+            triggerScan(for: systemVaultURL.path)
     }
     
     /// Presenta el panel nativo de macOS para que el usuario seleccione carpetas adicionales.

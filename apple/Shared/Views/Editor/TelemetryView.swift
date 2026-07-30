@@ -10,7 +10,7 @@ struct TelemetryView: View {
             HStack {
                 Image(systemName: "terminal.fill")
                     .foregroundColor(.green)
-                Text("MCP Telemetry Console")
+                Text("Console")
                     .font(.headline)
                     .foregroundColor(.white)
                 Spacer()

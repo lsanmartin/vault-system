@@ -176,12 +176,51 @@ struct SidebarColumn: View {
             }) {
                 if let sysLoc = workspaceManager.systemLocation {
                     NavigationLink(value: sysLoc.id) {
-                        Label(sysLoc.name, systemImage: "gearshape.fill")
-                            .foregroundColor(.orange)
-                            .simultaneousGesture(TapGesture().onEnded {
-                                viewModel.selectedLocationId = sysLoc.id
-                                viewModel.resetToWorkspaceRoot(locations: workspaceManager.allLocations)
-                            })
+                        HStack {
+                            Label(sysLoc.name, systemImage: "gearshape.fill")
+                                .foregroundColor(.orange)
+                            
+                            Spacer()
+                            
+                            if let progress = workspaceManager.scanProgress[sysLoc.path] {
+                                Text("\(Int(progress))%")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(viewModel.macSecondaryText)
+                                    .frame(width: 24, alignment: .trailing)
+                                
+                                Button(action: { workspaceManager.abortScan(for: sysLoc.path) }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 4)
+                                .help("Cancelar escaneo de sistema")
+                            } else {
+                                Button(action: { workspaceManager.triggerScan(for: sysLoc.path) }) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.trailing, 4)
+                                .help("Re-indexar contexto de sistema")
+                            }
+                            
+                            Button(action: {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: sysLoc.path))
+                            }) {
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Abrir carpeta de sistema en Finder")
+                        }
+                        .simultaneousGesture(TapGesture().onEnded {
+                            viewModel.selectedLocationId = sysLoc.id
+                            viewModel.resetToWorkspaceRoot(locations: workspaceManager.allLocations)
+                        })
                     }
                 }
                 ForEach(workspaceManager.locations) { location in
@@ -895,6 +934,7 @@ struct MainEditorView: View {
     @State private var isNoteHidden = false
     @State private var isSidebarHidden = false
     @State private var showScratchpad = false
+    @State private var showChat = false
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -912,6 +952,12 @@ struct MainEditorView: View {
                         DetailColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
                             .frame(minWidth: 300, maxWidth: .infinity)
                             .layoutPriority(1)
+                        
+                        if showChat {
+                            LocalChatView(viewModel: viewModel)
+                                .frame(minWidth: 260, maxWidth: 350)
+                                .transition(.move(edge: .trailing))
+                        }
                     }
                 }
                 .toolbar {
@@ -954,25 +1000,42 @@ struct MainEditorView: View {
                 }
             }
             
-            // Botón flotante para abrir telemetría
-            if !showTelemetry {
-                VStack {
+            // Botones flotantes de utilidad
+            VStack {
+                Spacer()
+                HStack {
                     Spacer()
-                    HStack {
-                        Spacer()
+                    VStack(spacing: 12) {
+                        // Botón de Chat Local
                         Button {
-                            withAnimation { showTelemetry = true }
+                            withAnimation { showChat.toggle() }
                         } label: {
-                            Image(systemName: "terminal.fill")
+                            Image(systemName: "cpu")
                                 .padding(12)
-                                .background(Color.green)
-                                .foregroundColor(.black)
+                                .background(showChat ? Color.accentColor : Color.blue)
+                                .foregroundColor(.white)
                                 .clipShape(Circle())
                                 .shadow(radius: 4)
                         }
                         .buttonStyle(.plain)
-                        .padding(20)
+                        .help("Chat de IA Local")
+                        
+                        // Botón de Telemetría (Consola)
+                        if !showTelemetry {
+                            Button {
+                                withAnimation { showTelemetry = true }
+                            } label: {
+                                Image(systemName: "terminal.fill")
+                                    .padding(12)
+                                    .background(Color.green)
+                                    .foregroundColor(.black)
+                                    .clipShape(Circle())
+                                    .shadow(radius: 4)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                    .padding(20)
                 }
             }
             
@@ -1104,6 +1167,8 @@ struct EditorAreaView: View {
     @State private var showSyntaxHelp: Bool = false
     @State private var isRSVPActive: Bool = false
     @State private var selectedHelpTab: Int = 0
+    @State private var showInlineAI: Bool = false
+    @State private var showFocoMemoria: Bool = false
     
     private let syntaxHelp = """
     # Guía de Sintaxis
@@ -1211,8 +1276,30 @@ struct EditorAreaView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
-                        .frame(width: 350, height: 450)
                     }
+                    
+                    // Asistente de Redacción Inteligente Local (Cmd+J)
+                    Button {
+                        showInlineAI.toggle()
+                    } label: {
+                        Label("Redactor IA", systemImage: "sparkles")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.purple)
+                    .keyboardShortcut("j", modifiers: .command)
+                    .help("Redactor Inteligente Local (Cmd+J)")
+                    
+                    // Asistente FocoMemoria (Flashcards)
+                    Button {
+                        showFocoMemoria.toggle()
+                    } label: {
+                        Label("FocoMemoria", systemImage: "book.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                    .help("Generar Flashcards / FocoMemoria de Estudio")
                     
                     // FASE 5: Semantic Heatmap Toggle
                     Toggle(isOn: $isHeatmapActive) {
@@ -1363,6 +1450,12 @@ struct EditorAreaView: View {
         .overlay(isRSVPActive ? Color.black.opacity(0.3) : Color.clear)
         .sheet(isPresented: $isRSVPActive) {
             FocoMemoriaView(text: tab.content, backgroundColor: viewModel.noteBackgroundColor, isPresented: $isRSVPActive)
+        }
+        .popover(isPresented: $showInlineAI) {
+            InlineAICommandView(text: $tab.content, isPresented: $showInlineAI)
+        }
+        .popover(isPresented: $showFocoMemoria) {
+            LocalFlashcardsView(text: $tab.content, isPresented: $showFocoMemoria)
         }
     }
     

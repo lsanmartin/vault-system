@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var isHydrating: Bool = false
     @State private var isDBReady: Bool = false
     @State private var showMCPConfig: Bool = false
+    @ObservedObject var brain = LocalBrain.shared
     
     // Patrones del "Anillo de Inteligencia" y "Flujo" a ignorar por defecto
     private let defaultIgnorePatterns = [
@@ -58,6 +59,55 @@ struct ContentView: View {
                 ZStack(alignment: .bottomLeading) {
                     MainEditorView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    
+                    if brain.isDownloading {
+                        VStack {
+                            HStack(spacing: 12) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .controlSize(.small)
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Descargando Cerebro Local (Gemma 4 12B)...")
+                                        .font(.subheadline)
+                                        .fontWeight(.bold)
+                                        .foregroundColor(.primary)
+                                    
+                                    GeometryReader { geo in
+                                        ZStack(alignment: .leading) {
+                                            Capsule()
+                                                .fill(Color.secondary.opacity(0.2))
+                                                .frame(height: 6)
+                                            
+                                            Capsule()
+                                                .fill(LinearGradient(gradient: Gradient(colors: [.accentColor, .purple]), startPoint: .leading, endPoint: .trailing))
+                                                .frame(width: geo.size.width * CGFloat(brain.downloadProgress), height: 6)
+                                                .animation(.interactiveSpring(), value: brain.downloadProgress)
+                                        }
+                                    }
+                                    .frame(height: 6)
+                                }
+                                
+                                Text(String(format: "%.1f%%", brain.downloadProgress * 100))
+                                    .font(.subheadline)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.accentColor)
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.3), lineWidth: 1))
+                            .shadow(color: .black.opacity(0.25), radius: 15, x: 0, y: 8)
+                            .padding(.top, 16)
+                            .padding(.horizontal, 20)
+                            
+                            Spacer()
+                        }
+                        .zIndex(50)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     
                     Button(action: { 
                         withAnimation { showMCPConfig = true } 

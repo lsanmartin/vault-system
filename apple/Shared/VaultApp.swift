@@ -14,7 +14,7 @@ func syncTokensToUserDefaults() {
 
 @main
 struct VaultApp: App {
-    @StateObject private var workspaceManager = WorkspaceManager()
+    @StateObject private var workspaceManager = WorkspaceManager.shared
 
     init() {
         let args = ProcessInfo.processInfo.arguments
@@ -41,6 +41,9 @@ struct VaultApp: App {
 
             exit(0)
         }
+        
+        // Registrar listener para eventos de interfaz (FFI/MCP)
+        registerUiListener(listener: AppUiActionListener())
     }
 
     var body: some Scene {
@@ -68,6 +71,10 @@ struct VaultApp: App {
                     // Iniciar el Cognitive Daemon (Arquitectura Dual-Brain)
                     let daemonStatus = startCognitiveDaemon()
                     print("Daemon: \(daemonStatus)")
+                    
+                    // Inicializar el Cerebro Local y disparar la digestión inicial
+                    LocalBrain.shared.updatePendingCount()
+                    LocalBrain.shared.startDigestion()
                     
                     // Inicializar Observabilidad y Telemetría Nativa
                     _ = TelemetryManager.shared
@@ -122,3 +129,36 @@ class TelemetryManager {
         _ = logFrictionEvent(context: context, action: action, frictionDetail: detail)
     }
 }
+
+class AppUiActionListener: UiActionListener {
+    func createNote(title: String, content: String) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("UiCreateNote"),
+                object: nil,
+                userInfo: ["title": title, "content": content]
+            )
+        }
+    }
+    
+    func openNote(path: String) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("UiOpenNote"),
+                object: nil,
+                userInfo: ["path": path]
+            )
+        }
+    }
+    
+    func setEditorMode(mode: String) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("UiSetEditorMode"),
+                object: nil,
+                userInfo: ["mode": mode]
+            )
+        }
+    }
+}
+
