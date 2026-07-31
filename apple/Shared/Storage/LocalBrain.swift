@@ -96,6 +96,7 @@ public final class LocalBrain: ObservableObject {
             let container = try await #huggingFaceLoadModelContainer(configuration: config)
             self.activeContainer = container
             await MainActor.run {
+                self.downloadProgress = 1.0
                 self.modelStatus = .ready
             }
             return container

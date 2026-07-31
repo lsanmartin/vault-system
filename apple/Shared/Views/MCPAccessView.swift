@@ -339,7 +339,7 @@ struct LocalBrainConfigView: View {
                         Text("Descargando pesos...")
                             .foregroundColor(.orange)
                             .bold()
-                    } else if brain.downloadProgress == 1.0 {
+                    } else if brain.modelStatus == .ready || brain.downloadProgress == 1.0 {
                         Text("Listo en Caché ✔️")
                             .foregroundColor(.green)
                             .bold()
