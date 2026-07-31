@@ -303,10 +303,11 @@ public final class LocalBrain: ObservableObject {
                         var finalContext = context
                         if finalContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             // Cargar documentación de autoconsciencia del sistema de forma fija
-                            let sysNotes = queryNotes(searchTerm: "cerebro-local", pathFilter: nil, ignorePatterns: [])
+                            let sysNotes = queryNotes(searchTerm: "instrucciones_chatbot", pathFilter: nil, ignorePatterns: [])
+                            let finalSysNotes = sysNotes.isEmpty ? queryNotes(searchTerm: "cerebro-local", pathFilter: nil, ignorePatterns: []) : sysNotes
                             var systemContext = ""
-                            if !sysNotes.isEmpty {
-                                systemContext = sysNotes.prefix(2).map { note in
+                            if !finalSysNotes.isEmpty {
+                                systemContext = finalSysNotes.prefix(2).map { note in
                                     "Documento Sistema (Tus capacidades nativas): \(note.title)\nContenido:\n\(note.content)"
                                 }.joined(separator: "\n\n")
                             }
