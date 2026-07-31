@@ -948,7 +948,12 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
             search_emb_sql
         )
     } else {
-        "SELECT n.id, n.title, n.path, '' as content, n.is_dir FROM notes n WHERE 1=1".to_string()
+        let select_content = if search_term.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+            "n.content"
+        } else {
+            "'' as content"
+        };
+        format!("SELECT n.id, n.title, n.path, {}, n.is_dir FROM notes n WHERE 1=1", select_content)
     };
     
     // Filtro por Workspace (Path)
