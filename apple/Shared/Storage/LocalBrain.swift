@@ -78,20 +78,28 @@ public final class LocalBrain: ObservableObject {
             Telemetry.shared.log("LocalBrain", eventType: "Auth", message: "Token omitido o invalido. Usando sesion anonima publica.")
         }
         
-        // Descarga manual usando Hub de Hugging Face v3 para reportar progreso a la UI
-        let repo = Hub.Repo(id: modelId)
-        _ = try await Hub.snapshot(from: repo) { progress in
-            DispatchQueue.main.async {
-                self.downloadProgress = progress.fractionCompleted
-            }
-        }
-        
-        // Cargar el contenedor caliente usando la macro oficial de la v3
+        // Intentar carga rápida offline nativa
         let config = ModelConfiguration(id: modelId)
-        let container = try await #huggingFaceLoadModelContainer(configuration: config)
-        
-        self.activeContainer = container
-        return container
+        do {
+            let container = try await #huggingFaceLoadModelContainer(configuration: config)
+            self.activeContainer = container
+            return container
+        } catch {
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo no disponible localmente. Iniciando descarga: \(error.localizedDescription)")
+            
+            // Descarga manual de red usando Hub de Hugging Face v3
+            let repo = Hub.Repo(id: modelId)
+            _ = try await Hub.snapshot(from: repo) { progress in
+                DispatchQueue.main.async {
+                    self.downloadProgress = progress.fractionCompleted
+                }
+            }
+            
+            // Cargar modelo tras la descarga exitosa
+            let container = try await #huggingFaceLoadModelContainer(configuration: config)
+            self.activeContainer = container
+            return container
+        }
     }
     
     /// Inicia la precarga/descarga del modelo Gemma en background
