@@ -16,6 +16,15 @@ public enum ModelStatus: Equatable {
     case error(String)
 }
 
+actor GPUInferenceActor {
+    static let shared = GPUInferenceActor()
+    private init() {}
+    
+    func run<T>(_ operation: () async throws -> T) async rethrows -> T {
+        return try await operation()
+    }
+}
+
 /// Orquestador del Cerebro Local Nativo con Descarga Directa Autónoma y Estado Caliente GPU (mlx-swift-lm v3)
 public final class LocalBrain: ObservableObject {
     public static let shared = LocalBrain()
@@ -33,7 +42,6 @@ public final class LocalBrain: ObservableObject {
     
     // Contenedor caliente persistente en GPU
     private var activeContainer: ModelContainer? = nil
-    private static let inferenceSemaphore = DispatchSemaphore(value: 1)
     
     /// Cancela la descarga del modelo local en ejecucion
     public func cancelDownload() {
@@ -211,59 +219,63 @@ public final class LocalBrain: ObservableObject {
         var summaryResult = ""
         var entitiesResult: [String] = []
         
-        LocalBrain.inferenceSemaphore.wait()
-        defer { LocalBrain.inferenceSemaphore.signal() }
-        
         do {
-            await MainActor.run {
-                self.isDownloading = true
-                self.downloadProgress = 0.0
-            }
-            
-            let modelContainer = try await self.getOrLoadContainer()
-            
-            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Generando sintesis cognitiva...")
-            
-            await MainActor.run {
-                self.isDownloading = false
-            }
-            
-            let prompt = """
-            <bos><start_of_turn>user
-            Genera una síntesis densa de una sola oración para la nota "\(title)".
-            Extrae hasta 5 entidades clave.
-            Devuelve la respuesta estrictamente en este formato JSON:
-            {
-              "summary": "tu síntesis aquí",
-              "entities": ["Entidad1", "Entidad2"]
-            }
-            
-            Texto de la nota:
-            \(content)<end_of_turn>
-            <start_of_turn>model
-            """
-            
-            let userInput = UserInput(prompt: prompt)
-            let input = try await modelContainer.prepare(input: userInput)
-            let stream = try await modelContainer.generate(input: input, parameters: GenerateParameters(temperature: 0.2))
-            
-            var generatedText = ""
-            for await generation in stream {
-                switch generation {
-                case .chunk(let text):
-                    generatedText += text
-                default:
-                    break
+            let (summary, entities) = try await GPUInferenceActor.shared.run { () -> (String, [String]) in
+                await MainActor.run {
+                    self.isDownloading = true
+                    self.downloadProgress = 0.0
                 }
+                
+                let modelContainer = try await self.getOrLoadContainer()
+                
+                Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Generando sintesis cognitiva...")
+                
+                await MainActor.run {
+                    self.isDownloading = false
+                }
+                
+                let prompt = """
+                <bos><start_of_turn>user
+                Genera una síntesis densa de una sola oración para la nota "\(title)".
+                Extrae hasta 5 entidades clave.
+                Devuelve la respuesta estrictamente en este formato JSON:
+                {
+                  "summary": "tu síntesis aquí",
+                  "entities": ["Entidad1", "Entidad2"]
+                }
+                
+                Texto de la nota:
+                \(content)<end_of_turn>
+                <start_of_turn>model
+                """
+                
+                let userInput = UserInput(prompt: prompt)
+                let input = try await modelContainer.prepare(input: userInput)
+                let stream = try await modelContainer.generate(input: input, parameters: GenerateParameters(temperature: 0.2))
+                
+                var generatedText = ""
+                for await generation in stream {
+                    switch generation {
+                    case .chunk(let text):
+                        generatedText += text
+                    default:
+                        break
+                    }
+                }
+                
+                var sum = ""
+                var ent: [String] = []
+                if let rawData = generatedText.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] {
+                    sum = parsed["summary"] as? String ?? ""
+                    ent = parsed["entities"] as? [String] ?? []
+                } else {
+                    sum = generatedText
+                }
+                return (sum, ent)
             }
-            
-            if let rawData = generatedText.data(using: .utf8),
-               let parsed = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] {
-                summaryResult = parsed["summary"] as? String ?? ""
-                entitiesResult = parsed["entities"] as? [String] ?? []
-            } else {
-                summaryResult = generatedText
-            }
+            summaryResult = summary
+            entitiesResult = entities
         } catch {
             Telemetry.shared.log("LocalBrain", eventType: "Error", message: "Fallo inferencia local para '\(title)': \(error.localizedDescription)")
             await MainActor.run {
@@ -280,76 +292,74 @@ public final class LocalBrain: ObservableObject {
     }
     
     /// Realiza inferencia conversacional (Chat) con streaming de tokens
-    /// Realiza inferencia conversacional (Chat) con streaming de tokens
     public func chatStream(prompt: String, context: String = "") async throws -> AsyncStream<String> {
         return AsyncStream { continuation in
             let task = Task {
-                LocalBrain.inferenceSemaphore.wait()
-                defer { LocalBrain.inferenceSemaphore.signal() }
-                
                 var accumulatedText = ""
                 do {
-                    let container = try await self.getOrLoadContainer()
-                    
-                    var finalContext = context
-                    if finalContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // RAG de puente interno: buscar en el indice DuckDB de Rust
-                        let notes = queryNotes(searchTerm: prompt, pathFilter: nil, ignorePatterns: [])
-                        if !notes.isEmpty {
-                            finalContext = notes.prefix(5).map { note in
-                                "Documento: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
-                            }.joined(separator: "\n\n---\n\n")
-                            Telemetry.shared.log("LocalBrain", eventType: "RAG", message: "Puente interno: cargadas \(notes.count) notas para contexto RAG.")
-                        } else {
-                            // Fallback: traer las notas mas recientes del vault si no hay match de termino
-                            let allNotes = queryNotes(searchTerm: nil, pathFilter: nil, ignorePatterns: [])
-                            if !allNotes.isEmpty {
-                                finalContext = allNotes.prefix(3).map { note in
+                    try await GPUInferenceActor.shared.run {
+                        let container = try await self.getOrLoadContainer()
+                        
+                        var finalContext = context
+                        if finalContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            // RAG de puente interno: buscar en el indice DuckDB de Rust
+                            let notes = queryNotes(searchTerm: prompt, pathFilter: nil, ignorePatterns: [])
+                            if !notes.isEmpty {
+                                finalContext = notes.prefix(5).map { note in
                                     "Documento: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
                                 }.joined(separator: "\n\n---\n\n")
+                                Telemetry.shared.log("LocalBrain", eventType: "RAG", message: "Puente interno: cargadas \(notes.count) notas para contexto RAG.")
+                            } else {
+                                // Fallback: traer las notas mas recientes del vault si no hay match de termino
+                                let allNotes = queryNotes(searchTerm: nil, pathFilter: nil, ignorePatterns: [])
+                                if !allNotes.isEmpty {
+                                    finalContext = allNotes.prefix(3).map { note in
+                                        "Documento: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
+                                    }.joined(separator: "\n\n---\n\n")
+                                }
                             }
                         }
-                    }
-                    
-                    let workspacesList = WorkspaceManager.shared.locations.map { "- \($0.name): \($0.path)" }.joined(separator: "\n")
-                    let systemPrompt = """
-                    Eres el asistente inteligente del vault personal del usuario.
-                    Tus respuestas deben ser concisas y basadas exclusivamente en el contexto provisto.
-                    Si la informacion no se encuentra en el contexto, indicalo de forma honesta.
-                    
-                    Si el usuario te pide abrir una nota, crear una nota o cambiar el modo de la interfaz, confirma la accion por chat y añade EXACTAMENTE al final de tu respuesta una unica linea con el comando estructurado correspondiente de la siguiente lista:
-                    - [CMD: open_note, path: "ruta_absoluta"]
-                    - [CMD: create_note, title: "nombre_archivo", content: "contenido_crudo_markdown"]
-                    - [CMD: set_mode, mode: "edit" o "preview"]
-                    
-                    Workspaces configurados en la aplicacion:
-                    \(workspacesList)
-                    
-                    Contexto del vault:
-                    \(finalContext)
-                    """
-                    
-                    let fullPrompt = """
-                    <bos><start_of_turn>user
-                    \(systemPrompt)
-                    
-                    Pregunta: \(prompt)<end_of_turn>
-                    <start_of_turn>model
-                    """
-                    
-                    let userInput = UserInput(prompt: fullPrompt)
-                    let input = try await container.prepare(input: userInput)
-                    let stream = try await container.generate(input: input, parameters: GenerateParameters(temperature: 0.3))
-                    
-                    for await generation in stream {
-                        if Task.isCancelled { break }
-                        switch generation {
-                        case .chunk(let text):
-                            let cleanText = filterSpecialTokens(text)
-                            accumulatedText += cleanText
-                            continuation.yield(cleanText)
-                        default:
-                            break
+                        
+                        let workspacesList = WorkspaceManager.shared.locations.map { "- \($0.name): \($0.path)" }.joined(separator: "\n")
+                        let systemPrompt = """
+                        Eres el asistente inteligente del vault personal del usuario.
+                        Tus respuestas deben ser concisas y basadas exclusivamente en el contexto provisto.
+                        Si la informacion no se encuentra en el contexto, indicalo de forma honesta.
+                        
+                        Si el usuario te pide abrir una nota, crear una nota o cambiar el modo de la interfaz, confirma la accion por chat y añade EXACTAMENTE al final de tu respuesta una unica linea con el comando estructurado correspondiente de la siguiente lista:
+                        - [CMD: open_note, path: "ruta_absoluta"]
+                        - [CMD: create_note, title: "nombre_archivo", content: "contenido_crudo_markdown"]
+                        - [CMD: set_mode, mode: "edit" o "preview"]
+                        
+                        Workspaces configurados en la aplicacion:
+                        \(workspacesList)
+                        
+                        Contexto del vault:
+                        \(finalContext)
+                        """
+                        
+                        let fullPrompt = """
+                        <bos><start_of_turn>user
+                        \(systemPrompt)
+                        
+                        Pregunta: \(prompt)<end_of_turn>
+                        <start_of_turn>model
+                        """
+                        
+                        let userInput = UserInput(prompt: fullPrompt)
+                        let input = try await container.prepare(input: userInput)
+                        let stream = try await container.generate(input: input, parameters: GenerateParameters(temperature: 0.3))
+                        
+                        for await generation in stream {
+                            if Task.isCancelled { break }
+                            switch generation {
+                            case .chunk(let text):
+                                let cleanText = self.filterSpecialTokens(text)
+                                accumulatedText += cleanText
+                                continuation.yield(cleanText)
+                            default:
+                                break
+                            }
                         }
                     }
                 } catch {
