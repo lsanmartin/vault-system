@@ -25,11 +25,11 @@ struct LocalChatView: View {
             // Header
             HStack {
                 Image(systemName: "cpu")
-                    .foregroundColor(brain.isDownloading ? .orange : .green)
+                    .foregroundColor(modelStatusColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Gemma 4 (Local)")
                         .font(.headline)
-                    Text(brain.isDownloading ? "Descargando weights... \(Int(brain.downloadProgress * 100))%" : "GPU Metal Caliente")
+                    Text(modelStatusText)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -142,6 +142,36 @@ struct LocalChatView: View {
             DispatchQueue.main.async {
                 isGenerating = false
             }
+        }
+    }
+    
+    private var modelStatusColor: Color {
+        switch brain.modelStatus {
+        case .notLoaded:
+            return .gray
+        case .downloading:
+            return .orange
+        case .loading:
+            return .orange
+        case .ready:
+            return .green
+        case .error:
+            return .red
+        }
+    }
+    
+    private var modelStatusText: String {
+        switch brain.modelStatus {
+        case .notLoaded:
+            return "GPU Metal - Offline (No cargado)"
+        case .downloading(let progress):
+            return "Descargando weights... \(Int(progress * 100))%"
+        case .loading:
+            return "Cargando en GPU Metal..."
+        case .ready:
+            return "Listo - GPU Metal Caliente"
+        case .error(let desc):
+            return "Error: \(desc)"
         }
     }
 }

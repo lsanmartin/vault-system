@@ -8,6 +8,14 @@ import HuggingFace
 import Hub
 import Tokenizers
 
+public enum ModelStatus: Equatable {
+    case notLoaded
+    case downloading(progress: Double)
+    case loading
+    case ready
+    case error(String)
+}
+
 /// Orquestador del Cerebro Local Nativo con Descarga Directa Autónoma y Estado Caliente GPU (mlx-swift-lm v3)
 public final class LocalBrain: ObservableObject {
     public static let shared = LocalBrain()
@@ -17,6 +25,7 @@ public final class LocalBrain: ObservableObject {
     @Published public var currentNoteTitle: String = ""
     @Published public var downloadProgress: Double = 0.0
     @Published public var isDownloading: Bool = false
+    @Published public var modelStatus: ModelStatus = .notLoaded
     
     private var cancellables = Set<AnyCancellable>()
     private let queue = DispatchQueue(label: "cl.nicelio.vault.brain", qos: .background)
@@ -81,24 +90,45 @@ public final class LocalBrain: ObservableObject {
         // Intentar carga rápida offline nativa
         let config = ModelConfiguration(id: modelId)
         do {
+            await MainActor.run {
+                self.modelStatus = .loading
+            }
             let container = try await #huggingFaceLoadModelContainer(configuration: config)
             self.activeContainer = container
+            await MainActor.run {
+                self.modelStatus = .ready
+            }
             return container
         } catch {
             Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo no disponible localmente. Iniciando descarga: \(error.localizedDescription)")
             
             // Descarga manual de red usando Hub de Hugging Face v3
             let repo = Hub.Repo(id: modelId)
-            _ = try await Hub.snapshot(from: repo) { progress in
-                DispatchQueue.main.async {
-                    self.downloadProgress = progress.fractionCompleted
+            do {
+                _ = try await Hub.snapshot(from: repo) { progress in
+                    DispatchQueue.main.async {
+                        self.downloadProgress = progress.fractionCompleted
+                        self.modelStatus = .downloading(progress: progress.fractionCompleted)
+                    }
                 }
+                
+                await MainActor.run {
+                    self.modelStatus = .loading
+                }
+                
+                // Cargar modelo tras la descarga exitosa
+                let container = try await #huggingFaceLoadModelContainer(configuration: config)
+                self.activeContainer = container
+                await MainActor.run {
+                    self.modelStatus = .ready
+                }
+                return container
+            } catch let downloadErr {
+                await MainActor.run {
+                    self.modelStatus = .error(downloadErr.localizedDescription)
+                }
+                throw downloadErr
             }
-            
-            // Cargar modelo tras la descarga exitosa
-            let container = try await #huggingFaceLoadModelContainer(configuration: config)
-            self.activeContainer = container
-            return container
         }
     }
     
@@ -126,12 +156,14 @@ public final class LocalBrain: ObservableObject {
                         self.isDownloading = false
                         self.downloadProgress = 1.0
                         self.downloadTask = nil
+                        self.modelStatus = .ready
                     }
                 } catch {
                     Telemetry.shared.log("LocalBrain", eventType: "Error", message: "Error al precargar el modelo local: \(error.localizedDescription)")
                     DispatchQueue.main.async {
                         self.isDownloading = false
                         self.downloadTask = nil
+                        self.modelStatus = .error(error.localizedDescription)
                     }
                 }
             }
