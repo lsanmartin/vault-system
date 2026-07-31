@@ -302,22 +302,37 @@ public final class LocalBrain: ObservableObject {
                         
                         var finalContext = context
                         if finalContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            // RAG de puente interno: buscar en el indice DuckDB de Rust
+                            // Cargar documentación de autoconsciencia del sistema de forma fija
+                            let sysNotes = queryNotes(searchTerm: "cerebro-local", pathFilter: nil, ignorePatterns: [])
+                            var systemContext = ""
+                            if !sysNotes.isEmpty {
+                                systemContext = sysNotes.prefix(2).map { note in
+                                    "Documento Sistema (Tus capacidades nativas): \(note.title)\nContenido:\n\(note.content)"
+                                }.joined(separator: "\n\n")
+                            }
+                            
+                            // RAG conversacional del usuario
                             let notes = queryNotes(searchTerm: prompt, pathFilter: nil, ignorePatterns: [])
+                            var userContext = ""
                             if !notes.isEmpty {
-                                finalContext = notes.prefix(5).map { note in
+                                userContext = notes.prefix(4).map { note in
                                     "Documento: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
                                 }.joined(separator: "\n\n---\n\n")
-                                Telemetry.shared.log("LocalBrain", eventType: "RAG", message: "Puente interno: cargadas \(notes.count) notas para contexto RAG.")
                             } else {
                                 // Fallback: traer las notas mas recientes del vault si no hay match de termino
                                 let allNotes = queryNotes(searchTerm: nil, pathFilter: nil, ignorePatterns: [])
                                 if !allNotes.isEmpty {
-                                    finalContext = allNotes.prefix(3).map { note in
-                                        "Documento: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
+                                    userContext = allNotes.prefix(2).map { note in
+                                        "Documento Reciente: \(note.title)\nPath: \(note.path)\nContenido:\n\(note.content)"
                                     }.joined(separator: "\n\n---\n\n")
                                 }
                             }
+                            
+                            finalContext = [systemContext, userContext]
+                                .filter { !$0.isEmpty }
+                                .joined(separator: "\n\n---\n\n")
+                            
+                            Telemetry.shared.log("LocalBrain", eventType: "RAG", message: "Puente RAG con autoconsciencia inyectada.")
                         }
                         
                         let workspacesList = WorkspaceManager.shared.locations.map { "- \($0.name): \($0.path)" }.joined(separator: "\n")
