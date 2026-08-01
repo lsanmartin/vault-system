@@ -35,10 +35,14 @@ public final class LocalBrain: ObservableObject {
     @Published public var downloadProgress: Double = 0.0
     @Published public var isDownloading: Bool = false
     @Published public var modelStatus: ModelStatus = .notLoaded
-    
+    /// Estado de activación del cerebro local. Al desactivarse se libera el modelo de la memoria GPU.
+    @Published public var isEnabled: Bool = true
+
     private var cancellables = Set<AnyCancellable>()
     private let queue = DispatchQueue(label: "cl.nicelio.vault.brain", qos: .background)
     private var downloadTask: Task<Void, Never>? = nil
+    private var activeChatTask: Task<Void, Never>? = nil
+    private var digestionTask: Task<Void, Never>? = nil
     
     // Contenedor caliente persistente en GPU
     private var activeContainer: ModelContainer? = nil
@@ -52,11 +56,42 @@ public final class LocalBrain: ObservableObject {
             self.downloadProgress = 0.0
         }
     }
-    
+
+    /// Activa o desactiva temporalmente el cerebro local.
+    /// Al desactivar se cancela el trabajo en curso, se libera el modelo de la memoria GPU/Metal
+    /// y el estado vuelve a `.notLoaded` (se recarga bajo demanda al reactivar).
+    public func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "vault_brain_enabled")
+
+        if !enabled {
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Cerebro local desactivado por el usuario. Liberando modelo de la memoria GPU.")
+
+            // Cancelar trabajo en curso para liberar memoria de inmediato
+            activeChatTask?.cancel()
+            activeChatTask = nil
+            digestionTask?.cancel()
+            digestionTask = nil
+            cancelDownload()
+
+            Task { @MainActor in
+                self.activeContainer = nil
+                MLX.GPU.clearCache()
+                self.modelStatus = .notLoaded
+                self.isProcessing = false
+            }
+        } else {
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Cerebro local activado por el usuario. Se cargará bajo demanda en la próxima generación.")
+        }
+    }
+
     private init() {
         // Limitar cache de reuso de tensores de Metal a 64MB para evitar presion de memoria
         MLX.GPU.set(cacheLimit: 64 * 1024 * 1024)
-        
+
+        // Restaurar estado de activación persistido (default: activado)
+        self.isEnabled = UserDefaults.standard.object(forKey: "vault_brain_enabled") as? Bool ?? true
+
         NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))
             .sink { [weak self] _ in
                 self?.updatePendingCount()
@@ -76,6 +111,11 @@ public final class LocalBrain: ObservableObject {
     
     /// Inicializa u obtiene el contenedor caliente de Gemma de forma segura
     public func getOrLoadContainer() async throws -> ModelContainer {
+        guard isEnabled else {
+            throw NSError(domain: "LocalBrain", code: 100, userInfo: [
+                NSLocalizedDescriptionKey: "El cerebro local está desactivado temporalmente. Actívalo con el botón de encendido en el panel de chat."
+            ])
+        }
         if let container = activeContainer {
             return container
         }
@@ -102,6 +142,10 @@ public final class LocalBrain: ObservableObject {
                 self.modelStatus = .loading
             }
             let container = try await #huggingFaceLoadModelContainer(configuration: config)
+            guard self.isEnabled else {
+                MLX.GPU.clearCache()
+                throw NSError(domain: "LocalBrain", code: 100, userInfo: [NSLocalizedDescriptionKey: "Carga cancelada: el cerebro local fue desactivado durante la carga."])
+            }
             self.activeContainer = container
             await MainActor.run {
                 self.downloadProgress = 1.0
@@ -127,6 +171,10 @@ public final class LocalBrain: ObservableObject {
                 
                 // Cargar modelo tras la descarga exitosa
                 let container = try await #huggingFaceLoadModelContainer(configuration: config)
+                guard self.isEnabled else {
+                    MLX.GPU.clearCache()
+                    throw NSError(domain: "LocalBrain", code: 100, userInfo: [NSLocalizedDescriptionKey: "Carga cancelada: el cerebro local fue desactivado durante la descarga."])
+                }
                 self.activeContainer = container
                 await MainActor.run {
                     self.modelStatus = .ready
@@ -143,6 +191,7 @@ public final class LocalBrain: ObservableObject {
     
     /// Inicia la precarga/descarga del modelo Gemma en background
     public func preloadModel() {
+        guard isEnabled else { return }
         guard !isProcessing && !isDownloading else { return }
         isDownloading = true
         downloadProgress = 0.0
@@ -181,21 +230,24 @@ public final class LocalBrain: ObservableObject {
     
     /// Inicia la digestion de notas con inferencia on-device y descarga automatica
     public func startDigestion() {
+        guard isEnabled else { return }
         guard !isProcessing else { return }
         isProcessing = true
-        
-        Task { [weak self] in
+
+        let task = Task { [weak self] in
             guard let self = self else { return }
-            
+
             let pending = getPendingSummaryNotes(limit: 10)
-            
+
             for note in pending {
+                if Task.isCancelled { break }
                 await MainActor.run {
                     self.currentNoteTitle = note.title
                 }
-                
+
                 let (summary, entities, density) = await self.runLocalInference(content: note.content, title: note.title)
-                
+                if Task.isCancelled { break }
+
                 _ = saveNoteSummary(
                     noteId: note.id,
                     syntheticSummary: summary,
@@ -203,13 +255,14 @@ public final class LocalBrain: ObservableObject {
                     density: density
                 )
             }
-            
+
             await MainActor.run {
                 self.isProcessing = false
                 self.currentNoteTitle = ""
                 self.updatePendingCount()
             }
         }
+        self.digestionTask = task
     }
     
     /// Inicia descarga e inferencia del modelo Gemma de Hugging Face de forma nativa e in-process
@@ -293,6 +346,11 @@ public final class LocalBrain: ObservableObject {
     
     /// Realiza inferencia conversacional (Chat) con streaming de tokens
     public func chatStream(prompt: String, context: String = "") async throws -> AsyncStream<String> {
+        guard isEnabled else {
+            throw NSError(domain: "LocalBrain", code: 100, userInfo: [
+                NSLocalizedDescriptionKey: "El cerebro local está desactivado. Actívalo con el botón de encendido en el panel de chat."
+            ])
+        }
         return AsyncStream { continuation in
             let task = Task {
                 var accumulatedText = ""
@@ -385,8 +443,10 @@ public final class LocalBrain: ObservableObject {
                 MLX.GPU.clearCache()
                 continuation.finish()
             }
+            self.activeChatTask = task
             continuation.onTermination = { _ in
                 task.cancel()
+                self.activeChatTask = nil
             }
         }
     }

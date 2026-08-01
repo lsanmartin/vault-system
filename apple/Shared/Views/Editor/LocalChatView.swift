@@ -34,7 +34,18 @@ struct LocalChatView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                
+
+                // Toggle de activación del modelo (libera la memoria GPU al desactivar)
+                Button(action: {
+                    brain.setEnabled(!brain.isEnabled)
+                }) {
+                    Image(systemName: brain.isEnabled ? "power.circle.fill" : "power")
+                        .font(.system(size: 14))
+                        .foregroundColor(brain.isEnabled ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(brain.isEnabled ? "Desactivar cerebro local (libera memoria GPU)" : "Activar cerebro local")
+
                 Button(action: {
                     messages = [LocalChatMessage(text: "Conversación reiniciada. ¿En qué puedo ayudarte?", isUser: false)]
                 }) {
@@ -74,7 +85,7 @@ struct LocalChatView: View {
             HStack(spacing: 8) {
                 TextField("Pregúntale a tu Vault...", text: $inputPrompt)
                     .textFieldStyle(.roundedBorder)
-                    .disabled(isGenerating)
+                    .disabled(isGenerating || !brain.isEnabled)
                     .onSubmit {
                         sendMessage()
                     }
@@ -88,7 +99,7 @@ struct LocalChatView: View {
                             .foregroundColor(.accentColor)
                     }
                     .buttonStyle(.plain)
-                    .disabled(inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !brain.isEnabled)
                 }
             }
             .padding()
@@ -100,7 +111,11 @@ struct LocalChatView: View {
     private func sendMessage() {
         let cleanText = inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanText.isEmpty else { return }
-        
+        guard brain.isEnabled else {
+            messages.append(LocalChatMessage(text: "El cerebro local está desactivado. Pulsa el botón de encendido ⏻ para reactivarlo.", isUser: false))
+            return
+        }
+
         inputPrompt = ""
         let userMsg = LocalChatMessage(text: cleanText, isUser: true)
         messages.append(userMsg)
@@ -146,6 +161,7 @@ struct LocalChatView: View {
     }
     
     private var modelStatusColor: Color {
+        guard brain.isEnabled else { return .gray }
         switch brain.modelStatus {
         case .notLoaded:
             return .gray
@@ -161,6 +177,7 @@ struct LocalChatView: View {
     }
     
     private var modelStatusText: String {
+        guard brain.isEnabled else { return "Desactivado - Memoria GPU liberada" }
         switch brain.modelStatus {
         case .notLoaded:
             return "GPU Metal - Offline (No cargado)"

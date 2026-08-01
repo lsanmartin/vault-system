@@ -1,6 +1,6 @@
 # Contexto del Agente
 
-Última actualización: [2026-07-29 20:23]
+Última actualización: [2026-08-01]
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.
@@ -10,6 +10,15 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-08-01] Fix Descarga del Cerebro Local (gemma-4-12B-it-4bit)**:
+    - **Diagnóstico**: La app "re-descargaba" el modelo en cada arranque porque los pesos NUNCA se completaron en `~/.cache/huggingface/hub`. Quedaban blobs `.incomplete` del 2026-06-27 (descarga interrumpida) para otros IDs (`gemma-4-12B-it-OptiQ-4bit`, `gemma-4-e4b-it-4bit`), y el ID del código (`mlx-community/gemma-4-12B-it-4bit`) no tenía nada en caché. `Hub.snapshot` vuelve a descargar desde cero si el snapshot está incompleto.
+    - **Solución**: Pre-poblado del caché HF con la estructura exacta que la librería Hub de Swift espera (verificado contra `swift-huggingface/HubCache.swift` y `HubClient+Files.swift`): `refs/main` → commit `73bcf09092aa277861d5a191b989b666f7f32e8f`; `snapshots/<commit>/` → 11 archivos completos (pesos byte-exactos: 5,351,756,584 + 1,389,282,927 bytes); `.metadata/<commit>.json` → metadata de snapshot para el fast-path `cachedSnapshotPath`.
+    - **Método**: `curl -L -C -` (resumible) directo al CDN xet-bridge de HF. Verificado byte-exacto contra `content-range`.
+    - **Nota**: `loadModelContainer` usa `useLatest=false` → resuelve vía `refs/main` → carga desde disco en segundos, sin re-descargar.
+  - **[2026-08-01] Toggle de Activación/Desactivación del Cerebro Local (Liberación de Memoria GPU)**:
+    - **LocalBrain.swift**: Añadida propiedad `isEnabled` (@Published, persistida en UserDefaults `vault_brain_enabled`). Nuevo método `setEnabled(_:)` que al desactivar cancela generaciones/digestión en curso (`activeChatTask`, `digestionTask`, `downloadTask`), libera el modelo de la memoria GPU (`activeContainer = nil` + `MLX.GPU.clearCache()`) y resetea `modelStatus = .notLoaded`. Guards de `isEnabled` en `getOrLoadContainer()`, `preloadModel()`, `startDigestion()` y `chatStream()` para impedir cargas con el cerebro apagado (incluye check post-carga por si se desactiva a mitad). Tracking de tareas activas para cancelación.
+    - **LocalChatView.swift**: Botón power (⏻) en el header del sidebar derecho. Encendido → `power.circle.fill` verde; apagado → `power` gris. Al desactivar, el input de chat se deshabilita y el estado muestra "Desactivado - Memoria GPU liberada". Al reactivar, el modelo se recarga bajo demanda en la próxima generación (los pesos ya están en caché de disco, sin re-descarga).
+    - **Compilación**: `make xcode-build` → `ARCHIVE SUCCEEDED`. App desplegada en `/Applications/VaultSystem.app`.
   - **[2026-07-29 20:23] Integración de Inferencia de Cerebro Local en Swift/MLX**:
     - **Rust Core**: Desactivado el mock de resúmenes del daemon cognitivo interno en `core/src/lib.rs`.
     - **FFI**: Expuestas funciones FFI `get_pending_summary_notes` y `save_note_summary` vía UniFFI para que Swift controle la inserción de resúmenes reales en DuckDB.
