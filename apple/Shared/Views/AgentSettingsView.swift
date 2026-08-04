@@ -79,6 +79,11 @@ struct AgentRow: View {
                     PermissionBadge(title: "W", allowed: true)
                 }
             }
+            Button(action: { ExternalAgentManager.shared.removeAgent(agent) }) {
+                Image(systemName: "trash").font(.caption).foregroundColor(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Eliminar agente")
         }
         .padding(.vertical, 4)
     }

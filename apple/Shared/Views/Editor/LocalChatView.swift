@@ -23,6 +23,7 @@ struct LocalChatView: View {
     ]
     @State private var inputText: String = ""
     @State private var isGenerating: Bool = false
+    @State private var generationTask: Task<Void, Never>? = nil
     @State private var selectedAgent: AgentChip = .local
     @State private var showAgentSettings = false
 
@@ -160,7 +161,11 @@ struct LocalChatView: View {
                     .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
 
                 if isGenerating {
-                    ProgressView().controlSize(.small)
+                    Button(action: cancelGeneration) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3).foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain).help("Cancelar generación")
                 } else {
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill")
@@ -181,6 +186,28 @@ struct LocalChatView: View {
             AgentSettingsView()
                 .frame(width: 560, height: 780)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatReset"))) { _ in
+            messages = [LocalChatMessage(text: "Sesión reiniciada por herramienta MCP.", isUser: false, agentCode: selectedAgent.code)]
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatClear"))) { _ in
+            messages.removeAll()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatCompact"))) { _ in
+            let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: selectedAgent.code)]
+        }
+    }
+
+    // MARK: - Cancel
+
+    private func cancelGeneration() {
+        generationTask?.cancel()
+        generationTask = nil
+        if selectedAgent == .local {
+            brain.cancelChat()
+        }
+        isGenerating = false
+        messages.append(LocalChatMessage(text: "⏹ Generación cancelada.", isUser: false, agentCode: selectedAgent.code))
     }
 
     // MARK: - Send
@@ -230,11 +257,13 @@ struct LocalChatView: View {
             ctx = tab.content
         }
 
-        switch target {
-        case .local:
-            sendLocal(prompt: prompt, context: ctx)
-        case .external(let agent):
-            sendExternal(prompt: prompt, agent: agent, context: ctx)
+        generationTask = Task {
+            switch target {
+            case .local:
+                sendLocal(prompt: prompt, context: ctx)
+            case .external(let agent):
+                sendExternal(prompt: prompt, agent: agent, context: ctx)
+            }
         }
     }
 

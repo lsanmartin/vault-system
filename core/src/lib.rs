@@ -94,6 +94,9 @@ pub trait UiActionListener: Send + Sync {
     fn create_note(&self, title: String, content: String);
     fn open_note(&self, path: String);
     fn set_editor_mode(&self, mode: String);
+    fn chat_reset(&self);
+    fn chat_clear(&self);
+    fn chat_compact(&self);
 }
 
 static UI_LISTENER: Lazy<Mutex<Option<Box<dyn UiActionListener>>>> = Lazy::new(|| Mutex::new(None));
@@ -2143,6 +2146,21 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             },
                             "required": ["mode"]
                         }
+                    },
+                    {
+                        "name": "chat_reset",
+                        "description": "Reinicia completamente la sesión del chat. Borra todo el historial y empieza de cero. Usar cuando el usuario pida 'resetear', 'reiniciar' o 'empezar de nuevo' la conversación.",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "chat_clear",
+                        "description": "Limpia la ventana de chat (solo la vista, el historial sigue en base de datos).",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "chat_compact",
+                        "description": "Compacta el contexto de la conversación actual resumiendo los mensajes previos en uno solo. Libera tokens sin perder el hilo de la conversación.",
+                        "inputSchema": { "type": "object", "properties": {} }
                     }
                 ]
             });
@@ -2509,6 +2527,30 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     } else {
                         "Error al adquirir bloqueo del listener de interfaz.".to_string()
                     }
+                },
+                "chat_reset" => {
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.chat_reset();
+                            "Sesión de chat reiniciada.".to_string()
+                        } else { "Error: App no disponible.".to_string() }
+                    } else { "Error al adquirir listener.".to_string() }
+                },
+                "chat_clear" => {
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.chat_clear();
+                            "Ventana de chat limpiada.".to_string()
+                        } else { "Error: App no disponible.".to_string() }
+                    } else { "Error al adquirir listener.".to_string() }
+                },
+                "chat_compact" => {
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.chat_compact();
+                            "Contexto compactado.".to_string()
+                        } else { "Error: App no disponible.".to_string() }
+                    } else { "Error al adquirir listener.".to_string() }
                 },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
             };

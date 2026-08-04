@@ -57,6 +57,12 @@ public final class LocalBrain: ObservableObject {
         }
     }
 
+    /// Cancela la generación de chat en curso
+    public func cancelChat() {
+        activeChatTask?.cancel()
+        activeChatTask = nil
+    }
+
     /// Activa o desactiva temporalmente el cerebro local.
     /// Al desactivar se cancela el trabajo en curso, se libera el modelo de la memoria GPU/Metal
     /// y el estado vuelve a `.notLoaded` (se recarga bajo demanda al reactivar).

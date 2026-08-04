@@ -173,5 +173,23 @@ class AppUiActionListener: UiActionListener {
             )
         }
     }
+
+    func chatReset() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("ChatReset"), object: nil)
+        }
+    }
+
+    func chatClear() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("ChatClear"), object: nil)
+        }
+    }
+
+    func chatCompact() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("ChatCompact"), object: nil)
+        }
+    }
 }
 
