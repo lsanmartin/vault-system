@@ -956,7 +956,7 @@ struct MainEditorView: View {
                         
                         if showChat {
                             LocalChatView(viewModel: viewModel)
-                                .frame(minWidth: 260, maxWidth: 350)
+                                .frame(minWidth: 280, maxWidth: 550)
                                 .transition(.move(edge: .trailing))
                         }
                     }

@@ -186,12 +186,13 @@ struct LocalChatView: View {
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
         }
-        .frame(minWidth: 280, maxWidth: 380)
+        .frame(minWidth: 280, maxWidth: 550)
         .sheet(isPresented: $showAgentSettings) {
             AgentSettingsView()
                 .frame(width: 560, height: 780)
         }
         .onAppear { loadThread(for: selectedAgent.agentCode) }
+        .onDisappear { saveCurrentThreadMessages() }
         .onChange(of: isGenerating) { _, generating in
             if !generating, let last = messages.last, !last.isUser {
                 saveMessage(last)
@@ -210,7 +211,6 @@ struct LocalChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatCompact"))) { _ in
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
             messages = [LocalChatMessage(text: summary, isUser: false, agentCode: selectedAgent.agentCode)]
-            saveCurrentThread()
         }
     }
 
@@ -272,10 +272,10 @@ struct LocalChatView: View {
         chatThreads.saveMessage(threadId: tid, role: role, agentCode: msg.agentCode, content: msg.text)
     }
 
-    private func saveCurrentThread() {
+    private func saveCurrentThreadMessages() {
         let tid = currentThreadId
-        // Borrar mensajes viejos del thread y re-guardar solo los últimos 200
-        for msg in messages.suffix(200) {
+        // Guardar los últimos 50 mensajes no guardados
+        for msg in messages.suffix(50) {
             chatThreads.saveMessage(threadId: tid, role: msg.isUser ? "user" : "assistant", agentCode: msg.agentCode, content: msg.text)
         }
     }
@@ -847,6 +847,14 @@ struct ChatMessagesView: NSViewRepresentable {
 
 struct PermissionsBar: View {
     let agent: LocalChatView.AgentChip
+    @State private var showWsPopover = false
+
+    var workspaces: [String] {
+        switch agent {
+        case .local: return []
+        case .external(let a): return a.workspaces
+        }
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -858,7 +866,8 @@ struct PermissionsBar: View {
                 PermBadge("Syst", allowed: true).help("Acceso a system_workspace")
                 PermBadge("Telem", allowed: true).help("Lectura de telemetría")
                 Text("·").foregroundColor(.secondary)
-                Text("All").font(.caption2).bold().help("Todos los workspaces registrados")
+                Text("All").font(.caption2).bold()
+                    .help("Todos los workspaces registrados")
             case .external(let a):
                 PermBadge("Read", allowed: a.readContent).help("Lectura de contenido crudo de notas")
                 PermBadge("Writ", allowed: a.writeContent).help("Escritura: crear/modificar notas")
@@ -866,8 +875,24 @@ struct PermissionsBar: View {
                 PermBadge("Syst", allowed: a.readSystem).help("Acceso a system_workspace")
                 PermBadge("Telem", allowed: a.readTelemetry).help("Lectura de telemetría")
                 Text("·").foregroundColor(.secondary)
-                Text(wsLabel(a.workspaces)).font(.caption2).bold()
-                    .help("Workspaces: " + a.workspaces.joined(separator: ", "))
+                Button(action: { showWsPopover.toggle() }) {
+                    Text(wsLabel(a.workspaces))
+                        .font(.caption2).bold()
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showWsPopover, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Workspaces").font(.headline).padding(.bottom, 4)
+                        ForEach(a.workspaces, id: \.self) { ws in
+                            Text((URL(fileURLWithPath: ws).lastPathComponent))
+                                .font(.caption)
+                            Text(ws).font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                    .padding()
+                    .frame(minWidth: 280)
+                }
             }
         }
     }
@@ -876,7 +901,7 @@ struct PermissionsBar: View {
         if ws.isEmpty { return "All" }
         let names = ws.map { (URL(fileURLWithPath: $0).lastPathComponent) }
         if names.count <= 1 { return names.joined(separator: ", ") }
-        return "\(names.count) ws"
+        return "\(names.count) ws ▾"
     }
 }
 

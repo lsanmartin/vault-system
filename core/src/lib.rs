@@ -3421,9 +3421,10 @@ pub fn validate_dependency_cycles(root_dir: String) -> String {
 #[uniffi::export]
 pub fn chat_get_or_create_thread(agent_code: String) -> String {
     let conn = match get_db_connection() { Some(c) => c, None => return "{}".into() };
-    // Buscar thread existente primero
+    // Buscar thread con mensajes primero, luego el más reciente
     let existing: Option<String> = conn.query_row(
-        "SELECT id FROM chat_threads WHERE agent_code = ? ORDER BY updated_at DESC LIMIT 1",
+        "SELECT t.id FROM chat_threads t WHERE t.agent_code = ?1
+         ORDER BY (SELECT COUNT(*) FROM chat_messages m WHERE m.thread_id = t.id) DESC, t.updated_at DESC LIMIT 1",
         params![agent_code], |r| r.get(0)
     ).ok();
     if let Some(tid) = existing {
