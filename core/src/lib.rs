@@ -3421,15 +3421,19 @@ pub fn validate_dependency_cycles(root_dir: String) -> String {
 #[uniffi::export]
 pub fn chat_get_or_create_thread(agent_code: String) -> String {
     let conn = match get_db_connection() { Some(c) => c, None => return "{}".into() };
-    let thread_id = format!("{}_{}", agent_code, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
-    let _ = conn.execute("INSERT OR IGNORE INTO chat_threads (id, agent_code, name) VALUES (?, ?, ?)",
-        params![thread_id, agent_code, format!("Chat {}", agent_code)]);
-    // Si ya existía, devolver el existente
-    let existing: String = conn.query_row(
+    // Buscar thread existente primero
+    let existing: Option<String> = conn.query_row(
         "SELECT id FROM chat_threads WHERE agent_code = ? ORDER BY updated_at DESC LIMIT 1",
         params![agent_code], |r| r.get(0)
-    ).unwrap_or(thread_id.clone());
-    serde_json::json!({"thread_id": existing}).to_string()
+    ).ok();
+    if let Some(tid) = existing {
+        return serde_json::json!({"thread_id": tid}).to_string();
+    }
+    // Crear nuevo solo si no existe
+    let thread_id = format!("{}_{}", agent_code, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
+    let _ = conn.execute("INSERT INTO chat_threads (id, agent_code, name) VALUES (?, ?, ?)",
+        params![thread_id, agent_code, format!("Chat {}", agent_code)]);
+    serde_json::json!({"thread_id": thread_id}).to_string()
 }
 
 #[uniffi::export]

@@ -75,15 +75,14 @@ struct LocalChatView: View {
             HStack {
                 // Utilidades (izquierda)
                 HStack(spacing: 8) {
-                    if selectedAgent == .local {
-                        Button(action: { brain.setEnabled(!brain.isEnabled) }) {
-                            Image(systemName: brain.isEnabled ? "power.circle.fill" : "power")
-                                .font(.system(size: 13))
-                                .foregroundColor(brain.isEnabled ? .green : .secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Encender/Apagar cerebro local")
+                    // Toggle on/off para cualquier agente
+                    Button(action: { toggleSelectedAgent() }) {
+                        Image(systemName: isSelectedAgentEnabled ? "power.circle.fill" : "power")
+                            .font(.system(size: 13))
+                            .foregroundColor(isSelectedAgentEnabled ? .green : .secondary)
                     }
+                    .buttonStyle(.plain)
+                    .help(isSelectedAgentEnabled ? "Desactivar \(selectedAgent.displayName)" : "Activar \(selectedAgent.displayName)")
 
                     Button(action: { showAgentSettings = true }) {
                         Image(systemName: "brain.head.profile")
@@ -119,6 +118,11 @@ struct LocalChatView: View {
             }
             .padding(.horizontal).padding(.vertical, 8)
             .background(Color(NSColor.windowBackgroundColor))
+
+            // Barra de permisos
+            PermissionsBar(agent: selectedAgent)
+                .padding(.horizontal, 12).padding(.bottom, 4)
+                .background(Color(NSColor.windowBackgroundColor))
 
             Divider()
 
@@ -156,7 +160,7 @@ struct LocalChatView: View {
 
             // Input
             HStack(alignment: .bottom, spacing: 8) {
-                ChatInputView(text: $inputText, disabled: isGenerating || (selectedAgent == .local && !brain.isEnabled), onCommit: send)
+                ChatInputView(text: $inputText, disabled: isGenerating || !isSelectedAgentEnabled, onCommit: send)
                     .frame(minHeight: 72, maxHeight: 240)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(4)
@@ -176,8 +180,7 @@ struct LocalChatView: View {
                                 ? .secondary.opacity(0.3) : .accentColor)
                     }
                     .buttonStyle(.plain)
-                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                              || (selectedAgent == .local && !brain.isEnabled))
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isSelectedAgentEnabled)
                 }
             }
             .padding()
@@ -277,6 +280,27 @@ struct LocalChatView: View {
         }
     }
 
+    // MARK: - Agent Enable/Disable
+
+    private var isSelectedAgentEnabled: Bool {
+        switch selectedAgent {
+        case .local: return brain.isEnabled
+        case .external(let a): return UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
+        }
+    }
+
+    private func toggleSelectedAgent() {
+        switch selectedAgent {
+        case .local:
+            brain.setEnabled(!brain.isEnabled)
+        case .external(let a):
+            let newVal = !UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
+            UserDefaults.standard.set(newVal, forKey: "agent_enabled_\(a.id)")
+            // Refrescar UI
+            selectedAgent = selectedAgent
+        }
+    }
+
     // MARK: - Cancel
 
     private func cancelGeneration() {
@@ -321,8 +345,8 @@ struct LocalChatView: View {
             inputText = ""; return
         }
 
-        guard target == .local ? brain.isEnabled : true else {
-            messages.append(LocalChatMessage(text: "Cerebro local desactivado.", isUser: false, agentCode: "LC"))
+        guard isSelectedAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
             return
         }
 
@@ -411,7 +435,6 @@ struct LocalChatView: View {
 
                 guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
                     await flushPending(text: "", tools: pendingTools, code: code)
-                    if !hasText { await MainActor.run { messages.append(LocalChatMessage(text: "✅ Listo.", isUser: false, agentCode: code)) } }
                     await MainActor.run { isGenerating = false }
                     return
                 }
@@ -456,8 +479,9 @@ struct LocalChatView: View {
             msg.toolNames = tools
             messages.append(msg)
         }
-        let finalText = text.isEmpty ? "✅ Listo." : text
-        messages.append(LocalChatMessage(text: finalText, isUser: false, agentCode: code))
+        if !text.isEmpty {
+            messages.append(LocalChatMessage(text: text, isUser: false, agentCode: code))
+        }
     }
 
     private struct ToolCallResult { let id: String; let name: String; let args: String }
@@ -817,4 +841,52 @@ struct ChatMessagesView: NSViewRepresentable {
     }
 
     class Coordinator: NSObject {}
+}
+
+// MARK: - Permissions Bar
+
+struct PermissionsBar: View {
+    let agent: LocalChatView.AgentChip
+
+    var body: some View {
+        HStack(spacing: 4) {
+            switch agent {
+            case .local:
+                PermBadge("Read", allowed: true).help("Lectura de contenido de notas")
+                PermBadge("Writ", allowed: true).help("Escritura de notas y metadatos")
+                PermBadge("Meta", allowed: true).help("Acceso a _memory, _specs, _lore")
+                PermBadge("Syst", allowed: true).help("Acceso a system_workspace")
+                PermBadge("Telem", allowed: true).help("Lectura de telemetría")
+                Text("·").foregroundColor(.secondary)
+                Text("All").font(.caption2).bold().help("Todos los workspaces registrados")
+            case .external(let a):
+                PermBadge("Read", allowed: a.readContent).help("Lectura de contenido crudo de notas")
+                PermBadge("Writ", allowed: a.writeContent).help("Escritura: crear/modificar notas")
+                PermBadge("Meta", allowed: a.readMetadata).help("Lectura de _memory, _specs, _lore")
+                PermBadge("Syst", allowed: a.readSystem).help("Acceso a system_workspace")
+                PermBadge("Telem", allowed: a.readTelemetry).help("Lectura de telemetría")
+                Text("·").foregroundColor(.secondary)
+                Text(wsLabel(a.workspaces)).font(.caption2).bold()
+                    .help("Workspaces: " + a.workspaces.joined(separator: ", "))
+            }
+        }
+    }
+
+    private func wsLabel(_ ws: [String]) -> String {
+        if ws.isEmpty { return "All" }
+        let names = ws.map { (URL(fileURLWithPath: $0).lastPathComponent) }
+        if names.count <= 1 { return names.joined(separator: ", ") }
+        return "\(names.count) ws"
+    }
+}
+
+struct PermBadge: View {
+    let label: String
+    let allowed: Bool
+    init(_ label: String, allowed: Bool) { self.label = label; self.allowed = allowed }
+    var body: some View {
+        Text(label)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundColor(allowed ? .green : .secondary.opacity(0.4))
+    }
 }
