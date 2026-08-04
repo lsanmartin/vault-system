@@ -1,6 +1,8 @@
 # Contexto del Agente
 
-Última actualización: [2026-08-01]
+Última actualización: [2026-08-03]
+
+**📋 Agenda de trabajo:** `KANBAN.md` — fuente de verdad para fases y tareas. Leer al iniciar sesión.
 
 ## Lineamientos de Dominio: Taxonomía de Tres Capas
 - **Capa 1: UI Nativa (SwiftUI)**: Gestión de ventanas, redimensión de columnas independientes (`HSplitView` plano), y navegación jerárquica.

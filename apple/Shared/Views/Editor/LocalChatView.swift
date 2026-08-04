@@ -1,216 +1,710 @@
 import SwiftUI
 import Combine
+import WebKit
 
-/// Mensaje de Chat
 struct LocalChatMessage: Identifiable, Equatable {
     let id = UUID()
     let text: String
     let isUser: Bool
+    let agentCode: String?
     let timestamp = Date()
+    var type: String? = nil        // "tools" = colapsable de herramientas, nil = normal
+    var toolNames: [String] = []   // nombres de tools usadas (solo type="tools")
+    static func == (lhs: LocalChatMessage, rhs: LocalChatMessage) -> Bool { lhs.id == rhs.id }
 }
 
-/// Vista del Chat RAG de IA Local (Gemma 4 en GPU)
 struct LocalChatView: View {
     @ObservedObject var viewModel: EditorViewModel
     @StateObject private var brain = LocalBrain.shared
-    
+    @ObservedObject private var agentManager = ExternalAgentManager.shared
+
     @State private var messages: [LocalChatMessage] = [
-        LocalChatMessage(text: "¡Hola! Soy tu asistente cognitivo local. ¿De qué te gustaría conversar sobre tus notas hoy?", isUser: false)
+        LocalChatMessage(text: "Usá @local, @ds, @cl, @op. Sin arroba → @local.", isUser: false, agentCode: "LC")
     ]
-    @State private var inputPrompt: String = ""
+    @State private var inputText: String = ""
     @State private var isGenerating: Bool = false
-    
+    @State private var selectedAgent: AgentChip = .local
+    @State private var showAgentSettings = false
+
+    enum AgentChip: Hashable {
+        case local
+        case external(ExternalAgentConfig)
+
+        var code: String {
+            switch self {
+            case .local: return "LC"
+            case .external(let a):
+                switch a.provider {
+                case .deepseek: return "DS"
+                case .anthropic: return "CL"
+                case .openai: return "OP"
+                }
+            }
+        }
+
+        var fullName: String {
+            switch self {
+            case .local: return "Local (Gemma 4)"
+            case .external(let a): return "\(a.name) · \(a.provider.rawValue)"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .local: return .green
+            case .external(let a):
+                switch a.provider {
+                case .deepseek: return .blue
+                case .anthropic: return .orange
+                case .openai: return .teal
+                }
+            }
+        }
+    }
+
+    var chips: [AgentChip] {
+        [.local] + agentManager.agents.map { .external($0) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "cpu")
-                    .foregroundColor(modelStatusColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Gemma 4 (Local)")
-                        .font(.headline)
-                    Text(modelStatusText)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-
-                // Toggle de activación del modelo (libera la memoria GPU al desactivar)
-                Button(action: {
-                    brain.setEnabled(!brain.isEnabled)
-                }) {
-                    Image(systemName: brain.isEnabled ? "power.circle.fill" : "power")
-                        .font(.system(size: 14))
-                        .foregroundColor(brain.isEnabled ? .green : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(brain.isEnabled ? "Desactivar cerebro local (libera memoria GPU)" : "Activar cerebro local")
-
-                Button(action: {
-                    messages = [LocalChatMessage(text: "Conversación reiniciada. ¿En qué puedo ayudarte?", isUser: false)]
-                }) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 13))
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
-            // Lista de Mensajes
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(messages) { msg in
-                            ChatBubble(message: msg)
+                // Utilidades (izquierda)
+                HStack(spacing: 8) {
+                    if selectedAgent == .local {
+                        Button(action: { brain.setEnabled(!brain.isEnabled) }) {
+                            Image(systemName: brain.isEnabled ? "power.circle.fill" : "power")
+                                .font(.system(size: 13))
+                                .foregroundColor(brain.isEnabled ? .green : .secondary)
                         }
+                        .buttonStyle(.plain)
+                        .help("Encender/Apagar cerebro local")
                     }
-                    .padding()
-                }
-                .onChange(of: messages.count) { _ in
-                    if let last = messages.last {
-                        withAnimation {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            
-            Divider()
-            
-            // Entrada de texto
-            HStack(spacing: 8) {
-                TextField("Pregúntale a tu Vault...", text: $inputPrompt)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isGenerating || !brain.isEnabled)
-                    .onSubmit {
-                        sendMessage()
-                    }
-                
-                if isGenerating {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button(action: sendMessage) {
-                        Image(systemName: "paperplane.fill")
-                            .foregroundColor(.accentColor)
+
+                    Button(action: { showAgentSettings = true }) {
+                        Image(systemName: "brain.head.profile")
+                            .font(.system(size: 13))
                     }
                     .buttonStyle(.plain)
-                    .disabled(inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !brain.isEnabled)
+                    .foregroundColor(.secondary)
+                    .help("Configurar agentes externos")
+
+                    Button(action: {
+                        messages = [LocalChatMessage(text: "Chat reiniciado.", isUser: false, agentCode: selectedAgent.code)]
+                    }) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .help("/clear — Limpiar vista")
+                }
+
+                Spacer()
+
+                // Agente activo
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(selectedAgent.color)
+                        .frame(width: 8, height: 8)
+                    Text(selectedAgent.code)
+                        .font(.headline).bold()
+                    Text(selectedAgent.fullName)
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal).padding(.vertical, 8)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Mensajes (NSTextView nativo para selección multi-burbuja)
+            ChatMessagesView(messages: messages)
+                .onChange(of: messages.count) { _ in
+                    // scroll handled internally by NSTextView
+                }
+
+            Divider()
+
+            // Píldoras de agentes
+            HStack(spacing: 4) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(chips, id: \.self) { chip in
+                            Button(action: { selectedAgent = chip }) {
+                                HStack(spacing: 3) {
+                                    Text(chip.code)
+                                        .font(.caption).bold().monospaced()
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(selectedAgent == chip ? chip.color : Color.secondary.opacity(0.1))
+                                .foregroundColor(selectedAgent == chip ? .white : .primary)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }.padding(.horizontal, 8)
+                }
+                .frame(height: 24)
+            }
+            .padding(.vertical, 4)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            // Input
+            HStack(alignment: .bottom, spacing: 8) {
+                ChatInputView(text: $inputText, disabled: isGenerating || (selectedAgent == .local && !brain.isEnabled), onCommit: send)
+                    .frame(minHeight: 72, maxHeight: 240)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(4)
+                    .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+
+                if isGenerating {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title3)
+                            .foregroundColor(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                ? .secondary.opacity(0.3) : .accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || (selectedAgent == .local && !brain.isEnabled))
                 }
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
         }
-        .frame(minWidth: 260, maxWidth: 350)
+        .frame(minWidth: 280, maxWidth: 380)
+        .sheet(isPresented: $showAgentSettings) {
+            AgentSettingsView()
+                .frame(width: 560, height: 780)
+        }
     }
-    
-    private func sendMessage() {
-        let cleanText = inputPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanText.isEmpty else { return }
-        guard brain.isEnabled else {
-            messages.append(LocalChatMessage(text: "El cerebro local está desactivado. Pulsa el botón de encendido ⏻ para reactivarlo.", isUser: false))
+
+    // MARK: - Send
+
+    private func send() {
+        let clean = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+
+        // Detectar @mención
+        var target = selectedAgent
+        if let first = clean.split(separator: " ").first, first.hasPrefix("@") {
+            let m = String(first.dropFirst()).lowercased()
+            if m == "local" || m == "lc" { target = .local }
+            else if let match = agentManager.agents.first(where: {
+                $0.name.lowercased().replacingOccurrences(of: " ", with: "") == m
+            }) { target = .external(match) }
+        }
+
+        // Comandos
+        if clean == "/reset" {
+            messages = [LocalChatMessage(text: "Sesión reiniciada.", isUser: false, agentCode: target.code)]
+            inputText = ""; return
+        }
+        if clean == "/clear" {
+            messages.removeAll()
+            inputText = ""; return
+        }
+        if clean == "/compact" {
+            let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: target.code)]
+            inputText = ""; return
+        }
+
+        guard target == .local ? brain.isEnabled : true else {
+            messages.append(LocalChatMessage(text: "Cerebro local desactivado.", isUser: false, agentCode: "LC"))
             return
         }
 
-        inputPrompt = ""
-        let userMsg = LocalChatMessage(text: cleanText, isUser: true)
+        let prompt = clean
+        inputText = ""
+        let userMsg = LocalChatMessage(text: prompt, isUser: true, agentCode: nil)
         messages.append(userMsg)
-        
         isGenerating = true
-        
-        // Obtener contexto de la nota activa si está abierta
-        var activeContext = ""
-        if let activeId = viewModel.activeTabId,
-           let tab = viewModel.tabs.first(where: { $0.id == activeId }) {
-            activeContext = tab.content
+
+        var ctx = ""
+        if let id = viewModel.activeTabId, let tab = viewModel.tabs.first(where: { $0.id == id }) {
+            ctx = tab.content
         }
-        
+
+        switch target {
+        case .local:
+            sendLocal(prompt: prompt, context: ctx)
+        case .external(let agent):
+            sendExternal(prompt: prompt, agent: agent, context: ctx)
+        }
+    }
+
+    // MARK: - Local Brain
+
+    private func sendLocal(prompt: String, context: String) {
         Task {
             do {
-                // Iniciar stream del chat
-                let stream = try await brain.chatStream(prompt: cleanText, context: activeContext)
-                
-                // Añadir burbuja vacía para la respuesta
-                let assistantMsg = LocalChatMessage(text: "", isUser: false)
-                DispatchQueue.main.async {
-                    messages.append(assistantMsg)
-                }
-                
-                var accumulatedText = ""
+                let stream = try await brain.chatStream(prompt: prompt, context: context)
+                let msg = LocalChatMessage(text: "", isUser: false, agentCode: "LC")
+                await MainActor.run { messages.append(msg) }
+                var acc = ""
                 for await chunk in stream {
-                    accumulatedText += chunk
-                    DispatchQueue.main.async {
-                        if let lastIdx = messages.indices.last {
-                            messages[lastIdx] = LocalChatMessage(text: accumulatedText, isUser: false)
-                        }
+                    acc += chunk
+                    await MainActor.run {
+                        if let i = messages.indices.last { messages[i] = LocalChatMessage(text: acc, isUser: false, agentCode: "LC") }
                     }
                 }
             } catch {
-                DispatchQueue.main.async {
-                    messages.append(LocalChatMessage(text: "❌ Error: \(error.localizedDescription)", isUser: false))
+                await MainActor.run {
+                    messages.append(LocalChatMessage(text: "❌ \(error.localizedDescription)", isUser: false, agentCode: "LC"))
                 }
             }
-            DispatchQueue.main.async {
-                isGenerating = false
+            await MainActor.run { isGenerating = false }
+        }
+    }
+
+    // MARK: - External API (con tool calling MCP real)
+
+    private func sendExternal(prompt: String, agent: ExternalAgentConfig, context: String) {
+        guard let key = agentManager.getAPIKey(for: agent.id) else {
+            messages.append(LocalChatMessage(text: "❌ Sin API key en Keychain.", isUser: false, agentCode: agentCode(for: agent)))
+            isGenerating = false; return
+        }
+
+        let code = agentCode(for: agent)
+        let sys = buildSystemPrompt(agent: agent, context: context)
+
+        // Obtener tools MCP del agente y convertirlas a formato OpenAI
+        let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
+        let openaiTools = convertMcpToolsToOpenAI(toolsJson)
+
+        Task {
+            let maxTurns = 8
+            var conversation: [[String: Any]] = [
+                ["role": "system", "content": String(sys.prefix(3000))],
+                ["role": "user", "content": prompt]
+            ]
+            var pendingTools: [String] = []
+            var hasText = false
+
+            for turn in 0..<maxTurns {
+                let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+
+                if let error = result.error {
+                    await MainActor.run {
+                        messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
+                        isGenerating = false
+                    }
+                    return
+                }
+
+                if result.text != nil, !(result.text?.isEmpty ?? true) { hasText = true }
+
+                guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
+                    await flushPending(text: "", tools: pendingTools, code: code)
+                    if !hasText { await MainActor.run { messages.append(LocalChatMessage(text: "✅ Listo.", isUser: false, agentCode: code)) } }
+                    await MainActor.run { isGenerating = false }
+                    return
+                }
+
+                pendingTools.append(contentsOf: toolCalls.map(\.name))
+
+                var assistantMsg: [String: Any] = ["role": "assistant"]
+                assistantMsg["tool_calls"] = toolCalls.map { tc in
+                    return ["id": tc.id, "type": "function",
+                            "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
+                }
+                conversation.append(assistantMsg)
+
+                for tc in toolCalls {
+                    var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(
+                        tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args
+                    ))
+                    if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+                    conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
+                }
+
+                let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
+                if total > 1_500_000 { conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6)) }
             }
+
+            await flushPending(text: "", tools: pendingTools, code: code)
+            await MainActor.run { isGenerating = false }
         }
     }
-    
-    private var modelStatusColor: Color {
-        guard brain.isEnabled else { return .gray }
-        switch brain.modelStatus {
-        case .notLoaded:
-            return .gray
-        case .downloading:
-            return .orange
-        case .loading:
-            return .orange
-        case .ready:
-            return .green
-        case .error:
-            return .red
+
+    @MainActor
+    private func updateMessage(at idx: Int, text: String, code: String) {
+        messages[idx] = LocalChatMessage(text: text, isUser: false, agentCode: code)
+    }
+
+    @MainActor
+    private func flushPending(text: String, tools: [String], code: String) {
+        if !tools.isEmpty {
+            let count = tools.count
+            let list = tools.joined(separator: "\n- ")
+            var msg = LocalChatMessage(text: "🔧 \(count) herramienta(s) usada(s)", isUser: false, agentCode: code, type: "tools")
+            msg.toolNames = tools
+            messages.append(msg)
+        }
+        let finalText = text.isEmpty ? "✅ Listo." : text
+        messages.append(LocalChatMessage(text: finalText, isUser: false, agentCode: code))
+    }
+
+    private struct ToolCallResult { let id: String; let name: String; let args: String }
+    private struct StreamResult { let text: String?; let toolCalls: [ToolCallResult]?; let error: String? }
+
+    private func streamAPI(agent: ExternalAgentConfig, key: String, apiMessages: [[String: Any]], tools: [[String: Any]], code: String) async -> StreamResult {
+        var req = URLRequest(url: URL(string: "\(agent.provider.baseURL)/chat/completions")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+
+        var body: [String: Any] = ["model": agent.model, "messages": apiMessages, "stream": true]
+        if !tools.isEmpty { body["tools"] = tools }
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
+            return StreamResult(text: nil, toolCalls: nil, error: "Error serializando request")
+        }
+        req.httpBody = httpBody
+
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return StreamResult(text: nil, toolCalls: nil, error: "HTTP \( (response as? HTTPURLResponse)?.statusCode ?? 0)")
+            }
+
+            var streamedText = ""
+            var msgIdx: Int? = nil
+            var tcAccum: [Int: (id: String, name: String, args: String)] = [:]
+            var finishReason: String? = nil
+
+            for try await line in bytes.lines {
+                guard line.hasPrefix("data: "), line != "data: [DONE]" else { continue }
+                let jsonStr = String(line.dropFirst(6))
+                guard let d = jsonStr.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                      let choices = obj["choices"] as? [[String: Any]],
+                      let first = choices.first else { continue }
+
+                let delta = first["delta"] as? [String: Any] ?? [:]
+                finishReason = first["finish_reason"] as? String
+
+                if let content = delta["content"] as? String, !content.isEmpty {
+                    if let idx = msgIdx {
+                        streamedText += content
+                        await updateMessage(at: idx, text: streamedText, code: code)
+                    } else {
+                        streamedText = content
+                        await MainActor.run {
+                            messages.append(LocalChatMessage(text: content, isUser: false, agentCode: code))
+                            msgIdx = messages.count - 1
+                        }
+                    }
+                }
+
+                if let tcDeltas = delta["tool_calls"] as? [[String: Any]] {
+                    for tc in tcDeltas {
+                        let idx = tc["index"] as? Int ?? 0
+                        var cur = tcAccum[idx] ?? (id: "", name: "", args: "")
+                        if let id = tc["id"] as? String { cur.id = id }
+                        if let fn = tc["function"] as? [String: Any] {
+                            if let n = fn["name"] as? String { cur.name = n }
+                            if let a = fn["arguments"] as? String { cur.args += a }
+                        }
+                        tcAccum[idx] = cur
+                    }
+                }
+            }
+
+            let text = streamedText.isEmpty ? nil : streamedText
+            let toolCalls: [ToolCallResult]? = if finishReason == "tool_calls", !tcAccum.isEmpty {
+                tcAccum.values.sorted(by: { $0.id < $1.id }).map { ToolCallResult(id: $0.id, name: $0.name, args: $0.args) }
+            } else { nil }
+
+            return StreamResult(text: text, toolCalls: toolCalls, error: nil)
+        } catch {
+            return StreamResult(text: nil, toolCalls: nil, error: "Red: \(error.localizedDescription)")
         }
     }
-    
-    private var modelStatusText: String {
-        guard brain.isEnabled else { return "Desactivado - Memoria GPU liberada" }
-        switch brain.modelStatus {
-        case .notLoaded:
-            return "GPU Metal - Offline (No cargado)"
-        case .downloading(let progress):
-            return "Descargando weights... \(Int(progress * 100))%"
-        case .loading:
-            return "Cargando en GPU Metal..."
-        case .ready:
-            return "Listo - GPU Metal Caliente"
-        case .error(let desc):
-            return "Error: \(desc)"
+
+    private func buildSystemPrompt(agent: ExternalAgentConfig, context: String) -> String {
+        var sys = "Eres \(agent.name), un asistente IA con acceso al Vault System.\n"
+        sys += "Puedes usar herramientas para leer notas, buscar, leer metadatos y telemetría.\n"
+        if agent.writeContent || agent.writeMetadata || agent.writeSystem {
+            sys += "También puedes crear/modificar notas y metadatos.\n"
+        }
+        sys += "Cuando el usuario pida hacer algo (crear nota, buscar, abrir), USA las herramientas disponibles.\n"
+        sys += "No digas 'no puedo' sin antes intentar usar una herramienta.\n"
+        if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
+        return sys
+    }
+
+    private func convertMcpToolsToOpenAI(_ mcpToolsJson: String) -> [[String: Any]] {
+        guard let data = mcpToolsJson.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let tools = result["tools"] as? [[String: Any]] else { return [] }
+
+        return tools.compactMap { tool -> [String: Any]? in
+            guard let name = tool["name"] as? String,
+                  var desc = tool["description"] as? String else { return nil }
+            if desc.count > 200 { desc = String(desc.prefix(200)) }
+            let schema = tool["inputSchema"] as? [String: Any]
+            var fn: [String: Any] = ["name": name, "description": desc]
+            if let s = schema {
+                fn["parameters"] = ["type": "object", "properties": s["properties"] ?? [:], "required": s["required"] ?? []]
+            }
+            return ["type": "function", "function": fn]
+        }
+    }
+
+    private func buildMcpRequest(tokenId: String, toolName: String, arguments: String) -> String {
+        let parsedArgs: Any
+        if let data = arguments.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) {
+            parsedArgs = obj
+        } else {
+            parsedArgs = arguments
+        }
+        let inner: [String: Any] = [
+            "jsonrpc": "2.0", "method": "tools/call",
+            "params": ["name": toolName, "arguments": parsedArgs],
+            "id": 1, "mcp_client_token": tokenId
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: inner),
+           let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        return "{}"
+    }
+
+    private func agentCode(for agent: ExternalAgentConfig) -> String {
+        switch agent.provider {
+        case .deepseek: return "DS"
+        case .anthropic: return "CL"
+        case .openai: return "OP"
         }
     }
 }
 
-/// Burbuja de Mensaje Premium
+// MARK: - Bubble
+
 struct ChatBubble: View {
     let message: LocalChatMessage
-    
+
     var body: some View {
         HStack {
             if message.isUser { Spacer() }
-            
-            Text(message.text)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(message.isUser ? Color.accentColor : Color(NSColor.controlBackgroundColor))
-                .foregroundColor(message.isUser ? .white : .primary)
-                .cornerRadius(12)
-                .textSelection(.enabled)
-                .frame(maxWidth: 260, alignment: message.isUser ? .trailing : .leading)
-            
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 2) {
+                if let code = message.agentCode, !message.isUser {
+                    Text(code)
+                        .font(.caption2).bold().monospaced()
+                        .foregroundColor(code == "LC" ? .green : .purple)
+                }
+                Text(message.text)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(message.isUser ? Color.accentColor : Color(NSColor.controlBackgroundColor))
+                    .foregroundColor(message.isUser ? .white : .primary)
+                    .cornerRadius(10)
+                    .frame(maxWidth: 270, alignment: message.isUser ? .trailing : .leading)
+            }
             if !message.isUser { Spacer() }
         }
     }
+}
+
+
+// MARK: - Chat Input (NSTextView wrapper: Enter = send, ⌘Enter = newline)
+
+struct ChatInputView: NSViewRepresentable {
+    @Binding var text: String
+    var disabled: Bool = false
+    var onCommit: () -> Void = {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        let textView = scrollView.documentView as! NSTextView
+        textView.delegate = context.coordinator
+        textView.isEditable = true
+        textView.isRichText = false
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = false
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        let textView = nsView.documentView as! NSTextView
+        textView.isEditable = !disabled
+        if textView.string != text {
+            textView.string = text
+        }
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ChatInputView
+        init(_ p: ChatInputView) { parent = p }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            parent.text = tv.string
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let flags = NSApp.currentEvent?.modifierFlags ?? []
+                if flags.contains(.command) {
+                    return false // ⌘Enter = insert newline (default)
+                }
+                parent.onCommit() // Enter = send
+                return true
+            }
+            return false
+        }
+    }
+}
+
+
+
+// MARK: - Chat Messages (WebView con Markdown + selección multi-burbuja + padding)
+
+struct ChatMessagesView: NSViewRepresentable {
+    let messages: [LocalChatMessage]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.loadHTMLString(buildHTML(), baseURL: nil)
+    }
+
+    private func buildHTML() -> String {
+        let msgsHTML = messages.map { msg -> String in
+            let side = msg.isUser ? "user" : "agent"
+            let agentLabel = msg.isUser ? "Tú" : (msg.agentCode ?? "")
+            let agentColor = (msg.agentCode == "LC") ? "#34c759" : "#af52de"
+
+            // Mensaje de "pensando…"
+            if msg.type == "thinking" {
+                return """
+                <div class="msg agent thinking">
+                  <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
+                  <div class="bubble thinking-bubble">\(escaped(msg.text))</div>
+                </div>
+                """
+            }
+
+            // Colapsable de herramientas
+            if msg.type == "tools" {
+                let toolList = msg.toolNames.map { "<li>\(escaped($0))</li>" }.joined()
+                return """
+                <div class="msg agent tools-section">
+                  <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
+                  <details class="tools-details">
+                    <summary class="tools-summary">\(escaped(msg.text))</summary>
+                    <ul class="tools-list">\(toolList)</ul>
+                  </details>
+                </div>
+                <div class="sep"></div>
+                """
+            }
+
+            return """
+            <div class="msg \(side)">
+              <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
+              <div class="bubble">\(escaped(msg.text))</div>
+            </div>
+            <div class="sep"></div>
+            """
+        }.joined()
+
+        func escaped(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;")
+             .replacingOccurrences(of: "<", with: "&lt;")
+             .replacingOccurrences(of: ">", with: "&gt;")
+        }
+
+        return """
+        <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          :root { color-scheme: light dark; }
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            font: -apple-system-body; line-height:1.55;
+            color: -apple-system-label; background: transparent;
+            padding: 20px 18px; -webkit-user-select: text; user-select: all;
+          }
+          .msg { display: flex; flex-direction: column; margin-bottom: 6px; }
+          .msg.user { align-items: flex-end; }
+          .msg.agent { align-items: flex-start; }
+          .agent-label { font-size: 10px; font-weight: 700; font-family: monospace; margin-bottom: 3px; user-select: none; }
+          .bubble { display: inline-block; max-width: 90%; padding: 10px 14px; border-radius: 12px; word-wrap: break-word; }
+          .user .bubble { background: #007aff; color: #fff; }
+          .agent .bubble { background: rgba(128,128,128,0.12); color: -apple-system-label; }
+          .sep { height: 12px; }
+          @media (prefers-color-scheme: dark) {
+            .agent .bubble { background: rgba(255,255,255,0.08); }
+          }
+
+          /* Markdown styles */
+          .bubble p { margin: 3px 0; }
+          .bubble p:first-child { margin-top:0; }
+          .bubble p:last-child { margin-bottom:0; }
+          .bubble code { background: rgba(128,128,128,0.2); padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+          .bubble pre { background: rgba(0,0,0,0.08); padding: 10px 14px; border-radius: 8px; overflow-x: auto; margin: 6px 0; font-size: 0.9em; }
+          .bubble pre code { background: none; padding: 0; font-size: inherit; }
+          .bubble ul, .bubble ol { padding-left: 20px; margin: 4px 0; }
+          .bubble li { margin: 2px 0; }
+          .bubble blockquote { border-left: 3px solid rgba(128,128,128,0.3); padding-left: 10px; margin: 6px 0; opacity: 0.8; }
+          .bubble h1,.bubble h2,.bubble h3,.bubble h4 { margin: 10px 0 4px; font-weight: 600; }
+          .bubble h1 { font-size: 1.25em; } .bubble h2 { font-size: 1.12em; } .bubble h3 { font-size: 1.05em; }
+          .bubble strong { font-weight: 600; }
+          .bubble table { border-collapse:collapse; margin: 6px 0; font-size: 0.9em; }
+          .bubble th,.bubble td { border:1px solid rgba(128,128,128,0.3); padding: 4px 8px; }
+          .bubble th { background: rgba(128,128,128,0.1); }
+          .bubble a { color: inherit; opacity: 0.85; }
+
+          /* Thinking animation */
+          .thinking-bubble { font-style: italic; opacity: 0.6; }
+          @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 0.7; } }
+          .thinking { animation: pulse 1.5s ease-in-out infinite; }
+
+          /* Collapsible tools */
+          .tools-details { margin: 4px 0; }
+          .tools-summary { cursor: pointer; font-size: 0.85em; opacity: 0.7; padding: 4px 8px; border-radius: 6px; background: rgba(128,128,128,0.08); display: inline-block; user-select: none; }
+          .tools-summary:hover { opacity: 1; background: rgba(128,128,128,0.15); }
+          .tools-list { margin: 8px 0 0 16px; font-size: 0.8em; opacity: 0.6; font-family: monospace; }
+          .tools-list li { margin: 2px 0; }
+
+          @media (prefers-color-scheme: dark) {
+            .bubble pre { background: rgba(255,255,255,0.06); }
+            .bubble code { background: rgba(255,255,255,0.1); }
+          }
+        </style>
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        </head><body>
+        \(msgsHTML)
+        <script>
+          marked.setOptions({ breaks: true, gfm: true });
+          document.querySelectorAll('.bubble').forEach(el => {
+            el.innerHTML = marked.parse(el.textContent || '');
+          });
+          requestAnimationFrame(() => { window.scrollTo(0, document.body.scrollHeight); });
+        </script>
+        </body></html>
+        """
+    }
+
+    class Coordinator: NSObject {}
 }

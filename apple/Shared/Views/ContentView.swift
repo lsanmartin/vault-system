@@ -8,6 +8,9 @@ struct ContentView: View {
     @State private var isDBReady: Bool = false
     @State private var showMCPConfig: Bool = false
     @ObservedObject var brain = LocalBrain.shared
+    @State private var showChat: Bool = false
+    @State private var showTelemetry: Bool = false
+    @State private var showAgentSettings: Bool = false
     
     // Patrones del "Anillo de Inteligencia" y "Flujo" a ignorar por defecto
     private let defaultIgnorePatterns = [
@@ -57,8 +60,12 @@ struct ContentView: View {
             // El Editor principal ocupa todo el espacio disponible
             ZStack {
                 ZStack(alignment: .bottomLeading) {
-                    MainEditorView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    MainEditorView(
+                        showChat: $showChat,
+                        showTelemetry: $showTelemetry,
+                        showAgentSettings: $showAgentSettings
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     
                     if brain.isDownloading {
                         VStack {
@@ -109,18 +116,42 @@ struct ContentView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
                     
-                    Button(action: { 
-                        withAnimation { showMCPConfig = true } 
-                    }) {
-                        Image(systemName: "network.badge.shield.half.filled")
-                            .font(.title2)
-                            .padding(12)
-                            .background(Color.accentColor.opacity(0.8))
-                            .foregroundColor(.white)
-                            .clipShape(Circle())
-                            .shadow(radius: 4)
+                    // Botones de utilidad apilados (bottom-left)
+                    VStack(spacing: 10) {
+                        // Chat
+                        Button(action: { withAnimation { showChat.toggle() } }) {
+                            Image(systemName: "cpu")
+                                .font(.title3).padding(12)
+                                .background(showChat ? Color.accentColor : Color.blue)
+                                .foregroundColor(.white).clipShape(Circle()).shadow(radius: 4)
+                        }.buttonStyle(.plain).help("Chat IA (@local, @ds, @cl, @op)")
+
+                        // Telemetría
+                        if !showTelemetry {
+                            Button(action: { withAnimation { showTelemetry = true } }) {
+                                Image(systemName: "terminal.fill")
+                                    .font(.title3).padding(12)
+                                    .background(Color.green).foregroundColor(.black)
+                                    .clipShape(Circle()).shadow(radius: 4)
+                            }.buttonStyle(.plain).help("Consola de telemetría")
+                        }
+
+                        // Agentes externos
+                        Button(action: { showAgentSettings = true }) {
+                            Image(systemName: "brain.head.profile")
+                                .font(.title3).padding(12)
+                                .background(Color.purple).foregroundColor(.white)
+                                .clipShape(Circle()).shadow(radius: 4)
+                        }.buttonStyle(.plain).help("Configurar agentes externos")
+
+                        // MCP
+                        Button(action: { withAnimation { showMCPConfig = true } }) {
+                            Image(systemName: "network.badge.shield.half.filled")
+                                .font(.title3).padding(12)
+                                .background(Color.accentColor.opacity(0.8)).foregroundColor(.white)
+                                .clipShape(Circle()).shadow(radius: 4)
+                        }.buttonStyle(.plain).help("Configuración MCP y tokens")
                     }
-                    .buttonStyle(.plain)
                     .padding(20)
                 }
                 
@@ -158,6 +189,10 @@ struct ContentView: View {
                     .zIndex(100)
                     .transition(.opacity)
                 }
+
+            }
+            .sheet(isPresented: $showAgentSettings) {
+                AgentSettingsView().frame(width: 560, height: 820)
             }
         }
     }

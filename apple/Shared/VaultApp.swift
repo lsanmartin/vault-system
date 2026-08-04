@@ -54,11 +54,11 @@ struct VaultApp: App {
                 .onAppear {
                     // Cargar tokens persistidos antes de iniciar el daemon
                     loadTokensFromUserDefaults()
-                    
+
                     // Inicializar el Exocórtex (Fase 4)
                     let status = initKnowledgeBase()
                     print("Vault Core Status: \(status)")
-                    
+
                     if status.contains("Error CRITICO") {
                         let alert = NSAlert()
                         alert.messageText = "Error Crítico de Inicialización"
@@ -67,17 +67,30 @@ struct VaultApp: App {
                         alert.addButton(withTitle: "Entendido")
                         alert.runModal()
                     }
-                    
+
                     // Iniciar el Cognitive Daemon (Arquitectura Dual-Brain)
                     let daemonStatus = startCognitiveDaemon()
                     print("Daemon: \(daemonStatus)")
-                    
+
                     // Inicializar el Cerebro Local y disparar la digestión inicial
                     LocalBrain.shared.updatePendingCount()
                     LocalBrain.shared.startDigestion()
-                    
+
                     // Inicializar Observabilidad y Telemetría Nativa
                     _ = TelemetryManager.shared
+
+                    // Registrar cierre determinista: OnStop hook
+                    NotificationCenter.default.addObserver(
+                        forName: NSApplication.willTerminateNotification,
+                        object: nil,
+                        queue: .main
+                    ) { _ in
+                        print("[OnStop] Iniciando cierre determinista...")
+                        for location in workspaceManager.allLocations {
+                            let result = shutdownVaultSession(workspacePath: location.path)
+                            print("[OnStop] \(location.name): \(result)")
+                        }
+                    }
                 }
                 .onOpenURL { url in
                     if workspaceManager.verifyAndResolveWorkspace(for: url) {

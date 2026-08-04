@@ -2175,15 +2175,21 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     }
                     let cleaned_str = cleaned.to_string_lossy().to_string();
-                    
+
                     let mut allowed = false;
                     for w in &r.workspaces {
                         if cleaned_str.starts_with(w) { allowed = true; break; }
                     }
-                    if r.allow_system {
+                    if r.read_system || r.write_system {
                         let home = std::env::var("HOME").unwrap_or("/".to_string());
                         let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
                         if cleaned_str.starts_with(sys_dir.to_str().unwrap_or("")) { allowed = true; }
+                    }
+                    // Si hay subcarpetas restringidas, verificar que la ruta esté dentro de alguna
+                    if allowed && !r.allowed_paths.is_empty() {
+                        allowed = r.allowed_paths.iter().any(|sub| {
+                            cleaned_str.starts_with(sub) || cleaned_str.contains(&format!("/{}/", sub.trim_matches('/')))
+                        });
                     }
                     allowed
                 } else {
@@ -2209,8 +2215,11 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 is_path_allowed(&canon.to_string_lossy(), record)
             };
 
-            let can_write = token_record.as_ref().map(|r| r.can_write).unwrap_or(false);
-            let allow_raw = token_record.as_ref().map(|r| r.allow_raw).unwrap_or(true);
+            let can_write = token_record.as_ref().map(|r| r.write_content).unwrap_or(false);
+            let write_metadata = token_record.as_ref().map(|r| r.write_metadata).unwrap_or(false);
+            let allow_raw = token_record.as_ref().map(|r| r.read_content).unwrap_or(true);
+            let allow_metadata = token_record.as_ref().map(|r| r.read_metadata).unwrap_or(false);
+            let allow_system = token_record.as_ref().map(|r| r.read_system).unwrap_or(false);
 
             crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
 
@@ -2218,7 +2227,10 @@ pub fn mcp_handle_request(json_request: String) -> String {
                 "vault_list_workspaces" => {
                     if let Some(r) = &token_record {
                         let mut resp = format!("Workspaces permitidos:\n{}", r.workspaces.join("\n"));
-                        if r.allow_system {
+                        if !r.allowed_paths.is_empty() {
+                            resp.push_str(&format!("\n\nRestringido a carpetas:\n{}", r.allowed_paths.join("\n")));
+                        }
+                        if r.read_system || r.write_system {
                             let home = std::env::var("HOME").unwrap_or("/".to_string());
                             let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
                             resp.push_str(&format!("\n{}", sys_dir.to_string_lossy()));
@@ -2329,6 +2341,9 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     }
                 },
                 "vault_get_domain_context" => {
+                    if !allow_metadata {
+                        "Error de Seguridad: El token no tiene permiso para leer metadatos de dominio (allow_metadata=false).".to_string()
+                    } else {
                     let path_str = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
                     if !is_path_allowed(path_str, &token_record) {
                         "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
@@ -2346,6 +2361,7 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             }).to_string()
                         }
                     }
+                    } // close allow_metadata guard
                 },
                 "vault_log_friction" => {
                     let ctx = arguments.get("context").and_then(|c| c.as_str()).unwrap_or("");
@@ -2358,6 +2374,9 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     }
                 },
                 "vault_export_domain_metadata" => {
+                    if !allow_metadata {
+                        "Error de Seguridad: El token no tiene permiso para exportar metadatos de dominio (allow_metadata=false).".to_string()
+                    } else {
                     let limit = arguments.get("limit").and_then(|l| l.as_u64()).unwrap_or(100);
                     let since_seconds = arguments.get("since_seconds").and_then(|s| s.as_u64()).unwrap_or(0);
                     
@@ -2445,8 +2464,12 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     } else {
                         "Error: Base de datos no inicializada.".to_string()
                     }
+                    } // close allow_metadata guard
                 },
                 "vault_ui_create_note" => {
+                    if !can_write {
+                        "Error de Seguridad: El token no tiene permisos para crear notas (can_write=false).".to_string()
+                    } else {
                     let title = arguments.get("title").and_then(|t| t.as_str()).unwrap_or("");
                     let content = arguments.get("content").and_then(|c| c.as_str()).unwrap_or("");
                     if let Ok(guard) = UI_LISTENER.lock() {
@@ -2459,6 +2482,7 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     } else {
                         "Error al adquirir bloqueo del listener de interfaz.".to_string()
                     }
+                    } // close can_write guard
                 },
                 "vault_ui_open_note" => {
                     let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
@@ -2566,17 +2590,41 @@ pub fn start_ipc_server() -> String {
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool { true }
+fn default_false() -> bool { false }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, uniffi::Record)]
 pub struct McpTokenRecord {
     pub token_id: String,
     pub client_name: String,
     pub workspaces: Vec<String>,
-    pub can_write: bool,
-    pub allow_metadata: bool,
-    pub allow_system: bool,
+    /// Subcarpetas específicas dentro del workspace. Vacío = acceso total al workspace.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+
+    // --- Lectura ---
+    /// Leer contenido crudo de notas (.md)
     #[serde(default = "default_true")]
-    pub allow_raw: bool,
+    pub read_content: bool,
+    /// Leer metadatos (_memory.md, _specs.md, _lore.md)
+    #[serde(default)]
+    pub read_metadata: bool,
+    /// Leer contexto de sistema (system_workspace)
+    #[serde(default)]
+    pub read_system: bool,
+    /// Leer telemetría
+    #[serde(default)]
+    pub read_telemetry: bool,
+
+    // --- Escritura ---
+    /// Crear o modificar notas
+    #[serde(default)]
+    pub write_content: bool,
+    /// Modificar _memory.md, _specs.md, _lore.md
+    #[serde(default)]
+    pub write_metadata: bool,
+    /// Modificar system_workspace
+    #[serde(default)]
+    pub write_system: bool,
 }
 
 static MCP_TOKENS: Lazy<Mutex<Vec<McpTokenRecord>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -2611,22 +2659,37 @@ pub fn get_mcp_tokens() -> Vec<McpTokenRecord> {
 }
 
 #[uniffi::export]
-pub fn create_mcp_token(client_name: String, workspaces: Vec<String>, can_write: bool, allow_metadata: bool, allow_system: bool) -> String {
+pub fn create_mcp_token(
+    client_name: String,
+    workspaces: Vec<String>,
+    allowed_paths: Vec<String>,
+    read_content: bool,
+    read_metadata: bool,
+    read_system: bool,
+    read_telemetry: bool,
+    write_content: bool,
+    write_metadata: bool,
+    write_system: bool,
+) -> String {
     let token_id = uuid::Uuid::new_v4().to_string();
     let record = McpTokenRecord {
         token_id: token_id.clone(),
         client_name,
         workspaces,
-        can_write,
-        allow_metadata,
-        allow_system,
-        allow_raw: true,
+        allowed_paths,
+        read_content,
+        read_metadata,
+        read_system,
+        read_telemetry,
+        write_content,
+        write_metadata,
+        write_system,
     };
-    
+
     if let Ok(mut guard) = MCP_TOKENS.lock() {
         guard.push(record);
     }
-    
+
     token_id
 }
 
@@ -2638,6 +2701,41 @@ pub fn revoke_mcp_token(token_id: String) -> bool {
         return guard.len() < initial_len;
     }
     false
+}
+
+#[uniffi::export]
+pub fn create_external_agent_token(
+    client_name: String,
+    workspaces: Vec<String>,
+    allowed_paths: Vec<String>,
+    read_content: bool,
+    read_metadata: bool,
+    read_system: bool,
+    read_telemetry: bool,
+    write_content: bool,
+    write_metadata: bool,
+    write_system: bool,
+) -> String {
+    let token_id = uuid::Uuid::new_v4().to_string();
+    let record = McpTokenRecord {
+        token_id: token_id.clone(),
+        client_name,
+        workspaces,
+        allowed_paths,
+        read_content,
+        read_metadata,
+        read_system,
+        read_telemetry,
+        write_content,
+        write_metadata,
+        write_system,
+    };
+
+    if let Ok(mut guard) = MCP_TOKENS.lock() {
+        guard.push(record);
+    }
+
+    token_id
 }
 
 fn parse_markdown_sections(
@@ -3109,6 +3207,86 @@ pub fn log_friction_event(context: String, action: String, friction_detail: Stri
     false
 }
 
+#[uniffi::export]
+pub fn shutdown_vault_session(workspace_path: String) -> String {
+    let mut msgs: Vec<String> = Vec::new();
+
+    // 1. Consolidar scratchpad → bitácora diaria
+    let consolidation = consolidate_session(workspace_path.clone());
+    msgs.push(format!("Scratchpad: {}", consolidation));
+
+    // 2. Git snapshot del workspace (si .git existe)
+    let ws = Path::new(&workspace_path);
+    if ws.join(".git").exists() {
+        let _ = std::process::Command::new("/usr/bin/git")
+            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .args(["-C", &workspace_path, "-c", "safe.directory=*", "add", "-A"])
+            .output();
+
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+        let commit = std::process::Command::new("/usr/bin/git")
+            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .args([
+                "-C", &workspace_path,
+                "-c", "safe.directory=*",
+                "-c", "user.name=Vault Session",
+                "-c", "user.email=vault-session@lsm.cl",
+                "commit", "-m", &format!("[Vault Session] {}", ts),
+            ])
+            .output();
+
+        match commit {
+            Ok(o) if o.status.success() => msgs.push("Git: snapshot de cierre creado.".into()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if err.contains("nothing to commit") || err.contains("no cambios") {
+                    msgs.push("Git: sin cambios pendientes.".into());
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    // 3. Flush de telemetría a DuckDB
+    if let Ok(mut logs) = TELEMETRY_LOGS.lock() {
+        if !logs.is_empty() {
+            if let Some(conn) = get_db_connection() {
+                let count = logs.len();
+                for log in logs.iter() {
+                    let _ = conn.execute(
+                        "INSERT INTO telemetry (ts, context, event_type, message) VALUES (now(), 'Session', 'SHUTDOWN_FLUSH', ?)",
+                        params![log],
+                    );
+                }
+                msgs.push(format!("Telemetría: {} eventos persistidos.", count));
+            }
+            logs.clear();
+        }
+    }
+
+    // 4. Cerrar DuckDB gracefully
+    if let Ok(mut guard) = DB_CONN.lock() {
+        if let Some(conn) = guard.take() {
+            match conn.close() {
+                Ok(_) => msgs.push("DuckDB: conexión cerrada.".into()),
+                Err((_, e)) => msgs.push(format!("DuckDB: error al cerrar — {}", e)),
+            }
+        }
+    }
+
+    msgs.join(" | ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3128,6 +3306,23 @@ mod tests {
             println!("Rows found: {}", count);
         }
     }
+}
+
+#[uniffi::export]
+pub fn mcp_execute_for_agent(json_request: String) -> String {
+    mcp_handle_request(json_request)
+}
+
+#[uniffi::export]
+pub fn get_agent_mcp_tools(token_id: String) -> String {
+    let req = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "params": {},
+        "id": 1,
+        "mcp_client_token": token_id
+    });
+    mcp_handle_request(req.to_string())
 }
 
 #[uniffi::export]

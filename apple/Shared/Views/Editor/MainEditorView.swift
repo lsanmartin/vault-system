@@ -930,12 +930,13 @@ struct DetailColumn: View {
 struct MainEditorView: View {
     @StateObject var viewModel = EditorViewModel()
     @EnvironmentObject var workspaceManager: WorkspaceManager
-    @State private var showTelemetry = false
+    @Binding var showChat: Bool
+    @Binding var showTelemetry: Bool
+    @Binding var showAgentSettings: Bool
     @State private var isNoteHidden = false
     @State private var isSidebarHidden = false
     @State private var showScratchpad = false
-    @State private var showChat = false
-    
+
     var body: some View {
         ZStack(alignment: .bottom) {
             NavigationStack {
@@ -1000,50 +1001,11 @@ struct MainEditorView: View {
                 }
             }
             
-            // Botones flotantes de utilidad
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        // Botón de Chat Local
-                        Button {
-                            withAnimation { showChat.toggle() }
-                        } label: {
-                            Image(systemName: "cpu")
-                                .padding(12)
-                                .background(showChat ? Color.accentColor : Color.blue)
-                                .foregroundColor(.white)
-                                .clipShape(Circle())
-                                .shadow(radius: 4)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Chat de IA Local")
-                        
-                        // Botón de Telemetría (Consola)
-                        if !showTelemetry {
-                            Button {
-                                withAnimation { showTelemetry = true }
-                            } label: {
-                                Image(systemName: "terminal.fill")
-                                    .padding(12)
-                                    .background(Color.green)
-                                    .foregroundColor(.black)
-                                    .clipShape(Circle())
-                                    .shadow(radius: 4)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(20)
-                }
-            }
-            
             if showTelemetry {
                 TelemetryView(viewModel: viewModel, isPresented: $showTelemetry)
                     .transition(.move(edge: .bottom))
             }
-            
+
             if showScratchpad {
                 BottomSheetScratchpadView(viewModel: viewModel, isPresented: $showScratchpad)
                     .transition(.move(edge: .bottom))

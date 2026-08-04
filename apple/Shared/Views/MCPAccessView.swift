@@ -47,109 +47,122 @@ struct MCPAccessView: View {
 struct TokenCreateView: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     var onTokenCreated: () -> Void
-    
+
     @State private var clientName: String = ""
     @State private var selectedWorkspaces: Set<String> = []
     @State private var customWorkspaces: [String] = []
-    @State private var canWrite: Bool = false
-    @State private var allowMetadata: Bool = false
-    @State private var allowSystem: Bool = false
+
+    // Lectura
+    @State private var readContent: Bool = true
+    @State private var readMetadata: Bool = true
+    @State private var readSystem: Bool = false
+    @State private var readTelemetry: Bool = false
+
+    // Escritura
+    @State private var writeContent: Bool = false
+    @State private var writeMetadata: Bool = false
+    @State private var writeSystem: Bool = false
+
     @State private var generatedToken: String? = nil
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Genera un acceso cerrado para asistentes IA locales.")
+            Text("Genera un acceso cerrado para asistentes IA. Define workspace, permisos de lectura y escritura.")
                 .foregroundColor(.secondary)
-            
-            Form {
-                Section(header: Text("Detalles del Cliente")) {
-                    TextField("Nombre del Cliente (ej. Claude Desktop)", text: $clientName)
-                }
-                
-                Section(header: HStack {
-                    Text("Workspaces Autorizados")
-                    Spacer()
-                    Button(action: selectCustomFolder) {
-                        Image(systemName: "folder.badge.plus")
-                        Text("Añadir Otra")
+
+            ScrollView {
+                Form {
+                    Section(header: Text("Detalles del Cliente")) {
+                        TextField("Nombre del Cliente (ej. Claude Desktop)", text: $clientName)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.accentColor)
-                    .font(.caption)
-                }) {
-                    List {
-                        ForEach(workspaceManager.locations) { location in
-                            Toggle(location.name, isOn: Binding(
-                                get: { selectedWorkspaces.contains(location.path) },
-                                set: { isOn in
-                                    if isOn {
-                                        selectedWorkspaces.insert(location.path)
-                                    } else {
-                                        selectedWorkspaces.remove(location.path)
-                                    }
-                                }
-                            ))
+
+                    Section(header: HStack {
+                        Text("Workspace y Carpeta")
+                        Spacer()
+                        Button(action: selectCustomFolder) {
+                            Image(systemName: "folder.badge.plus")
+                            Text("Añadir Otra")
                         }
-                        
-                        ForEach(customWorkspaces, id: \.self) { path in
-                            let folderName = (path as NSString).lastPathComponent
-                            Toggle(folderName + " (Custom)", isOn: Binding(
-                                get: { selectedWorkspaces.contains(path) },
-                                set: { isOn in
-                                    if isOn {
-                                        selectedWorkspaces.insert(path)
-                                    } else {
-                                        selectedWorkspaces.remove(path)
+                        .buttonStyle(.plain)
+                        .foregroundColor(.accentColor)
+                        .font(.caption)
+                    }) {
+                        List {
+                            ForEach(workspaceManager.locations) { location in
+                                Toggle(location.name, isOn: Binding(
+                                    get: { selectedWorkspaces.contains(location.path) },
+                                    set: { isOn in
+                                        if isOn { selectedWorkspaces.insert(location.path) }
+                                        else { selectedWorkspaces.remove(location.path) }
                                     }
-                                }
-                            ))
+                                ))
+                            }
+                            ForEach(customWorkspaces, id: \.self) { path in
+                                Toggle((path as NSString).lastPathComponent + " (Custom)", isOn: Binding(
+                                    get: { selectedWorkspaces.contains(path) },
+                                    set: { isOn in
+                                        if isOn { selectedWorkspaces.insert(path) }
+                                        else { selectedWorkspaces.remove(path) }
+                                    }
+                                ))
+                            }
                         }
+                        .frame(height: 100)
                     }
-                    .frame(height: 120)
+
+                    Section(header: Text("Permisos de Lectura")) {
+                        Toggle("Contenido de notas (raw .md)", isOn: $readContent)
+                        Toggle("Metadatos (_memory, _specs, _lore)", isOn: $readMetadata)
+                        Toggle("Contexto de sistema (system_workspace)", isOn: $readSystem)
+                        Toggle("Telemetría", isOn: $readTelemetry)
+                    }
+
+                    Section(header: Text("Permisos de Escritura")) {
+                        Toggle("Crear / modificar notas", isOn: $writeContent)
+                        Toggle("Gestionar metadatos (_memory, _specs, _lore)", isOn: $writeMetadata)
+                        Toggle("Gestionar contexto de sistema", isOn: $writeSystem)
+                        Text("⛔ La telemetría es de solo lectura. No se puede modificar.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                 }
-                
-                Section(header: Text("Permisos de Seguridad")) {
-                    Toggle("Permitir Escritura (Crear/Modificar notas)", isOn: $canWrite)
-                    Toggle("Permitir Editar Metadatos Cognitivos (Capas /_)", isOn: $allowMetadata)
-                    Toggle("Permitir Editar Contexto de Sistema (system_workspace)", isOn: $allowSystem)
-                }
+                .frame(maxHeight: 520)
             }
-            .frame(maxHeight: 400)
-            
+
             Button(action: generateToken) {
                 Text("Generar Token de Acceso Seguro")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .disabled(clientName.isEmpty || selectedWorkspaces.isEmpty)
-            
-            Spacer()
         }
         .padding()
         .onAppear {
-            // Preseleccionar todos por defecto
             selectedWorkspaces = Set(workspaceManager.locations.map { $0.path })
         }
     }
-    
+
     private func generateToken() {
         let wsList = Array(selectedWorkspaces)
-        
+
         _ = createMcpToken(
             clientName: clientName,
             workspaces: wsList,
-            canWrite: canWrite,
-            allowMetadata: allowMetadata,
-            allowSystem: allowSystem
+            allowedPaths: [],
+            readContent: readContent,
+            readMetadata: readMetadata,
+            readSystem: readSystem,
+            readTelemetry: readTelemetry,
+            writeContent: writeContent,
+            writeMetadata: writeMetadata,
+            writeSystem: writeSystem
         )
         syncTokensToUserDefaults()
         onTokenCreated()
-        
+
         // Reset form
         clientName = ""
-        canWrite = false
-        allowMetadata = false
-        allowSystem = false
+        readContent = true; readMetadata = true; readSystem = false; readTelemetry = false
+        writeContent = false; writeMetadata = false; writeSystem = false
         selectedWorkspaces = Set(workspaceManager.locations.map { $0.path })
         customWorkspaces.removeAll()
     }
@@ -210,10 +223,16 @@ struct TokenListView: View {
                         Text("Workspaces: \(token.workspaces.joined(separator: ", "))")
                             .font(.caption)
                         
-                        HStack(spacing: 12) {
-                            PermissionBadge(title: "Escritura", allowed: token.canWrite)
-                            PermissionBadge(title: "Metadatos", allowed: token.allowMetadata)
-                            PermissionBadge(title: "Contexto de Sistema", allowed: token.allowSystem)
+                        HStack(spacing: 6) {
+                            PermissionBadge(title: "Notas", allowed: token.readContent)
+                            PermissionBadge(title: "Meta", allowed: token.readMetadata)
+                            PermissionBadge(title: "Sistema", allowed: token.readSystem)
+                            PermissionBadge(title: "Telem", allowed: token.readTelemetry)
+                        }
+                        HStack(spacing: 6) {
+                            PermissionBadge(title: "W:Notas", allowed: token.writeContent)
+                            PermissionBadge(title: "W:Meta", allowed: token.writeMetadata)
+                            PermissionBadge(title: "W:Sis", allowed: token.writeSystem)
                         }
                         
                         Divider().padding(.vertical, 4)
