@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod mcp_server;
+pub mod okf_validator;
 
 uniffi::setup_scaffolding!();
 
@@ -440,6 +441,23 @@ pub fn init_knowledge_base() -> String {
 
         CREATE TABLE IF NOT EXISTS _schema_no_indices (
             flag BOOLEAN
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_threads (
+            id TEXT PRIMARY KEY,
+            agent_code TEXT NOT NULL DEFAULT 'LC',
+            name TEXT NOT NULL DEFAULT 'Nuevo chat',
+            created_at TIMESTAMP DEFAULT now(),
+            updated_at TIMESTAMP DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            agent_code TEXT,
+            content TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT now()
         );"
     );
 
@@ -1086,6 +1104,25 @@ pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<Not
 
 #[uniffi::export]
 pub fn save_note(path: String, content: String) -> String {
+    // PreCommit: validar archivos OKF antes de escribir
+    let path_obj = std::path::Path::new(&path);
+    if let Some(file_name) = path_obj.file_name().and_then(|n| n.to_str()) {
+        if matches!(file_name, "_memory.md" | "_specs.md" | "_lore.md") {
+            let validation = crate::okf_validator::validate_okf_file(&path);
+            // Solo rechazar si hay errores (no warnings)
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&validation) {
+                if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
+                    if !errors.is_empty() {
+                        return format!(
+                            "Error de validación OKF: {}. No se guardó la nota. Corrige los errores e intenta de nuevo.\nValidación completa: {}",
+                            errors[0], validation
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let res = fs::write(&path, content);
     match res {
         Ok(_) => {
@@ -2161,6 +2198,28 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         "name": "chat_compact",
                         "description": "Compacta el contexto de la conversación actual resumiendo los mensajes previos en uno solo. Libera tokens sin perder el hilo de la conversación.",
                         "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "okf_validate_file",
+                        "description": "Valida un archivo OKF (_memory.md, _specs.md, _lore.md). Revisa frontmatter YAML, secciones requeridas y estructura. Retorna errores y warnings.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta absoluta del archivo a validar." }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "okf_check_dependencies",
+                        "description": "Analiza las dependencias entre proyectos en un directorio (busca _specs.md) y detecta ciclos de dependencia.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta del directorio raíz donde buscar proyectos (ej. /Users/lsanmartin/dev)." }
+                            },
+                            "required": ["path"]
+                        }
                     }
                 ]
             });
@@ -2234,10 +2293,10 @@ pub fn mcp_handle_request(json_request: String) -> String {
             };
 
             let can_write = token_record.as_ref().map(|r| r.write_content).unwrap_or(false);
-            let write_metadata = token_record.as_ref().map(|r| r.write_metadata).unwrap_or(false);
+            let _write_metadata = token_record.as_ref().map(|r| r.write_metadata).unwrap_or(false);
             let allow_raw = token_record.as_ref().map(|r| r.read_content).unwrap_or(true);
             let allow_metadata = token_record.as_ref().map(|r| r.read_metadata).unwrap_or(false);
-            let allow_system = token_record.as_ref().map(|r| r.read_system).unwrap_or(false);
+            let _allow_system = token_record.as_ref().map(|r| r.read_system).unwrap_or(false);
 
             crate::add_telemetry_log(format!("MCP Tool Call: {} | Args: {}", name, arguments.to_string()));
 
@@ -2551,6 +2610,22 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             "Contexto compactado.".to_string()
                         } else { "Error: App no disponible.".to_string() }
                     } else { "Error al adquirir listener.".to_string() }
+                },
+                "okf_validate_file" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if !is_path_allowed(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
+                    } else {
+                        crate::okf_validator::validate_okf_file(path)
+                    }
+                },
+                "okf_check_dependencies" => {
+                    let root = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if !is_path_allowed(root, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
+                    } else {
+                        crate::okf_validator::validate_dependency_cycles(root)
+                    }
                 },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
             };
@@ -3327,6 +3402,95 @@ pub fn shutdown_vault_session(workspace_path: String) -> String {
     }
 
     msgs.join(" | ")
+}
+
+// --- FFI: OKF Validator ---
+
+#[uniffi::export]
+pub fn validate_okf_file(file_path: String) -> String {
+    okf_validator::validate_okf_file(&file_path)
+}
+
+#[uniffi::export]
+pub fn validate_dependency_cycles(root_dir: String) -> String {
+    okf_validator::validate_dependency_cycles(&root_dir)
+}
+
+// --- FFI: Chat Persistence ---
+
+#[uniffi::export]
+pub fn chat_get_or_create_thread(agent_code: String) -> String {
+    let conn = match get_db_connection() { Some(c) => c, None => return "{}".into() };
+    let thread_id = format!("{}_{}", agent_code, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
+    let _ = conn.execute("INSERT OR IGNORE INTO chat_threads (id, agent_code, name) VALUES (?, ?, ?)",
+        params![thread_id, agent_code, format!("Chat {}", agent_code)]);
+    // Si ya existía, devolver el existente
+    let existing: String = conn.query_row(
+        "SELECT id FROM chat_threads WHERE agent_code = ? ORDER BY updated_at DESC LIMIT 1",
+        params![agent_code], |r| r.get(0)
+    ).unwrap_or(thread_id.clone());
+    serde_json::json!({"thread_id": existing}).to_string()
+}
+
+#[uniffi::export]
+pub fn chat_save_message(thread_id: String, role: String, agent_code: String, content: String) -> i64 {
+    let conn = match get_db_connection() { Some(c) => c, None => return -1 };
+    match conn.execute(
+        "INSERT INTO chat_messages (thread_id, role, agent_code, content) VALUES (?, ?, ?, ?)",
+        params![thread_id, role, agent_code, content],
+    ) {
+        Ok(_) => {
+            let _ = conn.execute("UPDATE chat_threads SET updated_at = now() WHERE id = ?", params![thread_id]);
+            conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap_or(-1)
+        }
+        Err(_) => -1,
+    }
+}
+
+#[uniffi::export]
+pub fn chat_get_messages(thread_id: String, limit: i32) -> String {
+    let conn = match get_db_connection() { Some(c) => c, None => return "[]".into() };
+    let mut stmt = match conn.prepare(
+        "SELECT role, agent_code, content, timestamp FROM chat_messages WHERE thread_id = ? ORDER BY id ASC LIMIT ?"
+    ) { Ok(s) => s, Err(_) => return "[]".into() };
+
+    let rows: Vec<serde_json::Value> = stmt.query_map(params![thread_id, limit], |row| {
+        Ok(serde_json::json!({
+            "role": row.get::<_, String>(0)?,
+            "agent_code": row.get::<_, Option<String>>(1)?,
+            "content": row.get::<_, String>(2)?,
+            "timestamp": row.get::<_, String>(3)?
+        }))
+    }).unwrap().filter_map(|r| r.ok()).collect();
+
+    serde_json::to_string(&rows).unwrap_or("[]".into())
+}
+
+#[uniffi::export]
+pub fn chat_list_threads() -> String {
+    let conn = match get_db_connection() { Some(c) => c, None => return "[]".into() };
+    let mut stmt = match conn.prepare(
+        "SELECT id, agent_code, name, created_at, updated_at FROM chat_threads ORDER BY updated_at DESC"
+    ) { Ok(s) => s, Err(_) => return "[]".into() };
+
+    let rows: Vec<serde_json::Value> = stmt.query_map([], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, String>(0)?,
+            "agent_code": row.get::<_, String>(1)?,
+            "name": row.get::<_, String>(2)?,
+            "created_at": row.get::<_, String>(3)?,
+            "updated_at": row.get::<_, String>(4)?
+        }))
+    }).unwrap().filter_map(|r| r.ok()).collect();
+
+    serde_json::to_string(&rows).unwrap_or("[]".into())
+}
+
+#[uniffi::export]
+pub fn chat_delete_thread(thread_id: String) -> bool {
+    let conn = match get_db_connection() { Some(c) => c, None => return false };
+    let _ = conn.execute("DELETE FROM chat_messages WHERE thread_id = ?", params![thread_id]);
+    conn.execute("DELETE FROM chat_threads WHERE id = ?", params![thread_id]).is_ok()
 }
 
 #[cfg(test)]

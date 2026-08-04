@@ -17,10 +17,9 @@ struct LocalChatView: View {
     @ObservedObject var viewModel: EditorViewModel
     @StateObject private var brain = LocalBrain.shared
     @ObservedObject private var agentManager = ExternalAgentManager.shared
+    @ObservedObject private var chatThreads = ChatThreadManager.shared
 
-    @State private var messages: [LocalChatMessage] = [
-        LocalChatMessage(text: "Usá @local, @ds, @cl, @op. Sin arroba → @local.", isUser: false, agentCode: "LC")
-    ]
+    @State private var messages: [LocalChatMessage] = []
     @State private var inputText: String = ""
     @State private var isGenerating: Bool = false
     @State private var generationTask: Task<Void, Never>? = nil
@@ -31,22 +30,25 @@ struct LocalChatView: View {
         case local
         case external(ExternalAgentConfig)
 
-        var code: String {
+        var displayName: String {
             switch self {
-            case .local: return "LC"
-            case .external(let a):
-                switch a.provider {
-                case .deepseek: return "DS"
-                case .anthropic: return "CL"
-                case .openai: return "OP"
-                }
+            case .local: return "Local"
+            case .external(let a): return a.name
             }
         }
 
-        var fullName: String {
+        var detailName: String {
             switch self {
-            case .local: return "Local (Gemma 4)"
-            case .external(let a): return "\(a.name) · \(a.provider.rawValue)"
+            case .local: return "Gemma 4"
+            case .external(let a): return a.provider.rawValue
+            }
+        }
+
+        /// Código estable para DB (no cambia aunque el usuario renombre el agente)
+        var agentCode: String {
+            switch self {
+            case .local: return "LC"
+            case .external(let a): return "ext_\(a.id.prefix(8))"
             }
         }
 
@@ -92,7 +94,7 @@ struct LocalChatView: View {
                     .help("Configurar agentes externos")
 
                     Button(action: {
-                        messages = [LocalChatMessage(text: "Chat reiniciado.", isUser: false, agentCode: selectedAgent.code)]
+                        messages = [LocalChatMessage(text: "Chat reiniciado.", isUser: false, agentCode: selectedAgent.agentCode)]
                     }) {
                         Image(systemName: "trash")
                             .font(.system(size: 12))
@@ -109,9 +111,9 @@ struct LocalChatView: View {
                     Circle()
                         .fill(selectedAgent.color)
                         .frame(width: 8, height: 8)
-                    Text(selectedAgent.code)
+                    Text(selectedAgent.displayName)
                         .font(.headline).bold()
-                    Text(selectedAgent.fullName)
+                    Text(selectedAgent.detailName)
                         .font(.caption).foregroundColor(.secondary)
                 }
             }
@@ -135,7 +137,7 @@ struct LocalChatView: View {
                         ForEach(chips, id: \.self) { chip in
                             Button(action: { selectedAgent = chip }) {
                                 HStack(spacing: 3) {
-                                    Text(chip.code)
+                                    Text(chip.displayName)
                                         .font(.caption).bold().monospaced()
                                 }
                                 .padding(.horizontal, 8).padding(.vertical, 3)
@@ -186,15 +188,92 @@ struct LocalChatView: View {
             AgentSettingsView()
                 .frame(width: 560, height: 780)
         }
+        .onAppear { loadThread(for: selectedAgent.agentCode) }
+        .onChange(of: isGenerating) { _, generating in
+            if !generating, let last = messages.last, !last.isUser {
+                saveMessage(last)
+            }
+        }
+        .onChange(of: selectedAgent) { oldValue, newValue in
+            loadThread(for: newValue.agentCode)
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatReset"))) { _ in
-            messages = [LocalChatMessage(text: "Sesión reiniciada por herramienta MCP.", isUser: false, agentCode: selectedAgent.code)]
+            createAnchorNote(for: selectedAgent)
+            messages = [LocalChatMessage(text: "Sesión reiniciada. Ancla creada en _inbox/.", isUser: false, agentCode: selectedAgent.agentCode)]
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatClear"))) { _ in
             messages.removeAll()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatCompact"))) { _ in
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
-            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: selectedAgent.code)]
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: selectedAgent.agentCode)]
+            saveCurrentThread()
+        }
+    }
+
+    // MARK: - Anchor
+
+    private func createAnchorNote(for agent: AgentChip) {
+        let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd_HHmm"
+        let ts = df.string(from: Date())
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let inboxPath = home.appendingPathComponent(".vault_system/system_workspace/_inbox").path
+        try? FileManager.default.createDirectory(atPath: inboxPath, withIntermediateDirectories: true)
+        let fileName = "chat_\(agent.displayName.replacingOccurrences(of: " ", with: "_"))_\(ts).md"
+        let filePath = "\(inboxPath)/\(fileName)"
+
+        let lastMsgs = messages.suffix(20).map { msg in
+            let who = msg.isUser ? "**Tú**" : "**\(msg.agentCode ?? agent.displayName)**"
+            return "\(who): \(msg.text)"
+        }.joined(separator: "\n\n")
+
+        let content = """
+        ---
+        agent: \(agent.displayName)
+        date: \(ts)
+        type: chat-anchor
+        message_count: \(messages.count)
+        ---
+
+        # Chat \(agent.displayName) — \(ts)
+
+        ## Últimos mensajes
+
+        \(lastMsgs)
+
+        ---
+        *Ancla generada por /reset. La conversación continúa en un nuevo contexto.*
+        """
+
+        _ = saveNote(path: filePath, content: content)
+        print("[Anchor] Creado: \(filePath)")
+    }
+
+    // MARK: - Thread Persistence
+
+    private var currentThreadId: String {
+        chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
+    }
+
+    private func loadThread(for agentCode: String) {
+        let tid = chatThreads.getOrCreateThread(for: agentCode)
+        let msgs = chatThreads.toLocalMessages(threadId: tid)
+        messages = msgs.isEmpty
+            ? [LocalChatMessage(text: "Chat \(agentCode) — Escribí tu mensaje.", isUser: false, agentCode: agentCode)]
+            : msgs
+    }
+
+    private func saveMessage(_ msg: LocalChatMessage) {
+        let tid = currentThreadId
+        let role = msg.isUser ? "user" : "assistant"
+        chatThreads.saveMessage(threadId: tid, role: role, agentCode: msg.agentCode, content: msg.text)
+    }
+
+    private func saveCurrentThread() {
+        let tid = currentThreadId
+        // Borrar mensajes viejos del thread y re-guardar solo los últimos 200
+        for msg in messages.suffix(200) {
+            chatThreads.saveMessage(threadId: tid, role: msg.isUser ? "user" : "assistant", agentCode: msg.agentCode, content: msg.text)
         }
     }
 
@@ -207,7 +286,7 @@ struct LocalChatView: View {
             brain.cancelChat()
         }
         isGenerating = false
-        messages.append(LocalChatMessage(text: "⏹ Generación cancelada.", isUser: false, agentCode: selectedAgent.code))
+        messages.append(LocalChatMessage(text: "⏹ Generación cancelada.", isUser: false, agentCode: selectedAgent.agentCode))
     }
 
     // MARK: - Send
@@ -228,7 +307,8 @@ struct LocalChatView: View {
 
         // Comandos
         if clean == "/reset" {
-            messages = [LocalChatMessage(text: "Sesión reiniciada.", isUser: false, agentCode: target.code)]
+            createAnchorNote(for: target)
+            messages = [LocalChatMessage(text: "Sesión reiniciada. Se creó un ancla en _inbox/ con el resumen.", isUser: false, agentCode: target.agentCode)]
             inputText = ""; return
         }
         if clean == "/clear" {
@@ -237,7 +317,7 @@ struct LocalChatView: View {
         }
         if clean == "/compact" {
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
-            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: target.code)]
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: target.agentCode)]
             inputText = ""; return
         }
 
@@ -250,6 +330,7 @@ struct LocalChatView: View {
         inputText = ""
         let userMsg = LocalChatMessage(text: prompt, isUser: true, agentCode: nil)
         messages.append(userMsg)
+        saveMessage(userMsg)
         isGenerating = true
 
         var ctx = ""
