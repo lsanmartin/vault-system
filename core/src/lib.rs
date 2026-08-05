@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod mcp_server;
 pub mod okf_validator;
 pub mod scheduler;
+pub mod lats_agent;
 
 uniffi::setup_scaffolding!();
 
@@ -3426,6 +3427,15 @@ pub fn validate_okf_file(file_path: String) -> String {
 #[uniffi::export]
 pub fn validate_dependency_cycles(root_dir: String) -> String {
     okf_validator::validate_dependency_cycles(&root_dir)
+}
+
+// --- FFI: LATS Agent ---
+
+#[uniffi::export]
+pub fn lats_search(goal: String, actions_json: String, max_iterations: i32, exploration_weight: f64) -> String {
+    let actions: Vec<String> = serde_json::from_str(&actions_json).unwrap_or_default();
+    let result = lats_agent::lats_search(&goal, &actions, max_iterations as u32, exploration_weight);
+    serde_json::to_string(&result).unwrap_or_default()
 }
 
 // --- FFI: Scheduler ---

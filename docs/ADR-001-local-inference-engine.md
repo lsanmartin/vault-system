@@ -1,8 +1,8 @@
 # ADR-001: Motor de Inferencia Local (Local AI Engine)
 
-**Estado:** Aprobado — v1.1 (revisión técnica 2026-07-02)
+**Estado:** Implementado — v2.0 (actualización 2026-08-05)
 **Fecha original:** 2026-07-02
-**Revisado:** 2026-07-02 (correcciones de licencia, prompt template y decisiones de concurrencia)
+**Revisado:** 2026-08-05 (arquitectura real: MLX/Gemma 4 + Dual-Brain + agentes externos)
 **Autores:** LSM + Antigravity
 **Supersede:** ninguno
 **Relacionado con:** `PLAN_ESTRATEGICO_DEV2.md` (Fase 2), `revision_estrategica_vault-system.md` (Brecha 1 y §5.1)
@@ -167,3 +167,40 @@ pero hoy solo expone operaciones tensoriales de bajo nivel. Cuando tenga:
 sin capa de traducción, obteniendo la máxima eficiencia en Apple Silicon.
 
 El diseño del trait garantiza que este swap sea transparente para Swift.
+
+---
+
+## Actualización 2026-08-05 — Arquitectura Real Implementada
+
+### Motor de inferencia
+
+El ADR original decidió `llama-cpp-2`. La implementación real usa **MLX/Gemma 4** vía Swift:
+
+- `LocalBrain.swift`: orquesta la carga del modelo `mlx-community/gemma-4-12B-it-4bit` desde HuggingFace
+- Cache byte-exacto en `~/.cache/huggingface/hub/` con snapshots verificados
+- `GPUInferenceActor`: actor dedicado para inferencia en GPU Metal
+- Toggle de activación/desactivación con liberación de memoria GPU (`MLX.GPU.clearCache()`)
+- Streaming de tokens vía `AsyncStream<String>`
+- RAG local: búsqueda de notas relevantes en DuckDB para enriquecer el system prompt
+
+### Arquitectura Dual-Brain
+
+```
+LocalBrain (Gemma 4)          ExternalAgent (DeepSeek/Claude/OpenAI)
+├── chatStream()              ├── streamAPI() — SSE streaming
+├── RAG en DuckDB             ├── Tool calling MCP real (8-turn loop)
+├── Sin tool calling          ├── RBAC por token MCP
+└── Prompt combinado          └── API key en Keychain
+```
+
+### Agentes externos
+
+- `ExternalAgentManager.swift`: CRUD de agentes con API keys en macOS Keychain
+- `AgentSettingsView.swift`: UI de configuración con permisos granular
+- Tool calling MCP: 16 herramientas disponibles (vault_search, vault_read, vault_write, etc.)
+- RBAC: 10 permisos por token (read/write × content/metadata/system + read_telemetry + allowed_paths)
+- Chat con @menciones y threads persistentes en DuckDB
+
+### Conclusión
+
+MLX/Gemma 4 resultó viable antes de lo estimado (junio 2026 vs. los 12-24 meses proyectados). El trait `InferenceEngine` no fue necesario: la arquitectura Dual-Brain con bridge MCP demostró ser más limpia que un trait de abstracción. La decisión original de `llama-cpp-2` se descarta en favor de la implementación real con MLX.

@@ -130,3 +130,9 @@ release: preflight build-universal xcode-build deploy
 	@echo "  ✅ App archivada y desplegada"
 	@echo "  → /Applications/$(APP_NAME).app"
 
+
+.PHONY: export-telemetry
+export-telemetry:
+	@echo "--- Exportando telemetría a Parquet ---"
+	@duckdb ~/.vault_system/vault.duckdb -c "COPY (SELECT * FROM telemetry ORDER BY ts DESC LIMIT 10000) TO '$(HOME)/.vault_system/telemetria.parquet' (FORMAT PARQUET);"
+	@echo "✅ telemetria.parquet generado en ~/.vault_system/"
