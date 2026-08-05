@@ -14,31 +14,7 @@ updated: 2026-08-04
 
 
 
-## ⬜ Backlog — Fase 1: Hooks y Validación OKF
-
-- [ ] **1.2** `core/src/okf_validator.rs` — validador OKF determinista en Rust | est:3h | dep:—
-  - Validar frontmatter YAML de `_memory.md` y `_specs.md`, detección de ciclos en dependencias
-  - refs: `core/src/lib.rs` (scan_domain_metadata, tabla domain_metadata)
-
-- [ ] **1.3** Integrar PreCommit en `save_note()` | est:1h | dep:1.2
-  - Linter Markdown + YAML antes de escribir a disco
-  - refs: `core/src/lib.rs` (save_note), `core/src/okf_validator.rs`
-
-## ⬜ Backlog — Fase 2: Comandos de Modo Agente
-
-> Usan Gemma 4 local para tareas simples, delegan a agente externo (Fase 0) para razonamiento complejo.
-
-- [ ] **2.1** Comando `/plan` — dry-run de cambios | est:3h | dep:—
-  - El modelo genera plan detallado sin tocar archivos. Output Markdown en el chat
-  - refs: `apple/Shared/Views/Editor/InlineAICommandView.swift`, `LocalChatView.swift`
-
-- [ ] **2.2** Comando `/goal` — bucle autónomo con guardrails | est:5h | dep:2.1
-  - Descompone en sub-tareas, ejecuta tools MCP, verifica con OKF, reintenta (máx 3x)
-  - refs: `LocalBrain.swift`, `core/src/okf_validator.rs`, `mcp_server.rs`
-
-- [ ] **2.3** Comando `/design` — diagrama Mermaid previo | est:3h | dep:2.1
-  - Genera diagrama del cambio, renderiza en WebView, usuario aprueba/rechaza
-  - refs: `WebView.swift`, `LocalChatView.swift`
+## ⬜ Backlog — Fase 3: Motor de Tareas Programadas
 
 ## ⬜ Backlog — Fase 3: Motor de Tareas Programadas
 
@@ -78,8 +54,21 @@ updated: 2026-08-04
 - [x] **0.3** RBAC en handlers MCP — `read_metadata`, `read_content`, `can_write` en todas las tools
 - [x] **0.4** Chat con @menciones (`@local`, `@ds`, `@cl`, `@op`) + streaming SSE + tool calling MCP real
 
-### Fase 1 — Hooks (parcial)
+### Fase 1 — Hooks y Validación OKF (completa 2026-08-04)
 - [x] **1.1** OnStop: consolidar scratchpad → bitácora + git snapshot local + flush telemetría + cerrar DuckDB
+- [x] **1.2** `okf_validator.rs`: validación frontmatter YAML + detección ciclos dependencias (4 tests, 2 MCP tools)
+- [x] **1.3** PreCommit en `save_note()`: archivos OKF validados antes de escribir a disco
+
+### Fase 2 — Comandos de Modo Agente (completa 2026-08-05)
+- [x] **2.1** `/plan`: agente genera plan detallado sin tocar archivos, output markdown en chat
+- [x] **2.2** `/goal`: bucle autónomo con tool calling MCP + verificación OKF + reintentos
+- [x] **2.3** `/design`: diagrama Mermaid generado por agente, renderizado en WebView del chat
+
+### Fase 1.5 — Chat Persistente (completa 2026-08-04)
+- [x] Threads por agente en DuckDB (`chat_threads`, `chat_messages`)
+- [x] Persistencia entre reinicios + onDisappear save
+- [x] `/reset` crea ancla .md en `_inbox/`
+- [x] Nombres completos (Local, DeepSeek Planner) + PermissionsBar
 
 ### Mejoras adicionales
 - [x] Refactor `McpTokenRecord`: 10 permisos lectura/escritura + `allowed_paths` (subcarpetas)

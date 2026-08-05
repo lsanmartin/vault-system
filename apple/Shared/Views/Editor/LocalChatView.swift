@@ -301,6 +301,127 @@ struct LocalChatView: View {
         }
     }
 
+    // MARK: - /plan
+
+    private func runPlan(prompt: String, target: AgentChip) {
+        guard isSelectedAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+            return
+        }
+        inputText = ""
+        let userMsg = LocalChatMessage(text: "/plan \(prompt)", isUser: true, agentCode: nil)
+        messages.append(userMsg); saveMessage(userMsg)
+        isGenerating = true
+
+        let sysPrompt = "Eres un planificador de arquitectura de software. Tu tarea es generar un plan detallado paso a paso. NO modifiques ningún archivo. Usa las herramientas disponibles para explorar el vault, leer archivos relevantes y entender el contexto. Luego genera un plan con: 1) Objetivo, 2) Archivos a modificar/crear, 3) Pasos concretos, 4) Riesgos, 5) Esfuerzo estimado. Formato Markdown."
+
+        generationTask = Task {
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, target: target, readOnly: true)
+        }
+    }
+
+    // MARK: - /goal
+
+    private func runGoal(prompt: String, target: AgentChip) {
+        guard isSelectedAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+            return
+        }
+        inputText = ""
+        let userMsg = LocalChatMessage(text: "/goal \(prompt)", isUser: true, agentCode: nil)
+        messages.append(userMsg); saveMessage(userMsg)
+        isGenerating = true
+
+        let sysPrompt = "Eres un ejecutor de tareas en un vault de conocimiento. Tu objetivo es completar la tarea asignada usando las herramientas MCP disponibles. Trabaja de forma autónoma: 1) Explora el contexto, 2) Planifica los pasos, 3) Ejecuta cada paso usando las herramientas (vault_write, vault_search, vault_read, etc.), 4) Verifica cada paso, 5) Reporta el resultado final. Si algo falla, reintenta con un enfoque diferente. Máximo 3 reintentos por paso."
+
+        generationTask = Task {
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, target: target, readOnly: false)
+        }
+    }
+
+    // MARK: - /design
+
+    private func runDesign(prompt: String, target: AgentChip) {
+        guard isSelectedAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+            return
+        }
+        inputText = ""
+        let userMsg = LocalChatMessage(text: "/design \(prompt)", isUser: true, agentCode: nil)
+        messages.append(userMsg); saveMessage(userMsg)
+        isGenerating = true
+
+        let sysPrompt = "Eres un arquitecto de software. Genera un diagrama Mermaid que represente: \(prompt). Usa las herramientas para explorar el contexto si es necesario. Responde con el código Mermaid entre ```mermaid y ```. Usa graph TD o flowchart. Incluye componentes, conexiones y etiquetas descriptivas."
+
+        generationTask = Task {
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: "Genera un diagrama Mermaid para: \(prompt)", target: target, readOnly: true)
+        }
+    }
+
+    // MARK: - Shared execution
+
+    private func runWithPrompt(sysPrompt: String, userPrompt: String, target: AgentChip, readOnly: Bool) async {
+        switch target {
+        case .local:
+            // Local no tiene tool calling: fallback a chat normal con prompt combinado
+            let combinedPrompt = "\(sysPrompt)\n\n---\n\n\(userPrompt)"
+            sendLocal(prompt: combinedPrompt, context: "")
+        case .external(let agent):
+            await runExternalPlan(sysPrompt: sysPrompt, userPrompt: userPrompt, agent: agent)
+        }
+    }
+
+    private func runExternalPlan(sysPrompt: String, userPrompt: String, agent: ExternalAgentConfig) async {
+        guard let key = agentManager.getAPIKey(for: agent.id) else {
+            await MainActor.run {
+                messages.append(LocalChatMessage(text: "❌ Sin API key.", isUser: false, agentCode: agentCode(for: agent)))
+                isGenerating = false
+            }
+            return
+        }
+        let code = agentCode(for: agent)
+
+        let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
+        let openaiTools = convertMcpToolsToOpenAI(toolsJson)
+
+        var conversation: [[String: Any]] = [
+            ["role": "system", "content": String(sysPrompt.prefix(3000))],
+            ["role": "user", "content": userPrompt]
+        ]
+        var pendingTools: [String] = []
+
+        for _ in 0..<8 {
+            let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+            if let error = result.error {
+                await MainActor.run {
+                    messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
+                    isGenerating = false
+                }
+                return
+            }
+            guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
+                await flushPending(text: "", tools: pendingTools, code: code)
+                await MainActor.run { isGenerating = false }
+                return
+            }
+            pendingTools.append(contentsOf: toolCalls.map(\.name))
+            var assistantMsg: [String: Any] = ["role": "assistant"]
+            assistantMsg["tool_calls"] = toolCalls.map { tc in
+                ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
+            }
+            conversation.append(assistantMsg)
+            for tc in toolCalls {
+                var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
+                if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+                conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
+            }
+            let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
+            if total > 1_500_000 { conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6)) }
+        }
+        await flushPending(text: "", tools: pendingTools, code: code)
+        await MainActor.run { isGenerating = false }
+    }
+
     // MARK: - Cancel
 
     private func cancelGeneration() {
@@ -343,6 +464,18 @@ struct LocalChatView: View {
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
             messages = [LocalChatMessage(text: summary, isUser: false, agentCode: target.agentCode)]
             inputText = ""; return
+        }
+        if clean.hasPrefix("/plan ") {
+            let goal = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            runPlan(prompt: goal, target: target); return
+        }
+        if clean.hasPrefix("/goal ") {
+            let goal = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            runGoal(prompt: goal, target: target); return
+        }
+        if clean.hasPrefix("/design ") {
+            let goal = String(clean.dropFirst(8)).trimmingCharacters(in: .whitespaces)
+            runDesign(prompt: goal, target: target); return
         }
 
         guard isSelectedAgentEnabled else {
@@ -821,18 +954,32 @@ struct ChatMessagesView: NSViewRepresentable {
           .tools-list { margin: 8px 0 0 16px; font-size: 0.8em; opacity: 0.6; font-family: monospace; }
           .tools-list li { margin: 2px 0; }
 
+          /* Mermaid diagrams */
+          .mermaid-diagram { margin: 12px 0; padding: 12px; background: rgba(255,255,255,0.6); border-radius: 8px; overflow-x: auto; }
+          .mermaid-diagram svg { max-width: 100%; height: auto; }
+
           @media (prefers-color-scheme: dark) {
             .bubble pre { background: rgba(255,255,255,0.06); }
             .bubble code { background: rgba(255,255,255,0.1); }
+            .mermaid-diagram { background: rgba(255,255,255,0.05); }
           }
         </style>
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+        <script>mermaid.initialize({ startOnLoad: false, theme: 'default' });</script>
         </head><body>
         \(msgsHTML)
         <script>
           marked.setOptions({ breaks: true, gfm: true });
           document.querySelectorAll('.bubble').forEach(el => {
-            el.innerHTML = marked.parse(el.textContent || '');
+            let html = marked.parse(el.textContent || '');
+            // Reemplazar bloques ```mermaid por divs renderizables
+            html = html.replace(/<pre><code class="language-mermaid">([\\s\\S]*?)<\\/code><\\/pre>/g, (_, code) => {
+              const id = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+              setTimeout(() => { mermaid.render(id, code).then(({svg}) => { document.getElementById(id).innerHTML = svg; }); }, 100);
+              return '<div class="mermaid-diagram" id="' + id + '"></div>';
+            });
+            el.innerHTML = html;
           });
           requestAnimationFrame(() => { window.scrollTo(0, document.body.scrollHeight); });
         </script>
