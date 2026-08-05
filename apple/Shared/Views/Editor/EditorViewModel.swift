@@ -315,7 +315,15 @@ class EditorViewModel: ObservableObject {
     func launchWatcher(paths: [String], ignorePatterns: [String]) {
         DispatchQueue.global(qos: .userInitiated).async {
             for path in paths {
-                _ = scanVault(path: path, ignorePatterns: ignorePatterns)
+                // Reintentar si la DB no está lista
+                for attempt in 0..<5 {
+                    let result = scanVault(path: path, ignorePatterns: ignorePatterns)
+                    if result.contains("DB no inicializada") && attempt < 4 {
+                        Thread.sleep(forTimeInterval: 2.0)
+                        continue
+                    }
+                    break
+                }
             }
             _ = startWatcher(paths: paths, ignorePatterns: ignorePatterns)
         }

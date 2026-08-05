@@ -84,7 +84,7 @@ class WorkspaceManager: ObservableObject {
                 path: systemVaultURL.path
             )
             initGitRepo(workspacePath: systemVaultURL.path)
-            triggerScan(for: systemVaultURL.path)
+            // El scan se ejecuta después de initKnowledgeBase (en MainEditorView.onAppear)
     }
     
     /// Presenta el panel nativo de macOS para que el usuario seleccione carpetas adicionales.

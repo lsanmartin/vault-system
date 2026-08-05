@@ -541,6 +541,11 @@ pub fn maintenance_dedup_and_vacuum() -> String {
 
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
+    // Verificar que la DB está inicializada
+    if !DB_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+        crate::add_telemetry_log(format!("scan_vault abortado: DB no inicializada aún para {}", path));
+        return "DB no inicializada. Reintentando...".to_string();
+    }
     let canonical_path = canonicalize_path(&path);
 
     // Registrar en SCANNING_PATHS para que el watcher no compita
