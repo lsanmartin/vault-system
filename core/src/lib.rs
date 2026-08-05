@@ -1062,11 +1062,12 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     }
 
     if is_semantic {
-        sql.push_str(" ORDER BY similarity DESC");
+        sql.push_str(" ORDER BY similarity DESC LIMIT 5000");
     } else {
+        // Sin LIMIT para queries de navegación (necesita ver todos los items del workspace)
+        // El filtro por path ya restringe el scope lo suficiente
         sql.push_str(" ORDER BY created_at DESC");
     }
-    sql.push_str(" LIMIT 5000");
 
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -1093,6 +1094,38 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     };
 
     note_iter.filter_map(|n| n.ok()).collect()
+}
+
+/// Query optimizada para navegación: devuelve hijos directos de un path (carpetas + archivos).
+/// Sin LIMIT porque el número de hijos de una carpeta es naturalmente acotado.
+#[uniffi::export]
+pub fn query_children(parent_path: String, ignore_patterns: Vec<String>) -> Vec<NoteRecord> {
+    let conn = match get_db_connection() { Some(c) => c, None => return Vec::new() };
+    let canonical = canonicalize_path(&parent_path);
+    let prefix = if canonical.ends_with('/') { canonical.clone() } else { format!("{}/", canonical) };
+
+    let mut sql = format!(
+        "SELECT n.id, n.title, n.path, '' as content, n.is_dir FROM notes n WHERE n.path LIKE '{}%'",
+        prefix
+    );
+    for p in &ignore_patterns {
+        sql.push_str(&format!(" AND n.path NOT LIKE '%{}%'", p));
+    }
+    // Solo hijos directos: el path no debe contener otro '/' después del prefix
+    sql.push_str(&format!(" AND n.path NOT LIKE '{}%/%'", prefix));
+    sql.push_str(" ORDER BY n.is_dir DESC, n.title ASC");
+
+    let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
+    let iter = match stmt.query_map([], |row| {
+        Ok(NoteRecord {
+            id: row.get(0).unwrap_or_default(),
+            title: row.get(1).unwrap_or_default(),
+            path: row.get(2).unwrap_or_default(),
+            content: row.get(3).unwrap_or_default(),
+            is_dir: row.get(4).unwrap_or(false),
+        })
+    }) { Ok(i) => i, Err(_) => return Vec::new() };
+    iter.filter_map(|n| n.ok()).collect()
 }
 
 #[uniffi::export]

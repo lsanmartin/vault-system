@@ -587,13 +587,10 @@ class EditorViewModel: ObservableObject {
             for item in allItems { uniqueItems[item.path] = item }
             results = Array(uniqueItems.values)
         } else {
-            results = self.childrenByParent[normalizedCurrentPath] ?? []
+            // Query optimizada: solo hijos directos del path actual
+            let ignore = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git", "target/", "node_modules/"]
+            results = queryChildren(parentPath: normalizedCurrentPath, ignorePatterns: ignore)
             addSwiftTelemetryLog(log: "updateGrid: currentPath=\(normalizedCurrentPath). results=\(results.count)")
-            if let newNote = results.first(where: { $0.title.contains("Nueva Nota") }) {
-                addSwiftTelemetryLog(log: "updateGrid: ¡Nueva Nota ENCONTRADA en results! Path=\(newNote.path)")
-            } else {
-                addSwiftTelemetryLog(log: "updateGrid: Nueva Nota NO ESTÁ en results")
-            }
             print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
 
             // FileManager overlay: agrega archivos no-.md cuando el toggle está activo
