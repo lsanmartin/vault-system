@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod mcp_server;
 pub mod okf_validator;
+pub mod scheduler;
 
 uniffi::setup_scaffolding!();
 
@@ -458,6 +459,17 @@ pub fn init_knowledge_base() -> String {
             agent_code TEXT,
             content TEXT NOT NULL,
             timestamp TIMESTAMP DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduled_tasks (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            cron_expr TEXT NOT NULL,
+            command TEXT NOT NULL,
+            enabled BOOLEAN DEFAULT true,
+            last_run TIMESTAMP,
+            last_status TEXT,
+            created_at TIMESTAMP DEFAULT now()
         );"
     );
 
@@ -3414,6 +3426,33 @@ pub fn validate_okf_file(file_path: String) -> String {
 #[uniffi::export]
 pub fn validate_dependency_cycles(root_dir: String) -> String {
     okf_validator::validate_dependency_cycles(&root_dir)
+}
+
+// --- FFI: Scheduler ---
+
+#[uniffi::export]
+pub fn scheduler_schedule_task(name: String, command: String, cron_expr: String) -> String {
+    scheduler::schedule_task(&name, &command, &cron_expr)
+}
+
+#[uniffi::export]
+pub fn scheduler_list_tasks() -> String {
+    scheduler::list_scheduled_tasks()
+}
+
+#[uniffi::export]
+pub fn scheduler_toggle_task(id: String, enabled: bool) -> bool {
+    scheduler::toggle_scheduled_task(&id, enabled)
+}
+
+#[uniffi::export]
+pub fn scheduler_delete_task(id: String) -> bool {
+    scheduler::delete_scheduled_task(&id)
+}
+
+#[uniffi::export]
+pub fn scheduler_tick() -> String {
+    scheduler::tick_scheduled_tasks()
 }
 
 // --- FFI: Chat Persistence ---
