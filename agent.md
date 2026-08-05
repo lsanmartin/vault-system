@@ -234,3 +234,18 @@
 - `init_knowledge_base` devolvía `"Error de Esquema"` pero nadie leía el retorno (`_ = init_knowledge_base()`).
 - Agregar `add_telemetry_log` en init ayuda a diagnosticar.
 - La DB en sandbox está en `~/Library/Containers/cl.nicelio.vault.VaultSystem/Data/.vault_system/`.
+
+## ⚠️ LIMIT en queries de navegación — no usar
+
+> **2026-08-05**: Agregamos `LIMIT 5000` a `query_notes` para evitar congelamiento con 277K notas.
+> Esto rompió la navegación: carpetas como `06-Desarrollo` desaparecían porque quedaban
+> fuera del top 5000 (ordenadas por created_at DESC).
+
+### Regla
+- **NUNCA usar LIMIT en queries de navegación** (las que alimentan el sidebar/grid).
+- Para navegación por carpetas, usar `query_children(parent_path)` que devuelve solo
+  los hijos directos de una carpeta — naturalmente acotado, sin límite artificial.
+- `query_notes` sin límite se usa solo para búsqueda full-text.
+
+### Lección
+- Si una carpeta existe en disco pero no en el sidebar, revisar si hay LIMIT cortando resultados.
