@@ -464,7 +464,7 @@ pub fn init_knowledge_base() -> String {
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY,
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             agent_code TEXT,
