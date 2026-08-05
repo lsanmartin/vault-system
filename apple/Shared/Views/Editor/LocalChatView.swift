@@ -191,7 +191,7 @@ struct LocalChatView: View {
             AgentSettingsView()
                 .frame(width: 560, height: 780)
         }
-        .onAppear { loadThread(for: selectedAgent.agentCode) }
+        .onAppear { loadThread(for: selectedAgent.agentCode, displayName: selectedAgent.displayName) }
         .onDisappear { saveCurrentThreadMessages() }
         .onChange(of: isGenerating) { _, generating in
             if !generating, let last = messages.last, !last.isUser {
@@ -199,7 +199,7 @@ struct LocalChatView: View {
             }
         }
         .onChange(of: selectedAgent) { oldValue, newValue in
-            loadThread(for: newValue.agentCode)
+            loadThread(for: newValue.agentCode, displayName: newValue.displayName)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatReset"))) { _ in
             createAnchorNote(for: selectedAgent)
@@ -258,11 +258,11 @@ struct LocalChatView: View {
         chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
     }
 
-    private func loadThread(for agentCode: String) {
+    private func loadThread(for agentCode: String, displayName: String) {
         let tid = chatThreads.getOrCreateThread(for: agentCode)
         let msgs = chatThreads.toLocalMessages(threadId: tid)
         messages = msgs.isEmpty
-            ? [LocalChatMessage(text: "Chat \(agentCode) — Escribí tu mensaje.", isUser: false, agentCode: agentCode)]
+            ? [LocalChatMessage(text: "Chat \(displayName) — Escribí tu mensaje.", isUser: false, agentCode: agentCode)]
             : msgs
     }
 
@@ -390,8 +390,13 @@ struct LocalChatView: View {
         ]
         var pendingTools: [String] = []
 
-        for _ in 0..<8 {
-            let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+        for turn in 0..<8 {
+            var result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+            // Reintentar errores de red (timeout, conexión perdida)
+            if let error = result.error, (error.contains("Conexión perdida") || error.contains("Red:")) && turn < 3 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s
+                result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+            }
             if let error = result.error {
                 await MainActor.run {
                     messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
@@ -690,7 +695,11 @@ struct LocalChatView: View {
 
             return StreamResult(text: text, toolCalls: toolCalls, error: nil)
         } catch {
-            return StreamResult(text: nil, toolCalls: nil, error: "Red: \(error.localizedDescription)")
+            let msg = error.localizedDescription
+            if msg.contains("network connection was lost") || msg.contains("timeout") || msg.contains("Network") {
+                return StreamResult(text: nil, toolCalls: nil, error: "Conexión perdida con \(agent.provider.rawValue). Reintentá en unos segundos.")
+            }
+            return StreamResult(text: nil, toolCalls: nil, error: "Red: \(msg)")
         }
     }
 
