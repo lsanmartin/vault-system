@@ -76,6 +76,7 @@ struct SchedulerView: View {
     }
 
     private func addBuiltinTasks() {
+        _ = schedulerScheduleTask(name: "Mantenimiento DB (dedup+vacuum)", command: "maintenance", cronExpr: "0 3 * * *")
         _ = schedulerScheduleTask(name: "Consolidar bitácoras", command: "consolidate-journals", cronExpr: "0 3 * * *")
         _ = schedulerScheduleTask(name: "Embeddings batch nocturno", command: "embedding-batch", cronExpr: "0 2 * * *")
         _ = schedulerScheduleTask(name: "Git GC semanal", command: "git-gc", cronExpr: "0 4 * * 0")
@@ -97,7 +98,7 @@ struct AddTaskView: View {
     @State private var command = ""
     @State private var cronExpr = "0 * * * *"
 
-    let commands = ["consolidate-journals", "embedding-batch", "git-gc", "reindex-parquet"]
+    let commands = ["maintenance", "consolidate-journals", "embedding-batch", "git-gc", "reindex-parquet"]
     let cronPresets = ["0 * * * *", "0 3 * * *", "0 2 * * *", "0 4 * * 0", "*/30 * * * *"]
 
     var body: some View {

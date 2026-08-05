@@ -488,9 +488,7 @@ pub fn init_knowledge_base() -> String {
             }
 
             // Ejecutar deduplicación preventiva de rowids
-            let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
-            let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
-            let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
+            dedup_and_vacuum(&conn);
 
             *conn_guard = Some(conn);
             "Knowledge Base inicializada (DuckDB sin índices secundarios para evitar corrupción)".to_string()
@@ -500,6 +498,34 @@ pub fn init_knowledge_base() -> String {
 }
 
 
+
+/// Deduplica filas y compacta la DB. Previene hinchazón por scans repetidos.
+fn dedup_and_vacuum(conn: &Connection) {
+    let tables = [
+        ("notes", "id"),
+        ("semantic_summaries", "note_id"),
+        ("domain_metadata", "dir_path"),
+    ];
+    for (table, col) in &tables {
+        let sql = format!(
+            "DELETE FROM {} WHERE rowid NOT IN (SELECT MIN(rowid) FROM {} GROUP BY {})",
+            table, table, col
+        );
+        let _ = conn.execute(&sql, []);
+    }
+    // Compactar espacio en disco
+    let _ = conn.execute("CHECKPOINT", []);
+}
+
+#[uniffi::export]
+pub fn maintenance_dedup_and_vacuum() -> String {
+    let conn = match get_db_connection() { Some(c) => c, None => return "DB no disponible".into() };
+    dedup_and_vacuum(&conn);
+    let size = std::fs::metadata(
+        format!("{}/.vault_system/vault.duckdb", std::env::var("HOME").unwrap_or_default())
+    ).map(|m| m.len()).unwrap_or(0);
+    format!("Dedup + vacuum completado. DB: {} MB", size / 1_048_576)
+}
 
 #[uniffi::export]
 pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
@@ -781,6 +807,10 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     }
 
     update_sync_ts();
+    // Dedup post-scan para prevenir hinchazón de DB
+    if let Some(conn) = get_db_connection() {
+        dedup_and_vacuum(&conn);
+    }
     let mut msg = format!("Escaneado completado: {} notas procesadas.", count);
     if stub_count > 0 {
         msg.push_str(&format!(" ({} stubs omitidos — se re-indexarán cuando iCloud complete la descarga)", stub_count));
@@ -2233,6 +2263,11 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             },
                             "required": ["path"]
                         }
+                    },
+                    {
+                        "name": "vault_maintenance",
+                        "description": "Ejecuta mantenimiento de la base de datos: deduplica filas y compacta el archivo. Usar si la app va lenta o la DB crece mucho.",
+                        "inputSchema": { "type": "object", "properties": {} }
                     }
                 ]
             });
@@ -2639,6 +2674,9 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     } else {
                         crate::okf_validator::validate_dependency_cycles(root)
                     }
+                },
+                "vault_maintenance" => {
+                    crate::maintenance_dedup_and_vacuum()
                 },
                 _ => return json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": "Method not found" } }).to_string(),
             };

@@ -18,6 +18,9 @@ fn cron_matches(expr: &str) -> bool {
 /// Ejecuta un comando registrado. Retorna (éxito, mensaje).
 pub fn execute_command(cmd: &str) -> (bool, String) {
     let result = match cmd {
+        "maintenance" => {
+            crate::maintenance_dedup_and_vacuum()
+        }
         "reindex-parquet" => {
             format!("OK: {} notas indexadas", 0)
         }
@@ -75,6 +78,7 @@ fn default_cron_for(cmd: &str) -> String {
         "consolidate-journals" => "0 3 * * *".into(),  // 3am diario
         "embedding-batch" => "0 2 * * *".into(),        // 2am diario
         "git-gc" => "0 4 * * 0".into(),                 // 4am domingo
+        "maintenance" => "0 3 * * *".into(),             // 3am diario
         "reindex-parquet" => "0 3 * * *".into(),        // 3am diario
         _ => "0 * * * *".into(),                         // cada hora
     }
