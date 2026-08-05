@@ -36,7 +36,7 @@ public final class LocalBrain: ObservableObject {
     @Published public var isDownloading: Bool = false
     @Published public var modelStatus: ModelStatus = .notLoaded
     /// Estado de activación del cerebro local. Al desactivarse se libera el modelo de la memoria GPU.
-    @Published public var isEnabled: Bool = true
+    @Published public var isEnabled: Bool = false
 
     private var cancellables = Set<AnyCancellable>()
     private let queue = DispatchQueue(label: "cl.nicelio.vault.brain", qos: .background)
@@ -96,7 +96,7 @@ public final class LocalBrain: ObservableObject {
         MLX.GPU.set(cacheLimit: 64 * 1024 * 1024)
 
         // Restaurar estado de activación persistido (default: activado)
-        self.isEnabled = UserDefaults.standard.object(forKey: "vault_brain_enabled") as? Bool ?? true
+        self.isEnabled = UserDefaults.standard.object(forKey: "vault_brain_enabled") as? Bool ?? false
 
         NotificationCenter.default.publisher(for: NSNotification.Name("VaultScanDidFinish"))
             .sink { [weak self] _ in
