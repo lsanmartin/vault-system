@@ -486,6 +486,18 @@ pub fn init_knowledge_base() -> String {
 
     match schema_res {
         Ok(_) => {
+            // Verificar que las tablas críticas existen (execute_batch puede fallar parcialmente)
+            let critical_tables = ["notes", "links", "telemetry"];
+            let mut missing = Vec::new();
+            for table in &critical_tables {
+                if conn.execute(&format!("SELECT 1 FROM {} LIMIT 1", table), []).is_err() {
+                    missing.push(*table);
+                }
+            }
+            if !missing.is_empty() {
+                return format!("Error de Esquema: tablas no creadas: {:?}", missing);
+            }
+
             DB_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
 
             // Schema versioning
@@ -872,8 +884,9 @@ pub fn remove_vault_path(path: String) -> String {
 
 #[uniffi::export]
 pub fn create_item(path: String, is_dir: bool) -> bool {
-    crate::add_telemetry_log(format!("create_item: intentando crear {} (is_dir={})", path, is_dir));
-    let target = Path::new(&path);
+    let canonical = canonicalize_path(&path);
+    crate::add_telemetry_log(format!("create_item: intentando crear {} (is_dir={})", canonical, is_dir));
+    let target = Path::new(&canonical);
     let success = if is_dir {
         fs::create_dir_all(target).is_ok()
     } else {
@@ -1062,7 +1075,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     }
 
     if is_semantic {
-        sql.push_str(" ORDER BY similarity DESC LIMIT 5000");
+        sql.push_str(" ORDER BY similarity DESC LIMIT 10000");
     } else {
         // Sin LIMIT para queries de navegación (necesita ver todos los items del workspace)
         // El filtro por path ya restringe el scope lo suficiente
@@ -1761,8 +1774,7 @@ pub fn get_temporal_neighborhood(note_id: String, max_depth: u32) -> Vec<Tempora
             WHERE t.depth < {}
         )
         SELECT DISTINCT source_id, target_id, type, weight, created_at
-        FROM traverse
-        LIMIT 500;
+        FROM traverse;
     ", note_id, note_id, max_depth);
     
     let mut stmt = match conn.prepare(&query) {
@@ -1815,7 +1827,7 @@ pub fn get_semantic_neighbors(note_id: String, workspace_path: String, limit: u3
 
     // Escapar paths para evitar inyección SQL (los paths pueden tener comillas simples)
     let safe_note_id = note_id.replace('\'', "''");
-    let safe_ws_path = workspace_path.replace('\'', "''");
+    let safe_ws_path = canonicalize_path(&workspace_path).replace('\'', "''");
 
     // Consulta: para cada nota del workspace, calcula cosine similarity contra el embedding
     // del nodo origen. Excluye directorios, excluye la nota origen, requiere embedding no nulo.
@@ -1884,12 +1896,12 @@ pub fn get_cognitive_metrics(note_id: String, workspace_path: String) -> Cogniti
     };
 
     let safe_id  = note_id.replace('\'', "''");
-    let safe_ws  = workspace_path.replace('\'', "''");
+    let safe_ws  = canonicalize_path(&workspace_path).replace('\'', "''");
 
     // ── 1. ENT + CARGA: leer edges del grafo de links (depth 1) ─────────────────────────────
     let edge_query = format!(
         "SELECT source_id, target_id FROM links \
-         WHERE source_id = '{}' OR target_id = '{}' LIMIT 200",
+         WHERE source_id = '{}' OR target_id = '{}'",
         safe_id, safe_id
     );
 
@@ -2407,9 +2419,10 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             resp.push_str(&format!("\n\nRestringido a carpetas:\n{}", r.allowed_paths.join("\n")));
                         }
                         if r.read_system || r.write_system {
-                            let home = std::env::var("HOME").unwrap_or("/".to_string());
-                            let sys_dir = std::path::PathBuf::from(home).join(".vault_system").join("system_workspace");
-                            resp.push_str(&format!("\n{}", sys_dir.to_string_lossy()));
+                            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                            let sys_dir = std::path::PathBuf::from(&home).join(".vault_system").join("system_workspace");
+                            let canonical_sys = canonicalize_path(&sys_dir.to_string_lossy());
+                            resp.push_str(&format!("\n{}", canonical_sys));
                         }
                         resp
                     } else {
