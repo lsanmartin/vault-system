@@ -323,8 +323,15 @@ fn canonicalize_path(p: &str) -> String {
         .unwrap_or_else(|| p.to_string())
 }
 
+static DB_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[uniffi::export]
 pub fn init_knowledge_base() -> String {
+    // Evitar reinicialización que borra la DB
+    if DB_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) {
+        return "Knowledge Base ya inicializada.".to_string();
+    }
+
     let mut conn_guard = DB_CONN.lock().unwrap();
     
     // Abrir conexión persistente
@@ -479,6 +486,8 @@ pub fn init_knowledge_base() -> String {
 
     match schema_res {
         Ok(_) => {
+            DB_INITIALIZED.store(true, std::sync::atomic::Ordering::Release);
+
             // Schema versioning
             let current_version: u32 = conn.query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM _schema_version", [], |r| r.get(0)

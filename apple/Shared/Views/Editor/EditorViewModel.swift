@@ -283,7 +283,6 @@ class EditorViewModel: ObservableObject {
     @Published var telemetryLogs: [String] = []
     
     init() {
-        _ = initKnowledgeBase()
         _ = startIpcServer()
         
         $searchText
