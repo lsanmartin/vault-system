@@ -210,3 +210,27 @@
   - Modelos GGUF Apache 2.0/MIT únicamente. Catálogo en `docs/models/catalog.json`.
   - Hook de inserción: `lib.rs` L1177 (comentario "// Aquí en un futuro se llamará al modelo local").
   - Implementa Fase 2 del PLAN_ESTRATEGICO_DEV2 ("El Digestor").
+
+## ⚠️ DuckDB SQL Compatibility — Reglas críticas
+
+> **2026-08-05**: El sidebar dejó de funcionar porque `AUTOINCREMENT` no es válido en DuckDB.
+> Al agregar `INTEGER PRIMARY KEY AUTOINCREMENT` en `chat_messages`, `execute_batch`
+> falló completo y **ninguna** tabla se creó (ni `notes`, ni `telemetry`, ni nada).
+> La DB quedaba en 12KB sin tablas. Tardamos 2h en encontrar la causa.
+
+### Reglas para modificar el schema (lib.rs init_knowledge_base)
+
+1. **NUNCA usar `AUTOINCREMENT`**. DuckDB auto-incrementa `INTEGER PRIMARY KEY` por defecto.
+2. **Sintaxis válida**: `id INTEGER PRIMARY KEY` (sin AUTOINCREMENT, sin SERIAL, sin GENERATED)
+3. **TIMESTAMP**: usar `TIMESTAMP DEFAULT now()` (válido)
+4. **BOOLEAN**: usar `BOOLEAN DEFAULT true/false` (válido)
+5. **Verificar después de cada cambio**: `SELECT * FROM notes LIMIT 1` debe funcionar.
+6. **Una sola llamada a `init_knowledge_base()`**: ahora protegida con `DB_INITIALIZED` AtomicBool.
+7. **`execute_batch` falla completo si hay error de sintaxis**: todas las tablas o ninguna.
+
+### Lecciones aprendidas
+
+- `execute_batch` es atómico en DuckDB: un error de sintaxis en una tabla rompe todo el batch.
+- `init_knowledge_base` devolvía `"Error de Esquema"` pero nadie leía el retorno (`_ = init_knowledge_base()`).
+- Agregar `add_telemetry_log` en init ayuda a diagnosticar.
+- La DB en sandbox está en `~/Library/Containers/cl.nicelio.vault.VaultSystem/Data/.vault_system/`.
