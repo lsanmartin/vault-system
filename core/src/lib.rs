@@ -3553,7 +3553,7 @@ mod tests {
 
     #[test]
     fn test_scan_vault_metodos() {
-        init_db();
+        let _ = init_knowledge_base();
         let path = "/Users/lsanmartin/_vault/m\u{00E9}todos".to_string();
         let ignore = vec!["_metadata.md".to_string()];
         let res = scan_vault(path, ignore);
