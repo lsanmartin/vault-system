@@ -1052,6 +1052,7 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
     } else {
         sql.push_str(" ORDER BY created_at DESC");
     }
+    sql.push_str(" LIMIT 5000");
 
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
