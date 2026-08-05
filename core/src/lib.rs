@@ -360,8 +360,11 @@ pub fn init_knowledge_base() -> String {
     }
 
     if needs_recreate {
+        crate::add_telemetry_log(format!("DB: Recreando base de datos (needs_recreate=true)"));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(&format!("{}.wal", db_path));
+    } else if !std::path::Path::new(&db_path).exists() {
+        crate::add_telemetry_log("DB: Primera inicialización, creando tablas.".into());
     }
 
     let conn = match Connection::open(&db_path) {
