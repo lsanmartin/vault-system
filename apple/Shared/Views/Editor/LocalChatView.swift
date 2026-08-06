@@ -559,7 +559,7 @@ struct LocalChatView: View {
 
             var pendingTools: [String] = []
 
-            for turn in 0..<4 {
+            for turn in 0..<5 {
                 let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
                 if let error = result.error {
                     await MainActor.run {

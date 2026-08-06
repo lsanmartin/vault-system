@@ -2328,6 +2328,17 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     },
                     {
+                        "name": "vault_list_directory",
+                        "description": "Lista archivos y carpetas dentro de un directorio del vault. Devuelve nombres, rutas y si es carpeta o archivo. Usar para explorar la estructura de carpetas.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta del directorio a listar (ej. /Users/lsanmartin/_vault)." }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
                         "name": "vault_maintenance",
                         "description": "Ejecuta mantenimiento de la base de datos: deduplica filas y compacta el archivo. Usar si la app va lenta o la DB crece mucho.",
                         "inputSchema": { "type": "object", "properties": {} }
@@ -2737,6 +2748,18 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
                     } else {
                         crate::okf_validator::validate_dependency_cycles(root)
+                    }
+                },
+                "vault_list_directory" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if !is_path_allowed(path, &token_record) {
+                        "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
+                    } else {
+                        let children = crate::query_children(path.to_string(), vec![]);
+                        let items: Vec<String> = children.iter().map(|n| {
+                            format!("{} [{}] ({})", n.title, if n.is_dir { "DIR" } else { "FILE" }, n.path)
+                        }).collect();
+                        items.join("\n")
                     }
                 },
                 "vault_maintenance" => {
