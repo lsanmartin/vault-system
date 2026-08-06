@@ -601,7 +601,22 @@ struct LocalChatView: View {
                 conversation = pruneConversation(conversation)
             }
 
+            // Max turns alcanzado: forzar resumen sin tools
             await flushPending(text: "", tools: pendingTools, code: code)
+            if pendingTools.count > 0 {
+                await MainActor.run {
+                    let thinking = LocalChatMessage(text: "● Destilando hallazgos…", isUser: false, agentCode: code, type: "thinking")
+                    messages.append(thinking)
+                }
+                conversation.append(["role": "user", "content": "Resumí en 3-5 bullets qué encontraste y proponé siguientes pasos. Sé conciso. NO te presentes. NO saludes."])
+                let finalResult = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [], code: code)
+                if let text = finalResult.text, !text.isEmpty {
+                    await MainActor.run {
+                        messages.append(LocalChatMessage(text: text, isUser: false, agentCode: code))
+                        saveMessage(LocalChatMessage(text: text, isUser: false, agentCode: code))
+                    }
+                }
+            }
             await MainActor.run { isGenerating = false }
         }
     }
