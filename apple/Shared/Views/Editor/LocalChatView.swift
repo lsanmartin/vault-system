@@ -609,9 +609,11 @@ struct LocalChatView: View {
     /// Construye el array de conversación para la API desde mensajes persistidos en DB
     private func buildApiConversation(threadId: String, sys: String, newUserMsg: String) -> [[String: Any]] {
         var conv: [[String: Any]] = [["role": "system", "content": sys]]
-        let persisted = chatThreads.loadMessages(threadId: threadId, limit: 30)
+        let persisted = chatThreads.loadMessages(threadId: threadId, limit: 20)
 
-        for msg in persisted {
+        // Agregar historial previo (sin el último mensaje que es el nuevo user msg)
+        let previousMsgs = persisted.dropLast()
+        for msg in previousMsgs {
             switch msg.role {
             case "user":
                 conv.append(["role": "user", "content": msg.content])
@@ -622,7 +624,7 @@ struct LocalChatView: View {
             }
         }
 
-        // Agregar el nuevo mensaje del usuario
+        // Agregar el nuevo mensaje del usuario (no duplicado)
         conv.append(["role": "user", "content": newUserMsg])
         return conv
     }
