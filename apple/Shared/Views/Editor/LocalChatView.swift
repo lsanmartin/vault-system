@@ -544,49 +544,25 @@ struct LocalChatView: View {
 
         let code = agentCode(for: agent)
         let sys = buildSystemPrompt(agent: agent, context: context)
-
-        // Obtener tools MCP del agente y convertirlas a formato OpenAI
         let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
         let openaiTools = convertMcpToolsToOpenAI(toolsJson)
 
         Task {
-            let maxTurns = 8
-            let userMsgContent = prompt  // preservado siempre
             var conversation: [[String: Any]] = [
                 ["role": "system", "content": String(sys.prefix(3000))],
                 ["role": "user", "content": prompt]
             ]
             var pendingTools: [String] = []
-            var hasText = false
-            var compactedAt: Int? = nil
 
-            for turn in 0..<maxTurns {
-                // Capa 2 — Snip: limpiar tool results vacíos/error antes de enviar
-                conversation = snipConversation(conversation)
-
+            for turn in 0..<8 {
                 let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
-                if let error = result.error, turn > 0 {
-                    // Reintento automático en errores de red
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    let retry = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
-                    if let retryError = retry.error {
-                        await MainActor.run {
-                            messages.append(LocalChatMessage(text: "❌ \(retryError)", isUser: false, agentCode: code))
-                            isGenerating = false
-                        }
-                        return
-                    }
-                    await processResponse(retry, &conversation, &pendingTools, &hasText, code: code, agent: agent, key: key, tools: openaiTools)
-                    continue
-                } else if let error = result.error {
+                if let error = result.error {
                     await MainActor.run {
                         messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
                         isGenerating = false
                     }
                     return
                 }
-
-                if result.text != nil, !(result.text?.isEmpty ?? true) { hasText = true }
 
                 guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
                     await flushPending(text: "", tools: pendingTools, code: code)
@@ -598,109 +574,24 @@ struct LocalChatView: View {
 
                 var assistantMsg: [String: Any] = ["role": "assistant"]
                 assistantMsg["tool_calls"] = toolCalls.map { tc in
-                    return ["id": tc.id, "type": "function",
-                            "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
+                    ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
                 }
                 conversation.append(assistantMsg)
 
                 for tc in toolCalls {
-                    var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(
-                        tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args
-                    ))
-                    // Capa 1 — Microcompact: truncar + colapsar errores
-                    if raw.contains("\"error\"") || raw.hasPrefix("Error") {
-                        raw = "[error]"
-                    } else if raw == "{}" || raw == "[]" || raw == "null" {
-                        raw = "[vacío]"
-                    } else if raw.count > 4000 {
-                        raw = String(raw.prefix(4000)) + "\n…"
-                    }
+                    var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
+                    if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
                     conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
                 }
 
-                // Capa 3 — Auto-Compact: si >200K chars y más de 2 tool calls, compactar
                 let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
-                if total > 200_000 && turn >= 2 && compactedAt == nil {
-                    compactedAt = turn
-                    if let compacted = await compactContext(conversation, userMsg: userMsgContent, sys: sys, agent: agent, key: key, code: code) {
-                        conversation = compacted
-                    }
-                } else if total > 1_500_000 {
+                if total > 1_500_000 && conversation.count >= 2 {
                     conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6))
                 }
             }
 
             await flushPending(text: "", tools: pendingTools, code: code)
             await MainActor.run { isGenerating = false }
-        }
-    }
-
-    // MARK: — Compaction helpers
-
-    /// Capa 2 — Snip: compacta tool results redundantes sin romper el pairing assistant↔tool
-    private func snipConversation(_ conv: [[String: Any]]) -> [[String: Any]] {
-        var result: [[String: Any]] = []
-        var seen = Set<String>()
-        for msg in conv {
-            guard let role = msg["role"] as? String else { result.append(msg); continue }
-            if role == "tool", let content = msg["content"] as? String {
-                // Preservar siempre el mensaje tool (API requiere pairing)
-                // Pero compactar contenido si es redundante
-                var compacted = msg
-                if content == "{}" || content == "[]" || content == "null" {
-                    compacted["content"] = "[vacío]"
-                } else if content.hasPrefix("Error") || content.contains("\"error\"") {
-                    compacted["content"] = "[error]"
-                } else if seen.contains(content) {
-                    compacted["content"] = "[dup]"
-                } else {
-                    seen.insert(content)
-                }
-                result.append(compacted)
-            } else {
-                result.append(msg)
-            }
-        }
-        return result
-    }
-
-    /// Capa 3 — Auto-Compact: resume la conversación vía LLM y retorna versión compacta
-    private func compactContext(_ conv: [[String: Any]], userMsg: String, sys: String, agent: ExternalAgentConfig, key: String, code: String) async -> [[String: Any]]? {
-        // Contar tool calls para el resumen
-        let toolCount = conv.filter { ($0["role"] as? String) == "tool" }.count
-        let summaryPrompt = "Resumí en 3-5 bullets qué encontraste hasta ahora explorando el vault. Sé conciso. Tool calls ejecutados: \(toolCount)."
-
-        var summaryConv: [[String: Any]] = [
-            ["role": "system", "content": "Respondé solo con el resumen, sin saludos ni introducción."],
-            ["role": "user", "content": summaryPrompt]
-        ]
-
-        let result = await streamAPI(agent: agent, key: key, apiMessages: summaryConv, tools: [], code: code)
-        let summary = result.text ?? "Exploración en curso."
-
-        // Reconstruir: system + user original + resumen + últimos 2 tool exchanges
-        let lastTools = conv.suffix(4) // últimos 2 pares assistant+tool
-        return [["role": "system", "content": String(sys.prefix(3000))],
-                ["role": "user", "content": userMsg],
-                ["role": "assistant", "content": "[Contexto compactado] \(summary)"]] + Array(lastTools)
-    }
-
-    /// Procesa respuesta con tool calls (usado en retry)
-    private func processResponse(_ result: StreamResult, _ conversation: inout [[String: Any]], _ pendingTools: inout [String], _ hasText: inout Bool, code: String, agent: ExternalAgentConfig, key: String, tools: [[String: Any]]) async {
-        if result.text != nil, !(result.text?.isEmpty ?? true) { hasText = true }
-        guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else { return }
-        pendingTools.append(contentsOf: toolCalls.map(\.name))
-        var assistantMsg: [String: Any] = ["role": "assistant"]
-        assistantMsg["tool_calls"] = toolCalls.map { tc in
-            ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
-        }
-        conversation.append(assistantMsg)
-        for tc in toolCalls {
-            var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
-            if raw.contains("\"error\"") || raw.hasPrefix("Error") { raw = "[error]" }
-            else if raw == "{}" || raw == "[]" || raw == "null" { raw = "[vacío]" }
-            else if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
-            conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
         }
     }
 
