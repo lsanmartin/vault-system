@@ -801,10 +801,10 @@ struct LocalChatView: View {
 
         // Gestión de contexto: scratchpad obligatorio
         sys += "\n## Reglas de Trabajo\n"
-        sys += "- Máximo 4 rondas de herramientas. Sé eficiente.\n"
-        sys += "- Después de cada ronda, registrá hallazgos CLAVE en current_session.md del system_workspace.\n"
-        sys += "- Solo 3 tipos: [ACUERDO], [DESCARTADO], [HITO].\n"
-        sys += "- Al final de tu exploración, SIEMPRE respondé con un resumen concreto.\n"
+        sys += "- Máximo 5 rondas de herramientas. Sé eficiente.\n"
+        sys += "- Al final de CADA respuesta, actualizá current_session.md con [ACUERDO]/[HITO]/[DESCARTADO].\n"
+        sys += "- Al iniciar una conversación, leé current_session.md para recuperar el contexto de la sesión anterior.\n"
+        sys += "- Si no hay current_session.md, buscá en 01-Diario/ la nota más reciente para entender qué se estaba haciendo.\n"
         sys += "- NUNCA preguntes '¿en qué te ayudo?' ni frases de bienvenida. La conversación ya empezó.\n"
 
         if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
