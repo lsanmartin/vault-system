@@ -610,11 +610,9 @@ struct LocalChatView: View {
                 }
                 conversation.append(["role": "user", "content": "Resumí en 3-5 bullets qué encontraste y proponé siguientes pasos. Sé conciso. NO te presentes. NO saludes."])
                 let finalResult = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [], code: code)
-                if let text = finalResult.text, !text.isEmpty {
-                    await MainActor.run {
-                        messages.append(LocalChatMessage(text: text, isUser: false, agentCode: code))
-                        saveMessage(LocalChatMessage(text: text, isUser: false, agentCode: code))
-                    }
+                // El streaming ya agregó el texto. Solo guardar.
+                if finalResult.text != nil, !(finalResult.text?.isEmpty ?? true) {
+                    if let last = messages.last, !last.isUser { saveMessage(last) }
                 }
             }
             await MainActor.run { isGenerating = false }
