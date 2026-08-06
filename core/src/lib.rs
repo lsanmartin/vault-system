@@ -1211,18 +1211,21 @@ pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<Not
 
 #[uniffi::export]
 pub fn save_note(path: String, content: String) -> String {
-    // PreCommit: validar archivos OKF antes de escribir
+    // Asegurar que la carpeta padre existe antes de validar/escribir
     let path_obj = std::path::Path::new(&path);
+    if let Some(parent) = path_obj.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // PreCommit: validar archivos OKF solo si ya existen (reescritura)
     if let Some(file_name) = path_obj.file_name().and_then(|n| n.to_str()) {
-        if matches!(file_name, "_memory.md" | "_specs.md" | "_lore.md") {
+        if matches!(file_name, "_memory.md" | "_specs.md" | "_lore.md") && path_obj.exists() {
             let validation = crate::okf_validator::validate_okf_file(&path);
-            // Solo rechazar si hay errores (no warnings)
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&validation) {
                 if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
                     if !errors.is_empty() {
                         return format!(
-                            "Error de validación OKF: {}. No se guardó la nota. Corrige los errores e intenta de nuevo.\nValidación completa: {}",
-                            errors[0], validation
+                            "Error de validación OKF: {}. No se guardó la nota.",
+                            errors[0]
                         );
                     }
                 }
