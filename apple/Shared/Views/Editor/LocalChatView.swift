@@ -551,17 +551,34 @@ struct LocalChatView: View {
 
         Task {
             let maxTurns = 8
+            let userMsgContent = prompt  // preservado siempre
             var conversation: [[String: Any]] = [
                 ["role": "system", "content": String(sys.prefix(3000))],
                 ["role": "user", "content": prompt]
             ]
             var pendingTools: [String] = []
             var hasText = false
+            var compactedAt: Int? = nil
 
             for turn in 0..<maxTurns {
-                let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+                // Capa 2 — Snip: limpiar tool results vacíos/error antes de enviar
+                conversation = snipConversation(conversation)
 
-                if let error = result.error {
+                let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+                if let error = result.error, turn > 0 {
+                    // Reintento automático en errores de red
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    let retry = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+                    if let retryError = retry.error {
+                        await MainActor.run {
+                            messages.append(LocalChatMessage(text: "❌ \(retryError)", isUser: false, agentCode: code))
+                            isGenerating = false
+                        }
+                        return
+                    }
+                    await processResponse(retry, &conversation, &pendingTools, &hasText, code: code, agent: agent, key: key, tools: openaiTools)
+                    continue
+                } else if let error = result.error {
                     await MainActor.run {
                         messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
                         isGenerating = false
@@ -590,16 +607,87 @@ struct LocalChatView: View {
                     var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(
                         tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args
                     ))
-                    if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+                    // Capa 1 — Microcompact: truncar + colapsar errores
+                    if raw.contains("\"error\"") || raw.hasPrefix("Error") {
+                        raw = "[error]"
+                    } else if raw == "{}" || raw == "[]" || raw == "null" {
+                        raw = "[vacío]"
+                    } else if raw.count > 4000 {
+                        raw = String(raw.prefix(4000)) + "\n…"
+                    }
                     conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
                 }
 
+                // Capa 3 — Auto-Compact: si >200K chars y más de 2 tool calls, compactar
                 let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
-                if total > 1_500_000 { conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6)) }
+                if total > 200_000 && turn >= 2 && compactedAt == nil {
+                    compactedAt = turn
+                    if let compacted = await compactContext(conversation, userMsg: userMsgContent, sys: sys, agent: agent, key: key, code: code) {
+                        conversation = compacted
+                    }
+                } else if total > 1_500_000 {
+                    conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6))
+                }
             }
 
             await flushPending(text: "", tools: pendingTools, code: code)
             await MainActor.run { isGenerating = false }
+        }
+    }
+
+    // MARK: — Compaction helpers
+
+    /// Capa 2 — Snip: elimina tool results redundantes/vacíos
+    private func snipConversation(_ conv: [[String: Any]]) -> [[String: Any]] {
+        var seen = Set<String>()
+        return conv.compactMap { msg in
+            guard let role = msg["role"] as? String else { return msg }
+            if role == "tool", let content = msg["content"] as? String {
+                if content == "[vacío]" || content == "[error]" { return nil } // no aporta
+                if seen.contains(content) { return nil } // duplicado
+                seen.insert(content)
+            }
+            return msg
+        }
+    }
+
+    /// Capa 3 — Auto-Compact: resume la conversación vía LLM y retorna versión compacta
+    private func compactContext(_ conv: [[String: Any]], userMsg: String, sys: String, agent: ExternalAgentConfig, key: String, code: String) async -> [[String: Any]]? {
+        // Contar tool calls para el resumen
+        let toolCount = conv.filter { ($0["role"] as? String) == "tool" }.count
+        let summaryPrompt = "Resumí en 3-5 bullets qué encontraste hasta ahora explorando el vault. Sé conciso. Tool calls ejecutados: \(toolCount)."
+
+        var summaryConv: [[String: Any]] = [
+            ["role": "system", "content": "Respondé solo con el resumen, sin saludos ni introducción."],
+            ["role": "user", "content": summaryPrompt]
+        ]
+
+        let result = await streamAPI(agent: agent, key: key, apiMessages: summaryConv, tools: [], code: code)
+        let summary = result.text ?? "Exploración en curso."
+
+        // Reconstruir: system + user original + resumen + últimos 2 tool exchanges
+        let lastTools = conv.suffix(4) // últimos 2 pares assistant+tool
+        return [["role": "system", "content": String(sys.prefix(3000))],
+                ["role": "user", "content": userMsg],
+                ["role": "assistant", "content": "[Contexto compactado] \(summary)"]] + Array(lastTools)
+    }
+
+    /// Procesa respuesta con tool calls (usado en retry)
+    private func processResponse(_ result: StreamResult, _ conversation: inout [[String: Any]], _ pendingTools: inout [String], _ hasText: inout Bool, code: String, agent: ExternalAgentConfig, key: String, tools: [[String: Any]]) async {
+        if result.text != nil, !(result.text?.isEmpty ?? true) { hasText = true }
+        guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else { return }
+        pendingTools.append(contentsOf: toolCalls.map(\.name))
+        var assistantMsg: [String: Any] = ["role": "assistant"]
+        assistantMsg["tool_calls"] = toolCalls.map { tc in
+            ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
+        }
+        conversation.append(assistantMsg)
+        for tc in toolCalls {
+            var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
+            if raw.contains("\"error\"") || raw.hasPrefix("Error") { raw = "[error]" }
+            else if raw == "{}" || raw == "[]" || raw == "null" { raw = "[vacío]" }
+            else if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+            conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
         }
     }
 
@@ -705,12 +793,26 @@ struct LocalChatView: View {
 
     private func buildSystemPrompt(agent: ExternalAgentConfig, context: String) -> String {
         var sys = "Eres \(agent.name), un asistente IA con acceso al Vault System.\n"
+
+        // Inyectar conciencia.md (estado global)
+        let concienciaPath = NSString(string: "~/.vault_system/system_workspace/00-Sistema/conciencia.md").expandingTildeInPath
+        if let conciencia = try? String(contentsOfFile: concienciaPath, encoding: .utf8) {
+            sys += "\n## Estado Global del Sistema\n\(conciencia.prefix(2000))\n"
+        }
+
         sys += "Puedes usar herramientas para leer notas, buscar, leer metadatos y telemetría.\n"
         if agent.writeContent || agent.writeMetadata || agent.writeSystem {
             sys += "También puedes crear/modificar notas y metadatos.\n"
         }
         sys += "Cuando el usuario pida hacer algo (crear nota, buscar, abrir), USA las herramientas disponibles.\n"
         sys += "No digas 'no puedo' sin antes intentar usar una herramienta.\n"
+
+        // Gestión de contexto: scratchpad + externalización
+        sys += "\n## Gestión de Contexto\n"
+        sys += "- Registrá hallazgos en current_session.md del system_workspace.\n"
+        sys += "- Solo 3 tipos: [ACUERDO], [DESCARTADO], [HITO].\n"
+        sys += "- Al necesitar contexto previo, leé current_session.md.\n"
+
         if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
         return sys
     }
