@@ -589,6 +589,10 @@ struct LocalChatView: View {
                 assistantMsg["tool_calls"] = toolCalls.map { tc in
                     ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
                 }
+                // Preservar texto del assistant (DeepSeek reasoning_content equivalente)
+                if let text = result.text, !text.isEmpty {
+                    assistantMsg["content"] = text
+                }
                 conversation.append(assistantMsg)
 
                 for tc in toolCalls {
@@ -691,7 +695,10 @@ struct LocalChatView: View {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
         var body: [String: Any] = ["model": agent.model, "messages": apiMessages, "stream": true]
-        if !tools.isEmpty { body["tools"] = tools }
+        if !tools.isEmpty {
+            body["tools"] = tools
+            body["tool_choice"] = "auto" // DeepSeek: evitar que abandone tool calling
+        }
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
             return StreamResult(text: nil, toolCalls: nil, error: "Error serializando request")
