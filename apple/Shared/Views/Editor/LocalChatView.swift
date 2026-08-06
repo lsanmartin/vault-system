@@ -458,7 +458,12 @@ struct LocalChatView: View {
         // Comandos
         if clean == "/reset" {
             createAnchorNote(for: target)
-            messages = [LocalChatMessage(text: "Sesión reiniciada. Se creó un ancla en _inbox/ con el resumen.", isUser: false, agentCode: target.agentCode)]
+            // Archivar thread actual y crear uno nuevo
+            let tid = chatThreads.getOrCreateThread(for: target.agentCode)
+            _ = chatDeleteThread(threadId: tid)
+            chatThreads.loadThreads()
+            let newTid = chatThreads.getOrCreateThread(for: target.agentCode)
+            messages = [LocalChatMessage(text: "Sesión reiniciada. Ancla en _inbox/.", isUser: false, agentCode: target.agentCode)]
             inputText = ""; return
         }
         if clean == "/clear" {
