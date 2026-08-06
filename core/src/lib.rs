@@ -3579,27 +3579,38 @@ pub fn chat_get_or_create_thread(agent_code: String) -> String {
         params![agent_code], |r| r.get(0)
     ).ok();
     if let Some(tid) = existing {
+        crate::add_telemetry_log(format!("chat_get_or_create_thread: existente {}", &tid[..tid.len().min(25)]));
         return serde_json::json!({"thread_id": tid}).to_string();
     }
     // Crear nuevo solo si no existe
     let thread_id = format!("{}_{}", agent_code, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x"));
     let _ = conn.execute("INSERT INTO chat_threads (id, agent_code, name) VALUES (?, ?, ?)",
         params![thread_id, agent_code, format!("Chat {}", agent_code)]);
+    crate::add_telemetry_log(format!("chat_get_or_create_thread: NUEVO thread {}", &thread_id[..thread_id.len().min(25)]));
     serde_json::json!({"thread_id": thread_id}).to_string()
 }
 
 #[uniffi::export]
 pub fn chat_save_message(thread_id: String, role: String, agent_code: String, content: String) -> i64 {
-    let conn = match get_db_connection() { Some(c) => c, None => return -1 };
+    let conn = match get_db_connection() { Some(c) => c, None => {
+        crate::add_telemetry_log("chat_save_message: DB no disponible".into());
+        return -1;
+    }};
+    let short = if content.len() > 50 { format!("{}…", &content[..50]) } else { content.clone() };
     match conn.execute(
         "INSERT INTO chat_messages (thread_id, role, agent_code, content) VALUES (?, ?, ?, ?)",
         params![thread_id, role, agent_code, content],
     ) {
         Ok(_) => {
             let _ = conn.execute("UPDATE chat_threads SET updated_at = now() WHERE id = ?", params![thread_id]);
-            conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap_or(-1)
+            let id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap_or(-1);
+            crate::add_telemetry_log(format!("chat_save_message OK: id={}, thread={}, role={}, content={}", id, &thread_id[..thread_id.len().min(20)], role, short));
+            id
         }
-        Err(_) => -1,
+        Err(e) => {
+            crate::add_telemetry_log(format!("chat_save_message ERROR: {}", e));
+            -1
+        }
     }
 }
 
