@@ -192,7 +192,9 @@ struct LocalChatView: View {
                 .frame(width: 560, height: 780)
         }
         .onAppear { loadThread(for: selectedAgent.agentCode, displayName: selectedAgent.displayName) }
-        .onDisappear { saveCurrentThreadMessages() }
+        .onDisappear {
+            DispatchQueue.global().async { saveCurrentThreadMessages() }
+        }
         .onChange(of: isGenerating) { _, generating in
             if !generating, let last = messages.last, !last.isUser {
                 saveMessage(last)
