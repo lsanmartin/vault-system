@@ -160,7 +160,7 @@ struct LocalChatView: View {
 
             // Input
             HStack(alignment: .bottom, spacing: 8) {
-                ChatInputView(text: $inputText, disabled: isGenerating || !isSelectedAgentEnabled, onCommit: send)
+                ChatInputView(text: $inputText, disabled: !isSelectedAgentEnabled, onCommit: send)
                     .frame(minHeight: 72, maxHeight: 240)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(4)
@@ -999,10 +999,22 @@ struct ChatMessagesView: NSViewRepresentable {
                 """
             }
 
+            // Escapar comillas para atributo data-text
+            let safeText = msg.text
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+                .replacingOccurrences(of: "'", with: "&#39;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
             return """
-            <div class="msg \(side)">
+            <div class="msg \(side)" data-text="\(safeText)">
               <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
               <div class="bubble">\(escaped(msg.text))</div>
+              <div class="msg-actions">
+                <button class="copy-btn" onclick="navigator.clipboard.writeText(this.parentElement.parentElement.getAttribute('data-text'))" title="Copiar">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
             </div>
             <div class="sep"></div>
             """
@@ -1069,6 +1081,12 @@ struct ChatMessagesView: NSViewRepresentable {
           /* Anchor markers (session start, reset) */
           .anchor-marker { text-align: center; margin: 16px 0; }
           .anchor-marker span { font-size: 0.75em; color: rgba(128,128,128,0.6); background: rgba(128,128,128,0.08); padding: 4px 16px; border-radius: 12px; }
+
+          /* Copy button */
+          .msg-actions { margin-top: 2px; text-align: right; opacity: 0; transition: opacity 0.15s; }
+          .msg:hover .msg-actions, .agent:hover .msg-actions { opacity: 1; }
+          .copy-btn { background: none; border: none; cursor: pointer; padding: 2px 4px; color: rgba(128,128,128,0.4); }
+          .copy-btn:hover { color: rgba(128,128,128,0.8); }
 
           /* Mermaid diagrams */
           .mermaid-diagram { margin: 12px 0; padding: 12px; background: rgba(255,255,255,0.6); border-radius: 8px; overflow-x: auto; }
