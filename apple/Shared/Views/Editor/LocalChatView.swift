@@ -259,11 +259,20 @@ struct LocalChatView: View {
     }
 
     private func loadThread(for agentCode: String, displayName: String) {
+        // Recargar threads desde DB (por si se crearon en otra sesión)
+        chatThreads.loadThreads()
         let tid = chatThreads.getOrCreateThread(for: agentCode)
         let msgs = chatThreads.toLocalMessages(threadId: tid)
-        messages = msgs.isEmpty
-            ? [LocalChatMessage(text: "Chat \(displayName) — Escribí tu mensaje.", isUser: false, agentCode: agentCode)]
-            : msgs
+        if msgs.isEmpty {
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
+            let ts = df.string(from: Date())
+            messages = [
+                LocalChatMessage(text: "Chat \(displayName) — Escribí tu mensaje.", isUser: false, agentCode: agentCode),
+                LocalChatMessage(text: "── Sesión iniciada \(ts) ──", isUser: false, agentCode: agentCode, type: "anchor")
+            ]
+        } else {
+            messages = msgs
+        }
     }
 
     private func saveMessage(_ msg: LocalChatMessage) {
@@ -458,12 +467,16 @@ struct LocalChatView: View {
         // Comandos
         if clean == "/reset" {
             createAnchorNote(for: target)
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
+            let ts = df.string(from: Date())
+            // Marcador visible en el feed
+            messages.append(LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode, type: "anchor"))
+            saveMessage(LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode))
             // Archivar thread actual y crear uno nuevo
             let tid = chatThreads.getOrCreateThread(for: target.agentCode)
             _ = chatDeleteThread(threadId: tid)
             chatThreads.loadThreads()
-            let newTid = chatThreads.getOrCreateThread(for: target.agentCode)
-            messages = [LocalChatMessage(text: "Sesión reiniciada. Ancla en _inbox/.", isUser: false, agentCode: target.agentCode)]
+            _ = chatThreads.getOrCreateThread(for: target.agentCode)
             inputText = ""; return
         }
         if clean == "/clear" {
@@ -964,6 +977,13 @@ struct ChatMessagesView: NSViewRepresentable {
                 """
             }
 
+            // Marcador de ancla (sesión iniciada, reset)
+            if msg.type == "anchor" {
+                return """
+                <div class="anchor-marker"><span>\(escaped(msg.text))</span></div>
+                """
+            }
+
             // Colapsable de herramientas
             if msg.type == "tools" {
                 let toolList = msg.toolNames.map { "<li>\(escaped($0))</li>" }.joined()
@@ -1045,6 +1065,10 @@ struct ChatMessagesView: NSViewRepresentable {
           .tools-summary:hover { opacity: 1; background: rgba(128,128,128,0.15); }
           .tools-list { margin: 8px 0 0 16px; font-size: 0.8em; opacity: 0.6; font-family: monospace; }
           .tools-list li { margin: 2px 0; }
+
+          /* Anchor markers (session start, reset) */
+          .anchor-marker { text-align: center; margin: 16px 0; }
+          .anchor-marker span { font-size: 0.75em; color: rgba(128,128,128,0.6); background: rgba(128,128,128,0.08); padding: 4px 16px; border-radius: 12px; }
 
           /* Mermaid diagrams */
           .mermaid-diagram { margin: 12px 0; padding: 12px; background: rgba(255,255,255,0.6); border-radius: 8px; overflow-x: auto; }
