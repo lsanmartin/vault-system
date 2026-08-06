@@ -637,18 +637,31 @@ struct LocalChatView: View {
 
     // MARK: — Compaction helpers
 
-    /// Capa 2 — Snip: elimina tool results redundantes/vacíos
+    /// Capa 2 — Snip: compacta tool results redundantes sin romper el pairing assistant↔tool
     private func snipConversation(_ conv: [[String: Any]]) -> [[String: Any]] {
+        var result: [[String: Any]] = []
         var seen = Set<String>()
-        return conv.compactMap { msg in
-            guard let role = msg["role"] as? String else { return msg }
+        for msg in conv {
+            guard let role = msg["role"] as? String else { result.append(msg); continue }
             if role == "tool", let content = msg["content"] as? String {
-                if content == "[vacío]" || content == "[error]" { return nil } // no aporta
-                if seen.contains(content) { return nil } // duplicado
-                seen.insert(content)
+                // Preservar siempre el mensaje tool (API requiere pairing)
+                // Pero compactar contenido si es redundante
+                var compacted = msg
+                if content == "{}" || content == "[]" || content == "null" {
+                    compacted["content"] = "[vacío]"
+                } else if content.hasPrefix("Error") || content.contains("\"error\"") {
+                    compacted["content"] = "[error]"
+                } else if seen.contains(content) {
+                    compacted["content"] = "[dup]"
+                } else {
+                    seen.insert(content)
+                }
+                result.append(compacted)
+            } else {
+                result.append(msg)
             }
-            return msg
         }
+        return result
     }
 
     /// Capa 3 — Auto-Compact: resume la conversación vía LLM y retorna versión compacta
