@@ -417,7 +417,7 @@ struct LocalChatView: View {
             conversation.append(assistantMsg)
             for tc in toolCalls {
                 var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
-                if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+                if raw.count > 1500 { raw = String(raw.prefix(1500)) + "\n…" }
                 conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
             }
             let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
@@ -559,7 +559,7 @@ struct LocalChatView: View {
 
             var pendingTools: [String] = []
 
-            for turn in 0..<5 {
+            for turn in 0..<4 {
                 let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
                 if let error = result.error {
                     await MainActor.run {
@@ -593,7 +593,7 @@ struct LocalChatView: View {
 
                 for tc in toolCalls {
                     var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
-                    if raw.count > 4000 { raw = String(raw.prefix(4000)) + "\n…" }
+                    if raw.count > 1500 { raw = String(raw.prefix(1500)) + "\n…" }
                     conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
                 }
 
@@ -780,11 +780,13 @@ struct LocalChatView: View {
         sys += "Resumí brevemente lo que encontraste y proponé siguientes pasos. La conversación continúa.\n"
         sys += "No digas frases como 'listo para ayudarte', 'soy tu asistente', 'herramientas cargadas', etc.\n"
 
-        // Gestión de contexto: scratchpad + externalización
-        sys += "\n## Gestión de Contexto\n"
-        sys += "- Registrá hallazgos en current_session.md del system_workspace.\n"
+        // Gestión de contexto: scratchpad obligatorio
+        sys += "\n## Reglas de Trabajo\n"
+        sys += "- Máximo 4 rondas de herramientas. Sé eficiente.\n"
+        sys += "- Después de cada ronda, registrá hallazgos CLAVE en current_session.md del system_workspace.\n"
         sys += "- Solo 3 tipos: [ACUERDO], [DESCARTADO], [HITO].\n"
-        sys += "- Al necesitar contexto previo, leé current_session.md.\n"
+        sys += "- Al final de tu exploración, SIEMPRE respondé con un resumen concreto.\n"
+        sys += "- NUNCA preguntes '¿en qué te ayudo?' ni frases de bienvenida. La conversación ya empezó.\n"
 
         if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
         return sys
