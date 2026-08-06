@@ -766,6 +766,11 @@ struct LocalChatView: View {
     private func buildSystemPrompt(agent: ExternalAgentConfig, context: String) -> String {
         var sys = "Eres \(agent.name), un asistente IA con acceso al Vault System.\n"
 
+        // Inyectar directrices-core.md (framework operativo)
+        let corePath = NSString(string: "~/.vault_system/system_workspace/directrices-core.md").expandingTildeInPath
+        if let core = try? String(contentsOfFile: corePath, encoding: .utf8) {
+            sys += "\n## Directrices Operativas\n\(core.prefix(1500))\n"
+        }
         // Inyectar conciencia.md (estado global)
         let concienciaPath = NSString(string: "~/.vault_system/system_workspace/00-Sistema/conciencia.md").expandingTildeInPath
         if let conciencia = try? String(contentsOfFile: concienciaPath, encoding: .utf8) {

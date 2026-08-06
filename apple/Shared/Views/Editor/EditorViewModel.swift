@@ -388,7 +388,13 @@ class EditorViewModel: ObservableObject {
             }
         }
 
-        let ignorePatterns = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git", "target/", "node_modules/"]
+        let ignorePatterns = showSystemFiles ? [] : [
+            "_memory.md", "_specs.md", "_lore.md", "lore.md",
+            "_metadata.md", "_index.md", "_DEPRECADA.md",
+            "agent.md", "KANBAN.md", "conciencia.md",
+            "current_session.md", "directrices-core.md",
+            ".git", "target/", "node_modules/"
+        ]
         let currentSearchText = debouncedSearchText
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
