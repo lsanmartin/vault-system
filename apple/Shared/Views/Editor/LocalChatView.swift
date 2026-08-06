@@ -570,13 +570,9 @@ struct LocalChatView: View {
                 }
 
                 guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
-                    // Guardar respuesta final
-                    if let text = result.text, !text.isEmpty {
-                        await MainActor.run {
-                            let msg = LocalChatMessage(text: text, isUser: false, agentCode: code)
-                            messages.append(msg)
-                            saveMessage(msg)
-                        }
+                    // El streaming ya agregó el mensaje. Solo guardar.
+                    if result.text != nil, !(result.text?.isEmpty ?? true) {
+                        if let last = messages.last, !last.isUser { saveMessage(last) }
                     }
                     await flushPending(text: "", tools: pendingTools, code: code)
                     await MainActor.run { isGenerating = false }
