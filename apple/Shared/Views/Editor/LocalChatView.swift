@@ -390,7 +390,7 @@ struct LocalChatView: View {
         ]
         var pendingTools: [String] = []
 
-        for turn in 0..<8 {
+        for turn in 0..<5 {
             var result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
             // Reintentar errores de red (timeout, conexión perdida)
             if let error = result.error, (error.contains("Conexión perdida") || error.contains("Red:")) && turn < 3 {
@@ -543,18 +543,18 @@ struct LocalChatView: View {
         }
 
         let code = agentCode(for: agent)
-        let sys = buildSystemPrompt(agent: agent, context: context)
+        let sys = String(buildSystemPrompt(agent: agent, context: context).prefix(3000))
         let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
         let openaiTools = convertMcpToolsToOpenAI(toolsJson)
 
         Task {
-            var conversation: [[String: Any]] = [
-                ["role": "system", "content": String(sys.prefix(3000))],
-                ["role": "user", "content": prompt]
-            ]
+            // Construir conversación desde historial persistente + mensaje nuevo
+            let tid = chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
+            var conversation = buildApiConversation(threadId: tid, sys: sys, newUserMsg: prompt)
+
             var pendingTools: [String] = []
 
-            for turn in 0..<8 {
+            for turn in 0..<5 {
                 let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
                 if let error = result.error {
                     await MainActor.run {
@@ -565,6 +565,14 @@ struct LocalChatView: View {
                 }
 
                 guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
+                    // Guardar respuesta final
+                    if let text = result.text, !text.isEmpty {
+                        await MainActor.run {
+                            let msg = LocalChatMessage(text: text, isUser: false, agentCode: code)
+                            messages.append(msg)
+                            saveMessage(msg)
+                        }
+                    }
                     await flushPending(text: "", tools: pendingTools, code: code)
                     await MainActor.run { isGenerating = false }
                     return
@@ -584,15 +592,51 @@ struct LocalChatView: View {
                     conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
                 }
 
-                let total = conversation.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
-                if total > 1_500_000 && conversation.count >= 2 {
-                    conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6))
-                }
+                // Sliding window: podar tool results viejos, preservar user messages
+                conversation = pruneConversation(conversation)
             }
 
             await flushPending(text: "", tools: pendingTools, code: code)
             await MainActor.run { isGenerating = false }
         }
+    }
+
+    /// Construye el array de conversación para la API desde mensajes persistidos en DB
+    private func buildApiConversation(threadId: String, sys: String, newUserMsg: String) -> [[String: Any]] {
+        var conv: [[String: Any]] = [["role": "system", "content": sys]]
+        let persisted = chatThreads.loadMessages(threadId: threadId, limit: 30)
+
+        for msg in persisted {
+            switch msg.role {
+            case "user":
+                conv.append(["role": "user", "content": msg.content])
+            case "assistant":
+                conv.append(["role": "assistant", "content": msg.content])
+            default:
+                break
+            }
+        }
+
+        // Agregar el nuevo mensaje del usuario
+        conv.append(["role": "user", "content": newUserMsg])
+        return conv
+    }
+
+    /// Sliding window: mantiene system + user messages + últimos tool exchanges
+    private func pruneConversation(_ conv: [[String: Any]]) -> [[String: Any]] {
+        let total = conv.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
+        guard total > 200_000, conv.count >= 4 else { return conv }
+
+        // Preservar system + user messages + últimos 4 mensajes
+        let systemMsg = conv.first(where: { ($0["role"] as? String) == "system" })
+        let userMsgs = conv.filter { ($0["role"] as? String) == "user" }
+        let recent = conv.suffix(4)
+
+        var result: [[String: Any]] = []
+        if let sys = systemMsg { result.append(sys) }
+        result.append(contentsOf: userMsgs.prefix(3)) // últimos 3 mensajes del usuario
+        result.append(contentsOf: recent)
+        return result
     }
 
     @MainActor
@@ -603,14 +647,15 @@ struct LocalChatView: View {
     @MainActor
     private func flushPending(text: String, tools: [String], code: String) {
         if !tools.isEmpty {
-            let count = tools.count
-            let list = tools.joined(separator: "\n- ")
-            var msg = LocalChatMessage(text: "🔧 \(count) herramienta(s) usada(s)", isUser: false, agentCode: code, type: "tools")
+            var msg = LocalChatMessage(text: "🔧 \(tools.count) herramienta(s) usada(s)", isUser: false, agentCode: code, type: "tools")
             msg.toolNames = tools
             messages.append(msg)
+            saveMessage(msg)
         }
         if !text.isEmpty {
-            messages.append(LocalChatMessage(text: text, isUser: false, agentCode: code))
+            let msg = LocalChatMessage(text: text, isUser: false, agentCode: code)
+            messages.append(msg)
+            saveMessage(msg)
         }
     }
 
@@ -704,12 +749,14 @@ struct LocalChatView: View {
             sys += "\n## Estado Global del Sistema\n\(conciencia.prefix(2000))\n"
         }
 
-        sys += "Puedes usar herramientas para leer notas, buscar, leer metadatos y telemetría.\n"
+        sys += "Puedes usar herramientas MCP para leer, buscar, escribir y explorar el vault.\n"
         if agent.writeContent || agent.writeMetadata || agent.writeSystem {
             sys += "También puedes crear/modificar notas y metadatos.\n"
         }
-        sys += "Cuando el usuario pida hacer algo (crear nota, buscar, abrir), USA las herramientas disponibles.\n"
-        sys += "No digas 'no puedo' sin antes intentar usar una herramienta.\n"
+        sys += "Cuando el usuario pida hacer algo, USA las herramientas disponibles. No digas 'no puedo' sin antes intentar.\n"
+        sys += "\n⚠️ REGLA CRÍTICA: Después de usar herramientas, NUNCA te presentes ni saludes de nuevo.\n"
+        sys += "Resumí brevemente lo que encontraste y proponé siguientes pasos. La conversación continúa.\n"
+        sys += "No digas frases como 'listo para ayudarte', 'soy tu asistente', 'herramientas cargadas', etc.\n"
 
         // Gestión de contexto: scratchpad + externalización
         sys += "\n## Gestión de Contexto\n"
