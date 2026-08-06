@@ -2342,6 +2342,17 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     },
                     {
+                        "name": "vault_delete_item",
+                        "description": "Elimina un archivo o carpeta del vault. Si es carpeta, se elimina recursivamente con todo su contenido. USA CON PRECAUCIÓN. Pedir confirmación al usuario antes de ejecutar.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Ruta del archivo o carpeta a eliminar." }
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
                         "name": "vault_maintenance",
                         "description": "Ejecuta mantenimiento de la base de datos: deduplica filas y compacta el archivo. Usar si la app va lenta o la DB crece mucho.",
                         "inputSchema": { "type": "object", "properties": {} }
@@ -2751,6 +2762,34 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         "Error de Seguridad: Acceso denegado a esta ruta.".to_string()
                     } else {
                         crate::okf_validator::validate_dependency_cycles(root)
+                    }
+                },
+                "vault_delete_item" => {
+                    let path = arguments.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    if !is_path_allowed(path, &token_record) || !token_record.as_ref().map(|r| r.write_content).unwrap_or(false) {
+                        "Error de Seguridad: sin permiso de escritura para esta ruta.".to_string()
+                    } else {
+                        let p = canonicalize_path(path);
+                        let path_obj = std::path::Path::new(&p);
+                        if !path_obj.exists() {
+                            format!("La ruta no existe: {}", p)
+                        } else if path_obj.is_dir() {
+                            match std::fs::remove_dir_all(&p) {
+                                Ok(_) => {
+                                    crate::remove_vault_path(p.clone());
+                                    format!("Carpeta eliminada recursivamente: {}", p)
+                                }
+                                Err(e) => format!("Error al eliminar carpeta: {}", e)
+                            }
+                        } else {
+                            match std::fs::remove_file(&p) {
+                                Ok(_) => {
+                                    crate::remove_vault_path(p.clone());
+                                    format!("Archivo eliminado: {}", p)
+                                }
+                                Err(e) => format!("Error al eliminar archivo: {}", e)
+                            }
+                        }
                     }
                 },
                 "vault_list_directory" => {
