@@ -40,12 +40,13 @@ class ChatThreadManager: ObservableObject {
     }
 
     func getOrCreateThread(for agentCode: String) -> String {
-        // Buscar thread existente para este agente
+        // Siempre consultar DB primero (threads en memoria puede estar stale)
+        if threads.isEmpty { loadThreads() }
         if let existing = threads.first(where: { $0.agentCode == agentCode }) {
             activeThreadId = existing.id
             return existing.id
         }
-        // Crear nuevo
+        // Usar FFI que busca en DB antes de crear
         let json = chatGetOrCreateThread(agentCode: agentCode)
         if let data = json.data(using: .utf8),
            let obj = try? JSONDecoder().decode([String: String].self, from: data),

@@ -675,6 +675,10 @@ struct LocalChatView: View {
     @MainActor
     private func updateMessage(at idx: Int, text: String, code: String) {
         messages[idx] = LocalChatMessage(text: text, isUser: false, agentCode: code)
+        // Guardar incremental cada ~200 chars para no perder progreso
+        if text.count % 200 < 10 {
+            saveMessage(messages[idx])
+        }
     }
 
     @MainActor
