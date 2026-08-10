@@ -56,6 +56,7 @@ targets:
     dependencies:
       - framework: ../target/apple_core.xcframework
         embed: true
+      - sdk: QuickLookUI.framework
       - package: mlx-swift-lm
         product: MLXLLM
       - package: mlx-swift-lm

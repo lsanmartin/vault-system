@@ -116,6 +116,8 @@ class EditorViewModel: ObservableObject {
             updateShowLineNumbersForActiveTab()
         }
     }
+    /// Selección actual del editor de la nota activa (para "Reemplazar selección" en Opciones IA).
+    @Published var editorSelection: NSRange = NSRange(location: 0, length: 0)
     @Published var treeMode: TreeMode = .hierarchy
     @Published var explorationFilter: ExplorationFilter = .all {
         didSet {
@@ -564,8 +566,8 @@ class EditorViewModel: ObservableObject {
                 // Directorios de dependencias — siempre excluidos
                 if EditorViewModel.ignoredDirNames.contains(item) { continue }
             } else {
-                // Extensiones binarias — siempre excluidas
-                if EditorViewModel.binaryExtBlacklist.contains(ext) { continue }
+                // Extensiones binarias — siempre excluidas (excepto imágenes, que sí se visualizan)
+                if EditorViewModel.binaryExtBlacklist.contains(ext) && !FileTypeHelper.imageExts.contains(ext) { continue }
             }
 
             results.append(NoteRecord(
@@ -803,7 +805,7 @@ class EditorViewModel: ObservableObject {
         refreshNotes(locations: locations)
     }
     
-    func createNewNote(at specificPath: String? = nil, locations: [VaultLocation]) {
+    func createNewNote(at specificPath: String? = nil, locations: [VaultLocation], content: String? = nil, skipRename: Bool = false) {
         var targetPath = specificPath ?? currentPath
         
         print("DEBUG createNewNote: specificPath = \(String(describing: specificPath)), currentPath = \(currentPath)")
@@ -824,7 +826,7 @@ class EditorViewModel: ObservableObject {
         addSwiftTelemetryLog(log: "createNewNote: Generando \(fullPath)")
 
         if createItem(path: fullPath, isDir: false) {
-            let initialContent = "# \(fileName.replacingOccurrences(of: ".md", with: ""))\n\n"
+            let initialContent = content ?? "# \(fileName.replacingOccurrences(of: ".md", with: ""))\n\n"
             do {
                 try initialContent.write(to: URL(fileURLWithPath: fullPath), atomically: true, encoding: .utf8)
             } catch {
@@ -851,8 +853,10 @@ class EditorViewModel: ObservableObject {
 
             openNote(tempNote)
             selectItem(tempNote)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.beginRename(for: tempNote)
+            if !skipRename {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    self.beginRename(for: tempNote)
+                }
             }
 
             let capturedTargetPath = targetPath
@@ -1080,6 +1084,12 @@ class EditorViewModel: ObservableObject {
     }
     
     func openNote(_ note: NoteRecord) {
+        // No-.md no-textual (imágenes, binarios) → QuickLook en lugar de abrir como pestaña.
+        if !note.isDir && !FileTypeHelper.isMarkdown(note.path) && !FileTypeHelper.isTextLike(note.path) {
+            QuickLookManager.shared.present(url: URL(fileURLWithPath: note.path))
+            return
+        }
+
         if !tabs.contains(where: { $0.id == note.id }) {
             // Modo Universal por defecto para todas las nuevas pestañas
             let initialMode: RenderMode = .universal
@@ -1140,6 +1150,12 @@ class EditorViewModel: ObservableObject {
         Telemetry.shared.log("Editor", eventType: "SaveNote", message: "Guardada: \(tab.title)")
         tabs[index].lastSavedAt = Date()
         refreshNotes(locations: locations)
+    }
+
+    /// Índice del tab activo en `tabs`, o nil si no hay nota abierta.
+    var activeTabIndex: Int? {
+        guard let id = activeTabId else { return nil }
+        return tabs.firstIndex(where: { $0.id == id })
     }
     
     func toggleMarkdownCheckbox(index: Int, tabId: String) {

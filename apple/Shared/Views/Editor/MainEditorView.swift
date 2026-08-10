@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NoteCard: View {
     let note: NoteRecord
@@ -20,11 +21,23 @@ struct NoteCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // Thumbnail de imagen en modo grid (cover)
+            if !note.isDir && FileTypeHelper.isImage(note.path) {
+                ThumbnailView(path: note.path, maxPixel: 480)
+                    .scaledToFill()
+                    .frame(height: 100)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .cornerRadius(8)
+                    .padding(.bottom, 4)
+            }
             HStack {
-                Image(systemName: "doc.text.fill")
-                    .foregroundColor(viewModel.macControlIcon)
-                    .font(.system(size: 12))
-                
+                if !(!note.isDir && FileTypeHelper.isImage(note.path)) {
+                    Image(systemName: note.isDir ? "folder.fill" : FileTypeHelper.iconSymbol(for: note.path))
+                        .foregroundColor(note.isDir ? viewModel.macAccent : viewModel.macSecondaryText)
+                        .font(.system(size: 12))
+                }
+
                 if viewModel.pinnedPaths.contains(note.path) {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 10))
@@ -70,6 +83,12 @@ struct NoteCard: View {
             let toggle = NSEvent.modifierFlags.contains(.command)
             viewModel.selectItem(note, extend: extend, toggle: toggle)
         }
+        .onDrag {
+            if note.isDir {
+                return NSItemProvider(object: "" as NSString)
+            }
+            return NSItemProvider(object: URL(fileURLWithPath: note.path) as NSURL)
+        }
         .contextMenu {
             if viewModel.selectedItemIds.count > 1 {
                 Button(role: .destructive) {
@@ -85,10 +104,16 @@ struct NoteCard: View {
                 
                 Divider()
 
+                if !note.isDir {
+                    Button {
+                        QuickLookManager.shared.present(url: URL(fileURLWithPath: note.path))
+                    } label: { Label("Vista rápida", systemImage: "eye") }
+                }
+
                 Button {
                     viewModel.beginRename(for: note)
                 } label: { Label("Renombrar", systemImage: "pencil") }
-                
+
                 Button {
                     NSWorkspace.shared.selectFile(note.path, inFileViewerRootedAtPath: "")
                 } label: { Label("Mostrar en Finder", systemImage: "folder") }
@@ -570,50 +595,24 @@ struct MainContentColumn: View {
     
     private var headerView: some View {
         VStack(spacing: 12) {
-            HStack {
-                if let workspace = workspaceManager.allLocations.first(where: { $0.id == viewModel.selectedLocationId }) {
-                    Button(action: { viewModel.navigateBack() }) { 
-                        Image(systemName: "chevron.left")
-                            .foregroundColor(viewModel.macControlIcon)
+            // Fila 1: Buscador a ancho completo (más espacio para escribir)
+            ZStack(alignment: .trailing) {
+                TextField("Buscar", text: $viewModel.searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isSearchFocused)
+
+                if !viewModel.searchText.isEmpty {
+                    Button(action: { viewModel.clearSearch() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.borderless).disabled(viewModel.currentPath == workspace.path)
-                    
-                    Text(viewModel.currentPath == workspace.path ? workspace.name : URL(fileURLWithPath: viewModel.currentPath).lastPathComponent)
-                        .font(.headline)
-                        .foregroundColor(viewModel.macPrimaryText)
-                        .lineLimit(1)
-                    
-                    Button(action: {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: viewModel.currentPath))
-                    }) {
-                        Image(systemName: "folder")
-                            .foregroundColor(viewModel.macControlIcon)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Abrir carpeta en Finder")
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 8)
                 }
-                Spacer()
-                Picker("", selection: $viewModel.layoutMode) {
-                    Image(systemName: "list.bullet").tag(LayoutMode.list)
-                    Image(systemName: "square.grid.2x2").tag(LayoutMode.tactical)
-                }.pickerStyle(.segmented).frame(width: 80)
             }
+
+            // Fila 2: Iconos de filtro y acciones
             HStack {
-                ZStack(alignment: .trailing) {
-                    TextField("Buscar en el vault...", text: $viewModel.searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isSearchFocused)
-                    
-                    if !viewModel.searchText.isEmpty {
-                        Button(action: { viewModel.clearSearch() }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 8)
-                    }
-                }
-                
                 Menu {
                     Picker("Ordenar", selection: $viewModel.sortOption) {
                         ForEach(SortOption.allCases) { opt in
@@ -644,23 +643,55 @@ struct MainContentColumn: View {
                 .buttonStyle(.borderless)
                 .disabled(!viewModel.showAllFiles)
                 .help(viewModel.showHiddenFiles ? "Ocultando archivos ocultos — clic para mostrar" : "Mostrar archivos ocultos (requiere 'Todos los archivos')")
-                
-                Button(action: { viewModel.createNewNote(locations: workspaceManager.allLocations) }) { 
+
+                Spacer()
+
+                Button(action: { viewModel.createNewNote(locations: workspaceManager.allLocations) }) {
                     Image(systemName: "note.text.badge.plus")
                         .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
-                
-                Button(action: { viewModel.createNewFolder(locations: workspaceManager.allLocations) }) { 
+
+                Button(action: { viewModel.createNewFolder(locations: workspaceManager.allLocations) }) {
                     Image(systemName: "folder.badge.plus")
                         .foregroundColor(viewModel.macControlIcon)
                 }.buttonStyle(.borderless)
-                
+
                 if !viewModel.selectedItemIds.isEmpty {
                     Button(role: .destructive, action: { viewModel.deleteSelectedItems(locations: workspaceManager.allLocations) }) {
                         Image(systemName: "trash")
                             .foregroundColor(.red.opacity(0.8))
                     }.buttonStyle(.borderless)
                 }
+            }
+
+            // Fila 3: Breadcrumb + tipo de visualización
+            HStack {
+                if let workspace = workspaceManager.allLocations.first(where: { $0.id == viewModel.selectedLocationId }) {
+                    Button(action: { viewModel.navigateBack() }) {
+                        Image(systemName: "chevron.left")
+                            .foregroundColor(viewModel.macControlIcon)
+                    }
+                    .buttonStyle(.borderless).disabled(viewModel.currentPath == workspace.path)
+
+                    Text(viewModel.currentPath == workspace.path ? workspace.name : URL(fileURLWithPath: viewModel.currentPath).lastPathComponent)
+                        .font(.headline)
+                        .foregroundColor(viewModel.macPrimaryText)
+                        .lineLimit(1)
+
+                    Button(action: {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: viewModel.currentPath))
+                    }) {
+                        Image(systemName: "folder")
+                            .foregroundColor(viewModel.macControlIcon)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Abrir carpeta en Finder")
+                }
+                Spacer()
+                Picker("", selection: $viewModel.layoutMode) {
+                    Image(systemName: "list.bullet").tag(LayoutMode.list)
+                    Image(systemName: "square.grid.2x2").tag(LayoutMode.tactical)
+                }.pickerStyle(.segmented).frame(width: 80)
             }
         }
         .padding()
@@ -738,6 +769,10 @@ struct VaultContextMenu: View {
                 } label: { Label("Mostrar en Finder", systemImage: "folder") }
                 Divider()
             } else {
+                Button {
+                    QuickLookManager.shared.present(url: URL(fileURLWithPath: item.path))
+                } label: { Label("Vista rápida", systemImage: "eye") }
+
                 Button {
                     NSWorkspace.shared.selectFile(item.path, inFileViewerRootedAtPath: "")
                 } label: { Label("Mostrar en Finder", systemImage: "folder") }
@@ -1042,9 +1077,15 @@ struct FileRowView: View {
     
     var body: some View {
         HStack {
-            Image(systemName: item.isDir ? "folder.fill" : "doc.text")
-                .foregroundColor(item.isDir ? viewModel.macAccent : viewModel.macSecondaryText)
-                .font(.system(size: 14))
+            if !item.isDir && FileTypeHelper.isImage(item.path) {
+                ThumbnailView(path: item.path, maxPixel: 64)
+                    .frame(width: 28, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Image(systemName: item.isDir ? "folder.fill" : FileTypeHelper.iconSymbol(for: item.path))
+                    .foregroundColor(item.isDir ? viewModel.macAccent : viewModel.macSecondaryText)
+                    .font(.system(size: 14))
+            }
             
             VStack(alignment: .leading) {
                 HStack(spacing: 4) {
@@ -1076,6 +1117,12 @@ struct FileRowView: View {
             } else {
                 viewModel.selectItem(item, extend: extend, toggle: toggle)
             }
+        }
+        .onDrag {
+            if item.isDir {
+                return NSItemProvider(object: "" as NSString)
+            }
+            return NSItemProvider(object: URL(fileURLWithPath: item.path) as NSURL)
         }
         .contextMenu {
             VaultContextMenu(item: item, viewModel: viewModel, locations: locations)
@@ -1180,7 +1227,30 @@ struct EditorAreaView: View {
     - **Auto-cierre:** Envoltura instantánea de texto al usar `[`, `(`, `"`.
     - **Listas Inteligentes:** Continuación automática de viñetas al presionar Enter.
     """
-    
+
+    private func presentImagePicker() {
+        guard let activeId = viewModel.activeTabId else { return }
+        let noteDir = URL(fileURLWithPath: activeId).deletingLastPathComponent()
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.image]
+        panel.begin { resp in
+            guard resp == .OK else { return }
+            let snippets = panel.urls.map { url -> String in
+                if url.path.hasPrefix(noteDir.path) {
+                    return ImageImportService.markdownLink(from: url, noteDir: noteDir)
+                }
+                return ImageImportService.importIntoAttachments(source: url, noteDir: noteDir) ?? ""
+            }.filter { !$0.isEmpty }
+            guard !snippets.isEmpty else { return }
+            NotificationCenter.default.post(name: .vaultInsertImageMarkdown,
+                                            object: snippets.joined(separator: "\n"))
+        }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -1289,6 +1359,15 @@ struct EditorAreaView: View {
                                 .font(.caption)
                         }
                         .buttonStyle(.bordered)
+
+                        Button {
+                            presentImagePicker()
+                        } label: {
+                            Label("Insertar Imagen", systemImage: "photo.on.rectangle.angled")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .help("Insertar imagen (desde archivo)")
                     }
                     
                     if tab.isPreviewMode {
@@ -1361,7 +1440,7 @@ struct EditorAreaView: View {
                             .padding(.bottom, 6)
                     }
                     
-                    CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, showLineNumbers: $viewModel.showLineNumbers, language: tab.language, theme: selectedTheme)
+                    CodeEditor(text: $tab.content, triggerSearch: $triggerSearch, showLineNumbers: $viewModel.showLineNumbers, language: tab.language, theme: selectedTheme, notePath: tab.id, onSelectionChange: { range in viewModel.editorSelection = range })
                         .frame(maxWidth: 850)
                         .cornerRadius(15)
                         .overlay(

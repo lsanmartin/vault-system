@@ -10,6 +10,9 @@ struct LocalChatMessage: Identifiable, Equatable {
     let timestamp = Date()
     var type: String? = nil        // "tools" = colapsable de herramientas, nil = normal
     var toolNames: [String] = []   // nombres de tools usadas (solo type="tools")
+    var applyContent: String? = nil     // texto editable propuesto (Opciones IA para notas)
+    var applyInstruction: String? = nil // label para la cabecera "### ✨ ..."
+    var applyNoteId: String? = nil      // nota destino (para verificar que no cambió)
     static func == (lhs: LocalChatMessage, rhs: LocalChatMessage) -> Bool { lhs.id == rhs.id }
 }
 
@@ -18,6 +21,7 @@ struct LocalChatView: View {
     @StateObject private var brain = LocalBrain.shared
     @ObservedObject private var agentManager = ExternalAgentManager.shared
     @ObservedObject private var chatThreads = ChatThreadManager.shared
+    @EnvironmentObject var workspaceManager: WorkspaceManager
 
     @State private var messages: [LocalChatMessage] = []
     @State private var inputText: String = ""
@@ -25,6 +29,31 @@ struct LocalChatView: View {
     @State private var generationTask: Task<Void, Never>? = nil
     @State private var selectedAgent: AgentChip = .local
     @State private var showAgentSettings = false
+
+    // Opciones IA para notas
+    @AppStorage("vault_noteai_autoApply") private var noteAIAutoApply = false
+    @AppStorage("vault_noteai_mode") private var noteAIModeRaw = "Insertar al final"
+    @State private var noteAITitleOverride = ""
+
+    private var applyMode: NoteAIMode {
+        NoteAIMode(rawValue: noteAIModeRaw) ?? .insertAtEnd
+    }
+
+    /// Máximo de caracteres de nota que se envían al modelo (evita exceder límites de tokens).
+    private let maxNoteContentForAI = 12_000
+
+    /// Índice del tab activo en `viewModel.tabs`, o nil si no hay nota abierta.
+    private var activeTabIndex: Int? {
+        guard let id = viewModel.activeTabId else { return nil }
+        return viewModel.tabs.firstIndex(where: { $0.id == id })
+    }
+
+    private func noteInWorkspace(_ path: String, _ workspaces: [String]) -> Bool {
+        workspaces.contains { ws in
+            let w = ws.hasSuffix("/") ? String(ws.dropLast()) : ws
+            return path.hasPrefix(w + "/") || path == w
+        }
+    }
 
     enum AgentChip: Hashable {
         case local
@@ -124,10 +153,26 @@ struct LocalChatView: View {
                 .padding(.horizontal, 12).padding(.bottom, 4)
                 .background(Color(NSColor.windowBackgroundColor))
 
+            // Opciones IA para notas (colapsable)
+            NoteAIOptionsPanel(
+                viewModel: viewModel,
+                isEnabled: isSelectedAgentEnabled,
+                autoApply: $noteAIAutoApply,
+                modeRaw: $noteAIModeRaw,
+                titleOverride: $noteAITitleOverride,
+                onRun: { instruction, title in
+                    runNoteAIAction(instruction: instruction, actionTitle: title)
+                }
+            )
+            .padding(.horizontal, 12).padding(.bottom, 4)
+            .background(Color(NSColor.windowBackgroundColor))
+
             Divider()
 
             // Mensajes (NSTextView nativo para selección multi-burbuja)
-            ChatMessagesView(messages: messages)
+            ChatMessagesView(messages: messages) { msgID in
+                handleApplyRequest(messageID: msgID)
+            }
                 .onChange(of: messages.count) { _ in
                     // scroll handled internally by NSTextView
                 }
@@ -156,6 +201,17 @@ struct LocalChatView: View {
                 .frame(height: 24)
             }
             .padding(.vertical, 4)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            // Acciones rápidas de IA para notas
+            NoteAIQuickActionsRow(
+                actions: NoteAIAction.all,
+                isEnabled: isSelectedAgentEnabled,
+                onAction: { action in
+                    runNoteAIAction(instruction: action.instruction, actionTitle: action.title)
+                }
+            )
+            .padding(.horizontal, 8).padding(.vertical, 2)
             .background(Color(NSColor.windowBackgroundColor))
 
             // Input
@@ -382,7 +438,7 @@ struct LocalChatView: View {
         }
     }
 
-    private func runExternalPlan(sysPrompt: String, userPrompt: String, agent: ExternalAgentConfig) async {
+    private func runExternalPlan(sysPrompt: String, userPrompt: String, agent: ExternalAgentConfig, noteAI: NoteAIApplyInfo? = nil) async {
         guard let key = agentManager.getAPIKey(for: agent.id) else {
             await MainActor.run {
                 messages.append(LocalChatMessage(text: "❌ Sin API key.", isUser: false, agentCode: agentCode(for: agent)))
@@ -391,15 +447,17 @@ struct LocalChatView: View {
             return
         }
         let code = agentCode(for: agent)
+        let beforeCount = messages.count
 
         let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
         let openaiTools = convertMcpToolsToOpenAI(toolsJson)
 
         var conversation: [[String: Any]] = [
-            ["role": "system", "content": String(sysPrompt.prefix(3000))],
+            ["role": "system", "content": String(sysPrompt.prefix(6000))],
             ["role": "user", "content": userPrompt]
         ]
         var pendingTools: [String] = []
+        var wroteActiveNote = false
 
         for turn in 0..<5 {
             var result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
@@ -417,10 +475,26 @@ struct LocalChatView: View {
             }
             guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
                 await flushPending(text: "", tools: pendingTools, code: code)
+                if let noteAI, let text = result.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    await MainActor.run {
+                        finalizeNoteAIMessage(noteAI: noteAI, content: text, index: messages.indices.last, wroteActiveNote: wroteActiveNote)
+                    }
+                }
                 await MainActor.run { isGenerating = false }
                 return
             }
             pendingTools.append(contentsOf: toolCalls.map(\.name))
+            // Detectar escritura directa: nota activa (path == noteId) o, en modo crear-nota, cualquier vault_write.
+            if let noteAI {
+                for tc in toolCalls where tc.name == "vault_write" {
+                    if let data = tc.args.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let path = obj["path"] as? String, !path.isEmpty,
+                       noteAI.noteId == nil || path == noteAI.noteId {
+                        wroteActiveNote = true
+                    }
+                }
+            }
             var assistantMsg: [String: Any] = ["role": "assistant"]
             assistantMsg["tool_calls"] = toolCalls.map { tc in
                 ["id": tc.id, "type": "function", "function": ["name": tc.name, "arguments": tc.args]] as [String: Any]
@@ -435,6 +509,7 @@ struct LocalChatView: View {
             if total > 1_500_000 { conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6)) }
         }
         await flushPending(text: "", tools: pendingTools, code: code)
+        _ = beforeCount
         await MainActor.run { isGenerating = false }
     }
 
@@ -502,6 +577,12 @@ struct LocalChatView: View {
             let goal = String(clean.dropFirst(8)).trimmingCharacters(in: .whitespaces)
             runDesign(prompt: goal, target: target); return
         }
+        if clean.hasPrefix("/nota ") {
+            let instruction = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            guard !instruction.isEmpty else { inputText = ""; return }
+            runNoteAIAction(instruction: instruction, actionTitle: instruction, target: target)
+            return
+        }
 
         guard isSelectedAgentEnabled else {
             messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
@@ -532,7 +613,7 @@ struct LocalChatView: View {
 
     // MARK: - Local Brain
 
-    private func sendLocal(prompt: String, context: String) {
+    private func sendLocal(prompt: String, context: String, noteAI: NoteAIApplyInfo? = nil) {
         Task {
             do {
                 let stream = try await brain.chatStream(prompt: prompt, context: context)
@@ -543,6 +624,11 @@ struct LocalChatView: View {
                     acc += chunk
                     await MainActor.run {
                         if let i = messages.indices.last { messages[i] = LocalChatMessage(text: acc, isUser: false, agentCode: "LC") }
+                    }
+                }
+                if let noteAI {
+                    await MainActor.run {
+                        finalizeNoteAIMessage(noteAI: noteAI, content: acc, index: messages.indices.last, wroteActiveNote: false)
                     }
                 }
             } catch {
@@ -563,7 +649,7 @@ struct LocalChatView: View {
         }
 
         let code = agentCode(for: agent)
-        let sys = String(buildSystemPrompt(agent: agent, context: context).prefix(3000))
+        let sys = String(buildSystemPrompt(agent: agent, context: context).prefix(6000))
         let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
         let openaiTools = convertMcpToolsToOpenAI(toolsJson)
 
@@ -795,6 +881,14 @@ struct LocalChatView: View {
         if let conciencia = try? String(contentsOfFile: concienciaPath, encoding: .utf8) {
             sys += "\n## Estado Global del Sistema\n\(conciencia.prefix(2000))\n"
         }
+        // Inyectar current_session.md (scratchpad: contexto de la sesión anterior)
+        let sessionPath = NSString(string: "~/.vault_system/system_workspace/current_session.md").expandingTildeInPath
+        if let session = try? String(contentsOfFile: sessionPath, encoding: .utf8) {
+            let trimmed = session.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && trimmed != "# Sesión Actual" {
+                sys += "\n## Sesión Anterior (scratchpad)\n\(session.prefix(1200))\n"
+            }
+        }
 
         sys += "Puedes usar herramientas MCP para leer, buscar, escribir y explorar el vault.\n"
         if agent.writeContent || agent.writeMetadata || agent.writeSystem {
@@ -862,6 +956,189 @@ struct LocalChatView: View {
         case .anthropic: return "CL"
         case .openai: return "OP"
         }
+    }
+
+    // MARK: - Nota IA (Opciones IA para notas)
+
+    /// Orquesta una acción de IA sobre la nota activa con el agente seleccionado (o `target` si se fuerza).
+    /// Sin nota activa —o si la instrucción pide explícitamente crear una nota— el resultado va a una nota nueva.
+    private func runNoteAIAction(instruction: String, actionTitle: String, target: AgentChip? = nil) {
+        let effective = target ?? selectedAgent
+        let effectiveEnabled: Bool = {
+            switch effective {
+            case .local: return brain.isEnabled
+            case .external(let a): return UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
+            }
+        }()
+        guard effectiveEnabled else {
+            messages.append(LocalChatMessage(text: "\(effective.displayName) está desactivado.", isUser: false, agentCode: effective.agentCode))
+            return
+        }
+        let wantsNew = wantsCreateNew(instruction)
+        inputText = ""
+        let noteAI: NoteAIApplyInfo
+        if let idx = activeTabIndex, !wantsNew {
+            let tab = viewModel.tabs[idx]
+            noteAI = NoteAIApplyInfo(instruction: actionTitle, noteId: tab.id, noteTitle: tab.title, originalContent: tab.content)
+        } else {
+            // Crear nota nueva: sin nota activa o se pidió explícitamente
+            let title = noteAITitleOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+            noteAI = NoteAIApplyInfo(instruction: actionTitle, noteId: nil, noteTitle: title.isEmpty ? "Nueva nota IA" : title, originalContent: "", createNew: true)
+        }
+        messages.append(LocalChatMessage(text: "✍️ Nota · \(actionTitle)", isUser: true, agentCode: nil))
+        isGenerating = true
+        generationTask = Task {
+            switch effective {
+            case .local:
+                if noteAI.createNew {
+                    // Sin contenido de nota: la instrucción (puede incluir material pegado) es la entrada
+                    let prompt = "Instrucción: \(instruction)\n\nDevuelve ÚNICAMENTE el texto completo de la nueva nota con el resultado de aplicar la instrucción, sin comentarios ni prefacios."
+                    sendLocal(prompt: prompt, context: "", noteAI: noteAI)
+                } else {
+                    // context no vacío → chatStream salta el RAG y trabaja sobre el texto de la nota
+                    let prompt = "Nota activa: \(noteAI.noteTitle)\n\nInstrucción: \(instruction)\n\nDevuelve ÚNICAMENTE el texto completo resultante de aplicar la instrucción al texto en Contexto, sin comentarios ni prefacios."
+                    sendLocal(prompt: prompt, context: noteAI.originalContent, noteAI: noteAI)
+                }
+            case .external(let agent):
+                let usesTools = agent.writeContent && (noteAI.createNew ? !agent.workspaces.isEmpty : noteInWorkspace(noteAI.noteId ?? "", agent.workspaces))
+                let sys = noteAISystemPrompt(agentName: agent.name, usesTools: usesTools, createNew: noteAI.createNew)
+                let user = noteAIUserPrompt(instruction: instruction, originalText: noteAI.originalContent, title: noteAI.noteTitle, createNew: noteAI.createNew)
+                await runExternalPlan(sysPrompt: sys, userPrompt: user, agent: agent, noteAI: noteAI)
+            }
+        }
+    }
+
+    /// Detecta si la instrucción pide explícitamente crear una nota nueva.
+    private func wantsCreateNew(_ instruction: String) -> Bool {
+        let l = instruction.lowercased()
+        let markers = ["crea una nota", "crear una nota", "crear nota", "crea nota", "nueva nota", "nota nueva", "crea un borrador", "genera una nota", "generar una nota"]
+        return markers.contains { l.contains($0) }
+    }
+
+    /// Aplica un contenido generado por IA a la nota activa según `applyMode`.
+    /// Si `noteID` es nil, crea una nota nueva en el vault con el resultado.
+    @MainActor
+    private func applyToActiveNote(applyContent: String, instruction: String, noteID: String?) {
+        if noteID == nil {
+            let title = noteAITitleOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+            let header = title.isEmpty ? "" : "# \(title)\n\n"
+            let newContent = header + applyContent
+            viewModel.createNewNote(locations: workspaceManager.allLocations, content: newContent, skipRename: true)
+            // createNewNote abre la pestaña con content vacío → sincronizar la preview con el contenido real
+            if let id = viewModel.activeTabId, let idx = viewModel.tabs.firstIndex(where: { $0.id == id }) {
+                viewModel.tabs[idx].content = newContent
+            }
+            messages.append(LocalChatMessage(text: "✓ Nota nueva creada: \(title.isEmpty ? "Nueva nota IA" : title).", isUser: false, agentCode: selectedAgent.agentCode))
+            return
+        }
+        guard let idx = activeTabIndex else {
+            messages.append(LocalChatMessage(text: "⚠️ No hay nota activa para aplicar.", isUser: false, agentCode: selectedAgent.agentCode))
+            return
+        }
+        if let noteID, viewModel.activeTabId != noteID {
+            messages.append(LocalChatMessage(text: "⚠️ La nota activa cambió; no se aplicó a '\(viewModel.tabs[idx].title)'.", isUser: false, agentCode: selectedAgent.agentCode))
+            return
+        }
+        let tab = viewModel.tabs[idx]
+        let newContent: String
+        switch applyMode {
+        case .insertAtEnd:
+            newContent = tab.content + "\n\n---\n### ✨ \(instruction)\n" + applyContent
+        case .replaceAll:
+            newContent = applyContent
+        case .replaceSelection:
+            let sel = viewModel.editorSelection
+            if sel.length > 0, let range = Range(sel, in: tab.content) {
+                newContent = tab.content.replacingCharacters(in: range, with: applyContent)
+            } else {
+                // Fallback seguro: insertar al final
+                newContent = tab.content + "\n\n---\n### ✨ \(instruction)\n" + applyContent
+                messages.append(LocalChatMessage(text: "ℹ️ Sin selección activa: se insertó al final.", isUser: false, agentCode: selectedAgent.agentCode))
+            }
+        }
+        viewModel.tabs[idx].content = newContent
+        viewModel.saveActiveTab(locations: workspaceManager.allLocations)
+        messages.append(LocalChatMessage(text: "✓ Aplicado a '\(tab.title)' (\(applyMode.rawValue)).", isUser: false, agentCode: selectedAgent.agentCode))
+    }
+
+    /// Conecta el botón "Aplicar a la nota" del mensaje con la aplicación real.
+    private func handleApplyRequest(messageID: String) {
+        guard let msg = messages.first(where: { $0.id.uuidString == messageID }), let content = msg.applyContent else { return }
+        applyToActiveNote(applyContent: content, instruction: msg.applyInstruction ?? "IA", noteID: msg.applyNoteId)
+    }
+
+    /// Marca el último mensaje como aplicable (botón "Aplicar a la nota") o lo auto-aplica si el toggle está activo.
+    @MainActor
+    private func finalizeNoteAIMessage(noteAI: NoteAIApplyInfo, content: String, index: Int?, wroteActiveNote: Bool) {
+        if wroteActiveNote {
+            messages.append(LocalChatMessage(text: "✍️ El agente escribió la nota directamente (\(noteAI.noteTitle)).", isUser: false, agentCode: selectedAgent.agentCode))
+            return
+        }
+        let clean = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            messages.append(LocalChatMessage(text: "⚠️ El agente no devolvió contenido editable.", isUser: false, agentCode: selectedAgent.agentCode))
+            return
+        }
+        let parsed = parseNoteAIResult(clean)
+        if let i = index, messages.indices.contains(i) {
+            messages[i].applyContent = parsed
+            messages[i].applyInstruction = noteAI.instruction
+            messages[i].applyNoteId = noteAI.noteId
+        }
+        if noteAIAutoApply {
+            applyToActiveNote(applyContent: parsed, instruction: noteAI.instruction, noteID: noteAI.noteId)
+            if let i = index, messages.indices.contains(i) { messages[i].applyContent = nil }
+        }
+    }
+
+    /// System prompt para redacción de notas: pedir SOLO el texto resultante.
+    private func noteAISystemPrompt(agentName: String, usesTools: Bool, createNew: Bool = false) -> String {
+        var s = createNew
+            ? "Eres un redactor inteligente del vault (\(agentName)). Crearás una nota nueva aplicando la instrucción del usuario.\n"
+            : "Eres un redactor inteligente del vault (\(agentName)). Aplicarás la instrucción del usuario sobre la nota activa.\n"
+        s += "Devuelve ÚNICAMENTE el texto completo resultante de aplicar la instrucción, sin comentarios, prefacios ni resúmenes.\n"
+        if !createNew {
+            s += "La nota completa está al final del mensaje del usuario; no la busques con herramientas.\n"
+        }
+        s += usesTools
+            ? "Puedes usar herramientas MCP solo si es estrictamente necesario; lo esperado es devolver el texto editado.\n"
+            : "NO uses herramientas MCP. Responde solo con el texto.\n"
+        return s
+    }
+
+    /// Prompt de usuario para redacción de notas, con el título de la nota y el contenido truncado para límites de tokens.
+    private func noteAIUserPrompt(instruction: String, originalText: String, title: String, createNew: Bool) -> String {
+        if createNew {
+            return "Instrucción: \(instruction)\n\nCrea una nota nueva con el contenido solicitado. Devuelve únicamente el texto completo de la nota nueva."
+        }
+        var text = originalText
+        var truncated = false
+        if text.count > maxNoteContentForAI {
+            text = String(text.prefix(maxNoteContentForAI))
+            truncated = true
+        }
+        let note = truncated ? "\(text)\n… [nota truncada a \(maxNoteContentForAI) caracteres]" : text
+        return "Nota activa: \(title)\n\nInstrucción: \(instruction)\n\nTexto original de la nota:\n---\n\(note)\n---\n\nDevuelve únicamente el texto completo resultante."
+    }
+
+    /// Desempaqueta el bloque fenced ``` más grande si el modelo devolvió el texto envuelto en un code fence.
+    private func parseNoteAIResult(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fences = text.components(separatedBy: "```")
+        if fences.count >= 3 {
+            // El bloque de mayor contenido suele ser el texto editable
+            var best = fences[1]
+            for i in 2..<(fences.count - 1) {
+                if fences[i].count > best.count { best = fences[i] }
+            }
+            text = best.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Quitar el lenguaje declarado en la primera línea del fence (p.ej. "md", "markdown")
+            let lines = text.components(separatedBy: .newlines)
+            if let first = lines.first, !first.contains(" ") && first.count <= 12 && !first.contains("#") {
+                text = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return text
     }
 }
 
@@ -953,17 +1230,22 @@ struct ChatInputView: NSViewRepresentable {
 
 struct ChatMessagesView: NSViewRepresentable {
     let messages: [LocalChatMessage]
+    var onApplyNote: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        let ucc = WKUserContentController()
+        ucc.add(context.coordinator, name: "noteAIApply")
+        config.userContentController = ucc
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onApplyNote = onApplyNote
         webView.loadHTMLString(buildHTML(), baseURL: nil)
     }
 
@@ -1012,11 +1294,22 @@ struct ChatMessagesView: NSViewRepresentable {
                 .replacingOccurrences(of: "'", with: "&#39;")
                 .replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: ">", with: "&gt;")
+
+            // Botón "Aplicar a la nota" (o "Crear nota nueva") para resultados de Opciones IA para notas
+            var applyBtn = ""
+            if msg.applyContent != nil {
+                let applyLabel = msg.applyNoteId == nil ? "Crear nota nueva" : "Aplicar a la nota"
+                applyBtn = """
+                <button class="apply-btn" onclick="window.webkit.messageHandlers.noteAIApply.postMessage('\(msg.id.uuidString)')">\(applyLabel)</button>
+                """
+            }
+
             return """
             <div class="msg \(side)" data-text="\(safeText)">
               <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
               <div class="bubble">\(escaped(msg.text))</div>
               <div class="msg-actions">
+                \(applyBtn)
                 <button class="copy-btn" onclick="navigator.clipboard.writeText(this.parentElement.parentElement.getAttribute('data-text'))" title="Copiar">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
@@ -1093,6 +1386,8 @@ struct ChatMessagesView: NSViewRepresentable {
           .msg:hover .msg-actions, .agent:hover .msg-actions { opacity: 1; }
           .copy-btn { background: none; border: none; cursor: pointer; padding: 2px 4px; color: rgba(128,128,128,0.4); }
           .copy-btn:hover { color: rgba(128,128,128,0.8); }
+          .apply-btn { background: #34c759; color: #fff; border: none; cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; margin-right: 6px; }
+          .apply-btn:hover { filter: brightness(1.1); }
 
           /* Mermaid diagrams */
           .mermaid-diagram { margin: 12px 0; padding: 12px; background: rgba(255,255,255,0.6); border-radius: 8px; overflow-x: auto; }
@@ -1127,7 +1422,15 @@ struct ChatMessagesView: NSViewRepresentable {
         """
     }
 
-    class Coordinator: NSObject {}
+    class Coordinator: NSObject, WKScriptMessageHandler {
+        var onApplyNote: ((String) -> Void)? = nil
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "noteAIApply", let id = message.body as? String {
+                onApplyNote?(id)
+            }
+        }
+    }
 }
 
 // MARK: - Permissions Bar

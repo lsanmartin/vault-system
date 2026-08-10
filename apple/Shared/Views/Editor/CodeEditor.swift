@@ -7,7 +7,9 @@ struct CodeEditor: NSViewRepresentable {
     @Binding var showLineNumbers: Bool
     let language: String
     let theme: AppTheme
-    
+    var notePath: String = ""
+    var onSelectionChange: ((NSRange) -> Void)? = nil
+
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -29,6 +31,8 @@ struct CodeEditor: NSViewRepresentable {
         
         textView.delegate = context.coordinator
         textView.isRichText = false
+        textView.notePath = notePath
+        textView.registerForDraggedTypes([.fileURL])
         textView.allowsUndo = true
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -56,7 +60,8 @@ struct CodeEditor: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        let textView = nsView.documentView as! NSTextView
+        let textView = nsView.documentView as! EditorTextView
+        textView.notePath = notePath
         
         // Evitar bucles de actualización y pérdida de cursor
         if textView.string != text {
@@ -149,6 +154,12 @@ struct CodeEditor: NSViewRepresentable {
             }
             highlight(textView)
             textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            let range = textView.selectedRanges.first?.rangeValue ?? NSRange(location: 0, length: 0)
+            parent.onSelectionChange?(range)
         }
         
         func highlight(_ textView: NSTextView) {
@@ -246,7 +257,85 @@ struct CodeEditor: NSViewRepresentable {
 class EditorTextView: NSTextView {
     private var _customSelectedRanges: [NSValue]? = nil
     private var _isApplyingCustomSelection = false
-    
+
+    /// Ruta de la nota en edición (para resolver rutas relativas de imágenes).
+    var notePath: String = ""
+    private var insertObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil && insertObserver == nil {
+            insertObserver = NotificationCenter.default.addObserver(
+                forName: .vaultInsertImageMarkdown, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let self = self, let md = notification.object as? String else { return }
+                self.insertMarkdownAtCursor(md)
+            }
+        }
+    }
+
+    deinit {
+        if let insertObserver {
+            NotificationCenter.default.removeObserver(insertObserver)
+        }
+    }
+
+    func insertMarkdownAtCursor(_ md: String) {
+        window?.makeFirstResponder(self)
+        let range = selectedRange()
+        if shouldChangeText(in: range, replacementString: md) {
+            replaceCharacters(in: range, with: md)
+            didChangeText()
+            setSelectedRange(NSRange(location: range.location + (md as NSString).length, length: 0))
+        }
+    }
+
+    /// Pegar imagen (Cmd+V): si el portapapeles trae imagen, la guarda en `_attachments/` e inserta el link.
+    override func paste(_ sender: Any?) {
+        if !notePath.isEmpty,
+           let md = ImageImportService.importFromPasteboard(noteDir: URL(fileURLWithPath: notePath).deletingLastPathComponent()) {
+            insertMarkdownAtCursor(md)
+            return
+        }
+        super.paste(sender)
+    }
+
+    // MARK: - Drag & drop de archivos al editor
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.availableType(from: [.fileURL]) != nil {
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pb = sender.draggingPasteboard
+        guard let urlStr = pb.string(forType: .fileURL),
+              let url = URL(string: urlStr), !notePath.isEmpty else {
+            return super.performDragOperation(sender)
+        }
+        let noteDir = URL(fileURLWithPath: notePath).deletingLastPathComponent()
+        let point = convert(sender.draggingLocation, from: nil)
+        let idx = characterIndexForInsertion(at: point)
+
+        let md: String
+        if FileTypeHelper.isImage(url.path) && !url.path.hasPrefix(noteDir.path) {
+            md = ImageImportService.importIntoAttachments(source: url, noteDir: noteDir) ?? ""
+        } else {
+            md = ImageImportService.markdownLink(from: url, noteDir: noteDir)
+        }
+        guard !md.isEmpty else { return false }
+
+        let range = NSRange(location: idx == NSNotFound ? selectedRange().location : idx, length: 0)
+        if shouldChangeText(in: range, replacementString: md) {
+            replaceCharacters(in: range, with: md)
+            didChangeText()
+            setSelectedRange(NSRange(location: range.location + (md as NSString).length, length: 0))
+        }
+        return true
+    }
+
     override var selectedRanges: [NSValue] {
         get {
             return _customSelectedRanges ?? super.selectedRanges

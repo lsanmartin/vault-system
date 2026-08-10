@@ -16,7 +16,6 @@ struct InlineAICommandView: View {
     // Acciones rápidas predefinidas
     let quickActions = [
         ("Resumir Nota", "Genera un resumen analítico denso de tres puntos clave."),
-        ("Extraer OAs (Chile)", "Identifica posibles Objetivos de Aprendizaje (OA) del currículum chileno asociados al tema."),
         ("Crear Glosario", "Extrae los términos técnicos y genera definiciones concisas."),
         ("Mejorar Redacción", "Corrige la gramática y el estilo del texto de forma profesional.")
     ]
