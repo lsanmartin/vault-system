@@ -1491,6 +1491,7 @@ struct ChatMessagesView: NSViewRepresentable {
         let ucc = WKUserContentController()
         ucc.add(context.coordinator, name: "noteAIApply")
         ucc.add(context.coordinator, name: "chatRequestOlder")
+        ucc.add(context.coordinator, name: "chatCopy")
         config.userContentController = ucc
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
@@ -1588,8 +1589,11 @@ struct ChatMessagesView: NSViewRepresentable {
               <div class="bubble">\(escaped(msg.text))</div>
               <div class="msg-actions">
                 \(applyBtn)
-                <button class="copy-btn" onclick="navigator.clipboard.writeText(this.parentElement.parentElement.getAttribute('data-text'))" title="Copiar">
+                <button class="copy-btn" onclick="copyMsg(this, 'plain')" title="Copiar texto">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+                <button class="copy-btn md-copy-btn" onclick="copyMsg(this, 'md')" title="Copiar Markdown">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                 </button>
               </div>
             </div>
@@ -1673,6 +1677,7 @@ struct ChatMessagesView: NSViewRepresentable {
           .msg:hover .msg-actions, .agent:hover .msg-actions { opacity: 1; }
           .copy-btn { background: none; border: none; cursor: pointer; padding: 2px 4px; color: rgba(128,128,128,0.4); }
           .copy-btn:hover { color: rgba(128,128,128,0.8); }
+          .md-copy-btn { margin-left: 2px; padding-left: 5px; border-left: 1px solid rgba(128,128,128,0.15); }
           .apply-btn { background: #34c759; color: #fff; border: none; cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; margin-right: 6px; }
           .apply-btn:hover { filter: brightness(1.1); }
 
@@ -1723,6 +1728,22 @@ struct ChatMessagesView: NSViewRepresentable {
             }, { passive: true });
           }, 500);
 
+          function copyMsg(btn, mode) {
+            var msg = btn.closest('.msg');
+            var text;
+            if (mode === 'md') {
+              // Copiar markdown original (el atributo data-text se decodifica automáticamente al leerlo)
+              text = msg.getAttribute('data-text') || '';
+            } else {
+              // Copiar texto plano renderizado
+              var bubble = msg.querySelector('.bubble');
+              text = bubble ? bubble.textContent : '';
+            }
+            window.webkit.messageHandlers.chatCopy.postMessage(text);
+            var origHTML = btn.innerHTML;
+            btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+            setTimeout(function() { btn.innerHTML = origHTML; }, 1200);
+          }
           function scrollToBottom() { window.scrollTo(0, document.body.scrollHeight); }
           function scrollToMid(id) {
             var el = document.querySelector('[data-mid="' + id + '"]');
@@ -1769,6 +1790,9 @@ struct ChatMessagesView: NSViewRepresentable {
                 onApplyNote?(id)
             } else if message.name == "chatRequestOlder" {
                 onRequestOlder?()
+            } else if message.name == "chatCopy", let text = message.body as? String, !text.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
             }
         }
     }
