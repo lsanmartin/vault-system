@@ -11,6 +11,7 @@ struct ChatThread: Identifiable, Codable {
 
 /// Mensaje persistente en DuckDB
 struct PersistentMessage: Codable {
+    let id: Int64?
     let role: String
     let agentCode: String?
     let content: String
@@ -33,8 +34,10 @@ class ChatThreadManager: ObservableObject {
 
     func loadThreads() {
         let json = chatListThreads()
-        if let data = json.data(using: .utf8),
-           let list = try? JSONDecoder().decode([ChatThread].self, from: data) {
+        guard let data = json.data(using: .utf8) else { return }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase   // FFI devuelve agent_code, created_at…
+        if let list = try? decoder.decode([ChatThread].self, from: data) {
             threads = list
         }
     }
@@ -66,29 +69,64 @@ class ChatThreadManager: ObservableObject {
 
     // MARK: - Messages
 
-    func saveMessage(threadId: String, role: String, agentCode: String?, content: String) {
-        _ = chatSaveMessage(threadId: threadId, role: role, agentCode: agentCode ?? "", content: content)
+    @discardableResult
+    func saveMessage(threadId: String, role: String, agentCode: String?, content: String) -> Int64 {
+        chatSaveMessage(threadId: threadId, role: role, agentCode: agentCode ?? "", content: content)
     }
 
-    func loadMessages(threadId: String, limit: Int32 = 200) -> [PersistentMessage] {
-        let json = chatGetMessages(threadId: threadId, limit: limit)
-        if let data = json.data(using: .utf8),
-           let msgs = try? JSONDecoder().decode([PersistentMessage].self, from: data) {
-            return msgs
-        }
-        return []
+    /// Carga mensajes del thread: las últimas `limit` (beforeId = nil) o las anteriores a `beforeId`.
+    func loadMessages(threadId: String, limit: Int32 = 200, beforeId: Int64? = nil) -> [PersistentMessage] {
+        let json = chatGetMessages(threadId: threadId, limit: limit, beforeId: beforeId)
+        return decodeMessages(json)
+    }
+
+    /// Busca mensajes por substring dentro del thread, más recientes primero.
+    func searchMessages(threadId: String, query: String, limit: Int32 = 100) -> [PersistentMessage] {
+        let json = chatSearchMessages(threadId: threadId, query: query, limit: limit)
+        return decodeMessages(json)
+    }
+
+    private func decodeMessages(_ json: String) -> [PersistentMessage] {
+        guard let data = json.data(using: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase   // FFI devuelve agent_code → agentCode
+        return (try? decoder.decode([PersistentMessage].self, from: data)) ?? []
     }
 
     // MARK: - Convert to LocalChatMessage
 
-    func toLocalMessages(threadId: String, limit: Int32 = 200) -> [LocalChatMessage] {
-        loadMessages(threadId: threadId, limit: limit).map { msg in
-            LocalChatMessage(
+    private static let dateParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    func toLocalMessages(threadId: String, limit: Int32 = 200, beforeId: Int64? = nil) -> [LocalChatMessage] {
+        loadMessages(threadId: threadId, limit: limit, beforeId: beforeId).map { msg in
+            var local = LocalChatMessage(
                 text: msg.content,
                 isUser: msg.role == "user",
                 agentCode: msg.agentCode
             )
+            local.persistedId = msg.id
+            // DuckDB devuelve timestamps como "2026-08-10 12:34:56" (puede traer fracción o offset)
+            let ts = msg.timestamp
+            local.persistedDate = Self.dateParser.date(from: ts)
+                ?? ISO8601DateFormatter().date(from: ts)
+                ?? Self.flexibleDateParser(ts)
+            return local
         }
+    }
+
+    private static func flexibleDateParser(_ s: String) -> Date? {
+        // "2026-08-10 12:34:56.123456" o similar (formato %F %T%.f de chrono):
+        // recortar la fracción de microsegundos del componente de hora.
+        let parts = s.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        let datePart = parts[0]
+        let timePart = parts[1].split(separator: ".").first ?? parts[1]
+        return dateParser.date(from: "\(datePart) \(timePart)")
     }
 
     // MARK: - Naming

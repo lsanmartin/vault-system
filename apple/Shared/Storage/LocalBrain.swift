@@ -63,6 +63,33 @@ public final class LocalBrain: ObservableObject {
         activeChatTask = nil
     }
 
+    /// Pausa la digestión cognitiva para dar prioridad al chat.
+    /// La digestión ocupa el GPUInferenceActor (actor serializado) en un bucle de
+    /// notas; si no se cancela, el chat espera detrás de N generaciones y parece
+    /// "muerto". Cancela el task actual y deja isProcessing en false para que
+    /// `startDigestion` pueda reanudarse más tarde con notas nuevas.
+    private func pauseDigestionForChat() {
+        digestionTask?.cancel()
+        digestionTask = nil
+        Task { @MainActor in
+            self.isProcessing = false
+            self.currentNoteTitle = ""
+        }
+    }
+
+    /// Reanuda la digestión cognitiva tras el chat (si quedan notas pendientes
+    /// y el usuario no desactivó el cerebro). Se ejecuta con un pequeño delay
+    /// para no competir con el final de la generación del chat.
+    private func resumeDigestionAfterChat() {
+        guard isEnabled else { return }
+        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, self.isEnabled, !self.isProcessing else { return }
+            DispatchQueue.main.async {
+                self.startDigestion()
+            }
+        }
+    }
+
     /// Activa o desactiva temporalmente el cerebro local.
     /// Al desactivar se cancela el trabajo en curso, se libera el modelo de la memoria GPU/Metal
     /// y el estado vuelve a `.notLoaded` (se recarga bajo demanda al reactivar).
@@ -142,7 +169,23 @@ public final class LocalBrain: ObservableObject {
         }
         
         // Intentar carga rápida offline nativa
-        let config = ModelConfiguration(id: modelId)
+        // El modelo suele estar ya descargado en Documents/huggingface/models/
+        // (ruta legacy de versiones anteriores de la app). Apuntamos
+        // ModelConfiguration ahí para evitar re-descargar 6-7 GB cada vez.
+        let docsModelDir = FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("huggingface/models/\(modelId)")
+        let hasLocalModel = docsModelDir.map { dir in
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
+        } ?? false
+        let config: ModelConfiguration
+        if hasLocalModel, let dir = docsModelDir {
+            // La API de mlx-swift separa init(id:) (HF) e init(directory:) (local)
+            config = ModelConfiguration(directory: dir)
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo local encontrado en Documents (\(modelId)). Carga offline sin descarga.")
+        } else {
+            config = ModelConfiguration(id: modelId)
+        }
         do {
             await MainActor.run {
                 self.modelStatus = .loading
@@ -175,8 +218,8 @@ public final class LocalBrain: ObservableObject {
                     self.modelStatus = .loading
                 }
                 
-                // Cargar modelo tras la descarga exitosa
-                let container = try await #huggingFaceLoadModelContainer(configuration: config)
+                // Cargar modelo tras la descarga exitosa (config por id → cache HF)
+                let container = try await #huggingFaceLoadModelContainer(configuration: ModelConfiguration(id: modelId))
                 guard self.isEnabled else {
                     MLX.GPU.clearCache()
                     throw NSError(domain: "LocalBrain", code: 100, userInfo: [NSLocalizedDescriptionKey: "Carga cancelada: el cerebro local fue desactivado durante la descarga."])
@@ -314,6 +357,9 @@ public final class LocalBrain: ObservableObject {
                 
                 var generatedText = ""
                 for await generation in stream {
+                    // Si el usuario usa el chat, la digestión se aborta para
+                    // liberar el GPUInferenceActor y dar paso al chat de inmediato.
+                    if Task.isCancelled { break }
                     switch generation {
                     case .chunk(let text):
                         generatedText += text
@@ -361,9 +407,16 @@ public final class LocalBrain: ObservableObject {
             let task = Task {
                 var accumulatedText = ""
                 do {
+                    // El chat tiene PRIORIDAD sobre la digestión cognitiva.
+                    // La digestión ocupa el GPUInferenceActor (actor serializado)
+                    // en un bucle de notas; sin esto, el chat esperaba detrás
+                    // de N generaciones y "no respondía". Cancelamos la digestión
+                    // antes de entrar al actor para liberar el GPU de inmediato.
+                    self.pauseDigestionForChat()
+
                     try await GPUInferenceActor.shared.run {
                         let container = try await self.getOrLoadContainer()
-                        
+
                         var finalContext = context
                         if finalContext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             // Cargar documentación de autoconsciencia del sistema de forma fija
@@ -448,6 +501,9 @@ public final class LocalBrain: ObservableObject {
                 executeCommandIfPresent(accumulatedText)
                 MLX.GPU.clearCache()
                 continuation.finish()
+                // El chat terminó: reanudar la digestión cognitiva pausada,
+                // si aún quedan notas pendientes y el cerebro sigue activado.
+                self.resumeDigestionAfterChat()
             }
             self.activeChatTask = task
             continuation.onTermination = { _ in

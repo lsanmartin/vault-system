@@ -13,7 +13,7 @@ path = "bin/uniffi-bindgen.rs"
 [dependencies]
 uniffi = { version = "0.27", features = ["cli"] }
 tokio = { version = "1.37", features = ["full"] }
-duckdb = "1.10503.1"
+duckdb = { version = "1.10503.1", features = ["chrono"] }
 once_cell = "1.19"
 walkdir = "2.5"
 notify = "6.1"

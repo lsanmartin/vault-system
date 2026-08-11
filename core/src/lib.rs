@@ -464,13 +464,15 @@ pub fn init_knowledge_base() -> String {
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY,
+            id INTEGER NOT NULL,
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             agent_code TEXT,
             content TEXT NOT NULL,
             timestamp TIMESTAMP DEFAULT now()
         );
+
+        CREATE SEQUENCE IF NOT EXISTS chat_messages_id_seq START 1;
 
         CREATE TABLE IF NOT EXISTS scheduled_tasks (
             id TEXT PRIMARY KEY,
@@ -509,6 +511,33 @@ pub fn init_knowledge_base() -> String {
                 let _ = conn.execute(
                     "INSERT INTO _schema_version (version) VALUES (1)", []
                 );
+            }
+
+            // Migración v2: chat_messages.id pasa de INTEGER PRIMARY KEY (NO autoincrement en DuckDB,
+            // causaba "NOT NULL constraint failed" en todo INSERT → el chat se reseteaba al abrir)
+            // a id explícito vía secuencia (chat_messages_id_seq). Nota: DuckDB v1.5 no soporta
+            // columnas IDENTITY ("Constraint not implemented!") → se usa CREATE SEQUENCE + nextval.
+            // La tabla vieja está vacía (el bug impedía todo INSERT), así que no hay datos que perder.
+            if current_version < 2 {
+                let mig_res = conn.execute_batch(
+                    "ALTER TABLE chat_messages RENAME TO chat_messages_old;
+                     CREATE TABLE chat_messages (
+                        id INTEGER NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        agent_code TEXT,
+                        content TEXT NOT NULL,
+                        timestamp TIMESTAMP DEFAULT now()
+                     );
+                     INSERT INTO chat_messages (id, thread_id, role, agent_code, content, timestamp)
+                        SELECT id, thread_id, role, agent_code, content, timestamp FROM chat_messages_old;
+                     DROP TABLE chat_messages_old;
+                     INSERT INTO _schema_version (version) VALUES (2);"
+                );
+                match mig_res {
+                    Ok(_) => crate::add_telemetry_log("DB: Migración chat_messages v2 (id vía secuencia) OK".into()),
+                    Err(e) => crate::add_telemetry_log(format!("DB: Migración v2 FALLÓ: {}", e)),
+                }
             }
 
             // Ejecutar deduplicación preventiva de rowids
@@ -3513,8 +3542,13 @@ pub fn shutdown_vault_session(workspace_path: String) -> String {
     msgs.push(format!("Scratchpad: {}", consolidation));
 
     // 2. Git snapshot del workspace (si .git existe)
+    // OJO: el vault de contenido puede tener decenas de miles de untracked (iCloud).
+    // `add -A` indexaría todos → el quit de la app se cuelga (willTerminate síncrono).
+    // Solo `-A` en el workspace de sistema (chico); en contenido usar `-u` (solo rastreados).
     let ws = Path::new(&workspace_path);
     if ws.join(".git").exists() {
+        let is_system_ws = workspace_path.contains(".vault_system");
+        let add_flag = if is_system_ws { "-A" } else { "-u" };
         let _ = std::process::Command::new("/usr/bin/git")
             .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
             .env_remove("GIT_DIR")
@@ -3522,7 +3556,7 @@ pub fn shutdown_vault_session(workspace_path: String) -> String {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-            .args(["-C", &workspace_path, "-c", "safe.directory=*", "add", "-A"])
+            .args(["-C", &workspace_path, "-c", "safe.directory=*", "add", add_flag])
             .output();
 
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
@@ -3662,13 +3696,16 @@ pub fn chat_save_message(thread_id: String, role: String, agent_code: String, co
         return -1;
     }};
     let short = if content.len() > 50 { format!("{}…", &content[..50]) } else { content.clone() };
+    // id autoincrement vía secuencia (DuckDB v1.5 no soporta columnas IDENTITY ni PK autoincrement).
+    // El acceso es serializado por DB_CONN, así que nextval es seguro.
+    let next_id: i64 = conn.query_row("SELECT nextval('chat_messages_id_seq')", [], |r| r.get(0)).unwrap_or(-1);
     match conn.execute(
-        "INSERT INTO chat_messages (thread_id, role, agent_code, content) VALUES (?, ?, ?, ?)",
-        params![thread_id, role, agent_code, content],
+        "INSERT INTO chat_messages (id, thread_id, role, agent_code, content) VALUES (?, ?, ?, ?, ?)",
+        params![next_id, thread_id, role, agent_code, content],
     ) {
         Ok(_) => {
             let _ = conn.execute("UPDATE chat_threads SET updated_at = now() WHERE id = ?", params![thread_id]);
-            let id = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap_or(-1);
+            let id = next_id;
             crate::add_telemetry_log(format!("chat_save_message OK: id={}, thread={}, role={}, content={}", id, &thread_id[..thread_id.len().min(20)], role, short));
             id
         }
@@ -3680,18 +3717,47 @@ pub fn chat_save_message(thread_id: String, role: String, agent_code: String, co
 }
 
 #[uniffi::export]
-pub fn chat_get_messages(thread_id: String, limit: i32) -> String {
+pub fn chat_get_messages(thread_id: String, limit: i32, before_id: Option<i64>) -> String {
     let conn = match get_db_connection() { Some(c) => c, None => return "[]".into() };
+    // Devuelve las últimas `limit` filas con id < before_id (o las últimas si None), en orden ASCENDENTE.
     let mut stmt = match conn.prepare(
-        "SELECT role, agent_code, content, timestamp FROM chat_messages WHERE thread_id = ? ORDER BY id ASC LIMIT ?"
+        "SELECT id, role, agent_code, content, timestamp FROM (
+            SELECT id, role, agent_code, content, timestamp FROM chat_messages
+            WHERE thread_id = ?1 AND (?2 IS NULL OR id < ?2)
+            ORDER BY id DESC LIMIT ?3
+         ) ORDER BY id ASC"
     ) { Ok(s) => s, Err(_) => return "[]".into() };
 
-    let rows: Vec<serde_json::Value> = stmt.query_map(params![thread_id, limit], |row| {
+    let rows: Vec<serde_json::Value> = stmt.query_map(params![thread_id, before_id, limit], |row| {
         Ok(serde_json::json!({
-            "role": row.get::<_, String>(0)?,
-            "agent_code": row.get::<_, Option<String>>(1)?,
-            "content": row.get::<_, String>(2)?,
-            "timestamp": row.get::<_, String>(3)?
+            "id": row.get::<_, i64>(0)?,
+            "role": row.get::<_, String>(1)?,
+            "agent_code": row.get::<_, Option<String>>(2)?,
+            "content": row.get::<_, String>(3)?,
+            "timestamp": row.get::<_, String>(4)?
+        }))
+    }).unwrap().filter_map(|r| r.ok()).collect();
+
+    serde_json::to_string(&rows).unwrap_or("[]".into())
+}
+
+#[uniffi::export]
+pub fn chat_search_messages(thread_id: String, query: String, limit: i32) -> String {
+    let conn = match get_db_connection() { Some(c) => c, None => return "[]".into() };
+    // Búsqueda fuzzy por substring (ILIKE), más recientes primero.
+    let mut stmt = match conn.prepare(
+        "SELECT id, role, agent_code, content, timestamp FROM chat_messages
+         WHERE thread_id = ?1 AND content ILIKE '%' || ?2 || '%'
+         ORDER BY id DESC LIMIT ?3"
+    ) { Ok(s) => s, Err(_) => return "[]".into() };
+
+    let rows: Vec<serde_json::Value> = stmt.query_map(params![thread_id, query, limit], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "role": row.get::<_, String>(1)?,
+            "agent_code": row.get::<_, Option<String>>(2)?,
+            "content": row.get::<_, String>(3)?,
+            "timestamp": row.get::<_, String>(4)?
         }))
     }).unwrap().filter_map(|r| r.ok()).collect();
 

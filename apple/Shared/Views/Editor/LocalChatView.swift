@@ -13,6 +13,9 @@ struct LocalChatMessage: Identifiable, Equatable {
     var applyContent: String? = nil     // texto editable propuesto (Opciones IA para notas)
     var applyInstruction: String? = nil // label para la cabecera "### ✨ ..."
     var applyNoteId: String? = nil      // nota destino (para verificar que no cambió)
+    var persistedId: Int64? = nil       // id real en DuckDB (lazy loading, búsqueda, ancla de scroll)
+    var persistedDate: Date? = nil      // timestamp real persistido; nil = mensaje en memoria (usar Date())
+    var effectiveDate: Date { persistedDate ?? timestamp }
     static func == (lhs: LocalChatMessage, rhs: LocalChatMessage) -> Bool { lhs.id == rhs.id }
 }
 
@@ -29,6 +32,17 @@ struct LocalChatView: View {
     @State private var generationTask: Task<Void, Never>? = nil
     @State private var selectedAgent: AgentChip = .local
     @State private var showAgentSettings = false
+
+    // Lazy loading (chat infinito tipo WhatsApp)
+    @State private var hasMoreOlder = true
+    @State private var isLoadingOlder = false
+    @State private var preserveAnchorId: Int64? = nil   // primer mensaje visible previo (ancla de scroll)
+    @State private var pendingScrollToId: Int64? = nil  // salto desde búsqueda
+
+    // Búsqueda en el chat
+    @State private var isSearching = false
+    @State private var searchText = ""
+    @State private var searchResults: [PersistentMessage] = []
 
     // Opciones IA para notas
     @AppStorage("vault_noteai_autoApply") private var noteAIAutoApply = false
@@ -130,6 +144,17 @@ struct LocalChatView: View {
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .help("/clear — Limpiar vista")
+
+                    Button(action: {
+                        withAnimation { isSearching.toggle() }
+                        if !isSearching { searchText = ""; searchResults = [] }
+                    }) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 13))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(isSearching ? .accentColor : .secondary)
+                    .help("Buscar en el chat")
                 }
 
                 Spacer()
@@ -147,6 +172,29 @@ struct LocalChatView: View {
             }
             .padding(.horizontal).padding(.vertical, 8)
             .background(Color(NSColor.windowBackgroundColor))
+
+            // Buscador (chat infinito, tipo WhatsApp)
+            if isSearching {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundColor(.secondary).font(.system(size: 11))
+                    TextField("Buscar mensajes…", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .onSubmit { runSearch(searchText) }
+                    if !searchText.isEmpty {
+                        Button("Buscar") { runSearch(searchText) }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                    }
+                    Button("Cancelar") { isSearching = false; searchText = ""; searchResults = [] }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Color(NSColor.windowBackgroundColor))
+                .transition(.move(edge: .top))
+            }
 
             // Barra de permisos
             PermissionsBar(agent: selectedAgent)
@@ -169,12 +217,27 @@ struct LocalChatView: View {
 
             Divider()
 
-            // Mensajes (NSTextView nativo para selección multi-burbuja)
-            ChatMessagesView(messages: messages) { msgID in
-                handleApplyRequest(messageID: msgID)
+            // Mensajes (WKWebView: chat infinito + marcas de sesión + búsqueda)
+            ChatMessagesView(
+                messages: messages,
+                preserveAnchorId: preserveAnchorId,
+                pendingScrollToId: pendingScrollToId,
+                onApplyNote: { msgID in handleApplyRequest(messageID: msgID) },
+                onRequestOlder: { loadOlderMessages() }
+            )
+            .background(Color(NSColor.windowBackgroundColor))
+            .overlay(alignment: .top) {
+                if isSearching && !searchResults.isEmpty {
+                    ChatSearchResultsList(results: searchResults, onSelect: { id in jumpToMessage(id: id) })
+                        .frame(maxHeight: 260)
+                        .padding(8)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                        .shadow(radius: 6)
+                        .padding(.horizontal, 10).padding(.top, 6)
+                }
             }
                 .onChange(of: messages.count) { _ in
-                    // scroll handled internally by NSTextView
+                    // scroll handled internally por buildHTML (JS)
                 }
 
             Divider()
@@ -247,7 +310,7 @@ struct LocalChatView: View {
             AgentSettingsView()
                 .frame(width: 560, height: 780)
         }
-        .onAppear { loadThread(for: selectedAgent.agentCode, displayName: selectedAgent.displayName) }
+        .onAppear { loadThread(for: selectedAgent) }
         .onDisappear {
             DispatchQueue.global().async { saveCurrentThreadMessages() }
         }
@@ -257,7 +320,7 @@ struct LocalChatView: View {
             }
         }
         .onChange(of: selectedAgent) { oldValue, newValue in
-            loadThread(for: newValue.agentCode, displayName: newValue.displayName)
+            loadThread(for: newValue)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatReset"))) { _ in
             createAnchorNote(for: selectedAgent)
@@ -316,35 +379,164 @@ struct LocalChatView: View {
         chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
     }
 
-    private func loadThread(for agentCode: String, displayName: String) {
+    private func loadThread(for chip: AgentChip) {
         // Recargar threads desde DB (por si se crearon en otra sesión)
         chatThreads.loadThreads()
-        let tid = chatThreads.getOrCreateThread(for: agentCode)
-        let msgs = chatThreads.toLocalMessages(threadId: tid)
+        let tid = chatThreads.getOrCreateThread(for: chip.agentCode)
+        // Carga inicial liviana: últimas 60 (chat infinito → scroll arriba carga el resto)
+        let raw = chatThreads.toLocalMessages(threadId: tid, limit: 60)
+        // Limpieza de filas decorativas persistidas por versiones anteriores:
+        // solo se excluye el placeholder "Chat X — Escribí tu mensaje." (con etiqueta ext_xxx).
+        // Los marcadores de sesión "── … ──" (p. ej. de /reset) SÍ se conservan y se
+        // renderizan como anclas: son la recuperación de las marcas de reinicio.
+        let msgs = raw.filter { msg in
+            !(msg.text.hasPrefix("Chat ") && msg.text.contains("— Escribí tu mensaje"))
+        }.map { msg -> LocalChatMessage in
+            var m = msg
+            if m.text.hasPrefix("── ") && m.text.hasSuffix(" ──") {
+                m.type = "anchor"
+            }
+            return m
+        }
         if msgs.isEmpty {
             let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
             let ts = df.string(from: Date())
             messages = [
-                LocalChatMessage(text: "Chat \(displayName) — Escribí tu mensaje.", isUser: false, agentCode: agentCode),
-                LocalChatMessage(text: "── Sesión iniciada \(ts) ──", isUser: false, agentCode: agentCode, type: "anchor")
+                LocalChatMessage(text: "── Sesión iniciada \(ts) ──", isUser: false, agentCode: nil, type: "anchor")
             ]
+            hasMoreOlder = false
         } else {
             messages = msgs
+            hasMoreOlder = true
         }
+        isLoadingOlder = false
+        preserveAnchorId = nil
+        pendingScrollToId = nil
+        isSearching = false
+        searchText = ""
+        searchResults = []
     }
 
     private func saveMessage(_ msg: LocalChatMessage) {
+        // Idempotente: no re-guardar mensajes ya persistidos (evita duplicados en DB)
+        guard msg.persistedId == nil else { return }
         let tid = currentThreadId
         let role = msg.isUser ? "user" : "assistant"
-        chatThreads.saveMessage(threadId: tid, role: role, agentCode: msg.agentCode, content: msg.text)
+        let id = chatThreads.saveMessage(threadId: tid, role: role, agentCode: msg.agentCode, content: msg.text)
+        if id > 0, let idx = messages.firstIndex(where: { $0.id == msg.id }) {
+            messages[idx].persistedId = id
+            messages[idx].persistedDate = Date()
+        }
     }
 
     private func saveCurrentThreadMessages() {
+        // Red de seguridad al cerrar: guardar solo lo que aún no está en DB.
+        // (No usa saveMessage(_:) porque corre desde hilo background y no debe mutar @State)
         let tid = currentThreadId
-        // Guardar los últimos 50 mensajes no guardados
-        for msg in messages.suffix(50) {
-            chatThreads.saveMessage(threadId: tid, role: msg.isUser ? "user" : "assistant", agentCode: msg.agentCode, content: msg.text)
+        // No persistir mensajes decorativos (anchors "── … ──"): no son conversación real.
+        for msg in messages where msg.persistedId == nil && msg.type != "anchor" {
+            _ = chatThreads.saveMessage(threadId: tid, role: msg.isUser ? "user" : "assistant", agentCode: msg.agentCode, content: msg.text)
         }
+    }
+
+    // MARK: - Chat infinito (lazy loading)
+
+    /// Carga la página anterior de mensajes (previos al primero visible) y la antepone sin perder el scroll.
+    private func loadOlderMessages() {
+        guard hasMoreOlder, !isLoadingOlder else { return }
+        guard let anchor = messages.first?.persistedId, anchor > 1 else {
+            hasMoreOlder = false   // no hay más historial (o solo mensajes en memoria)
+            return
+        }
+        // Fijar el ancla ANTES del render: primer mensaje visible previo.
+        // Se mantiene hasta que el usuario envíe un mensaje o salte desde
+        // búsqueda (allí send()/jumpToMessage() lo limpian), de modo que el
+        // reload tras anteponer mensajes viejos vuelve a centrarlo y NO cae
+        // al fondo. Antes se limpiaba con DispatchQueue.main.async, lo que
+        // disparaba un segundo reload sin ancla → el JS ejecutaba scrollToBottom
+        // (el "salto al final" de la conversación).
+        preserveAnchorId = anchor
+        isLoadingOlder = true
+        let tid = currentThreadId
+        let older = chatThreads.loadMessages(threadId: tid, limit: 60, beforeId: anchor)
+        if older.isEmpty {
+            hasMoreOlder = false
+        } else {
+            let olderLocal = older.map { msg -> LocalChatMessage in
+                var local = LocalChatMessage(text: msg.content, isUser: msg.role == "user", agentCode: msg.agentCode)
+                local.persistedId = msg.id
+                local.persistedDate = Self.parsePersistedDate(msg.timestamp)
+                return local
+            }
+            messages.insert(contentsOf: olderLocal, at: 0)
+            if older.count < 60 { hasMoreOlder = false }
+        }
+        isLoadingOlder = false
+    }
+
+    // MARK: - Búsqueda
+
+    private func runSearch(_ query: String) {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { searchResults = []; return }
+        let tid = currentThreadId
+        searchResults = chatThreads.searchMessages(threadId: tid, query: q, limit: 100)
+    }
+
+    /// Salta a un resultado de búsqueda: carga TODO el historial del thread y resalta el mensaje.
+    /// Nota: antes se cargaba `beforeId: id` con `limit: 80`, pero el SQL es `id < ?2` (exclusivo),
+    /// así que el match quedaba FUERA del resultado y la ventana se truncaba a 1-2 mensajes si el
+    /// resultado era antiguo → el JS no encontraba el data-mid y caía al fondo. Con el historial
+    /// completo, el match siempre está presente y la conversación se ve completa.
+    private func jumpToMessage(id: Int64) {
+        let all = loadAllMessages()
+        guard !all.isEmpty else { return }
+        messages = all
+        hasMoreOlder = false   // ya está cargado TODO el historial
+        preserveAnchorId = nil
+        pendingScrollToId = id
+        isSearching = false
+        searchText = ""
+        searchResults = []
+        // NOTA: pendingScrollToId NO se limpia con DispatchQueue.main.async.
+        // Eso disparaba un segundo reload sin targetId → el JS caía al else
+        // (scrollToBottom). Se consume en la próxima acción real (send()/loadThread()).
+    }
+
+    /// Carga completo el historial del thread activo (ascendente) paginando hacia atrás.
+    private func loadAllMessages() -> [LocalChatMessage] {
+        let tid = currentThreadId
+        var all: [LocalChatMessage] = []
+        var beforeId: Int64? = nil
+        while true {
+            let batch = chatThreads.loadMessages(threadId: tid, limit: 500, beforeId: beforeId)
+            if batch.isEmpty { break }
+            let locals = batch.map { msg -> LocalChatMessage in
+                var local = LocalChatMessage(text: msg.content, isUser: msg.role == "user", agentCode: msg.agentCode)
+                local.persistedId = msg.id
+                local.persistedDate = Self.parsePersistedDate(msg.timestamp)
+                return local
+            }
+            // batch viene ascendente (los últimos `limit` antes de beforeId); anteponer
+            // preserva el orden cronológico global (más antiguos primero).
+            all.insert(contentsOf: locals, at: 0)
+            if batch.count < 500 { break }
+            guard let oldest = batch.first?.id else { break }
+            beforeId = oldest   // siguiente página: antes del mensaje más antiguo de esta
+        }
+        return all
+    }
+
+    private static func parsePersistedDate(_ s: String) -> Date? {
+        // DuckDB + crate chrono devuelve "2026-08-10 12:34:56.123456" (con fracción de microsegundos).
+        let df = DateFormatter(); df.locale = Locale(identifier: "en_US_POSIX"); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let parts = s.split(separator: " ")
+        if parts.count >= 2 {
+            // Recortar la fracción del componente de hora y reintentar.
+            let timePart = parts[1].split(separator: ".").first ?? parts[1]
+            if let d = df.date(from: "\(parts[0]) \(timePart)") { return d }
+        }
+        return df.date(from: s) ?? df.date(from: String(s.split(separator: " ").first ?? ""))
     }
 
     // MARK: - Agent Enable/Disable
@@ -546,14 +738,10 @@ struct LocalChatView: View {
             createAnchorNote(for: target)
             let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
             let ts = df.string(from: Date())
-            // Marcador visible en el feed
-            messages.append(LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode, type: "anchor"))
-            saveMessage(LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode))
-            // Archivar thread actual y crear uno nuevo
-            let tid = chatThreads.getOrCreateThread(for: target.agentCode)
-            _ = chatDeleteThread(threadId: tid)
-            chatThreads.loadThreads()
-            _ = chatThreads.getOrCreateThread(for: target.agentCode)
+            // Marcador visible en el feed (persiste en el MISMO thread, no borra historial)
+            let marker = LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode, type: "anchor")
+            messages.append(marker)
+            saveMessage(marker)
             inputText = ""; return
         }
         if clean == "/clear" {
@@ -591,6 +779,11 @@ struct LocalChatView: View {
 
         let prompt = clean
         inputText = ""
+        // Mensaje nuevo → limpiar anclas de lazy loading/búsqueda y volver al fondo.
+        // Si quedaran preserveAnchorId/pendingScrollToId seteados, el reload del
+        // HTML anclaría en un mensaje viejo en vez de mostrar el recién enviado.
+        preserveAnchorId = nil
+        pendingScrollToId = nil
         let userMsg = LocalChatMessage(text: prompt, isUser: true, agentCode: nil)
         messages.append(userMsg)
         saveMessage(userMsg)
@@ -649,9 +842,25 @@ struct LocalChatView: View {
         }
 
         let code = agentCode(for: agent)
-        let sys = String(buildSystemPrompt(agent: agent, context: context).prefix(6000))
-        let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
-        let openaiTools = convertMcpToolsToOpenAI(toolsJson)
+        // Saludo/casual: NO se envían herramientas → respuesta breve, sin auditoría del vault.
+        // "hola" no debe disparar 9 llamadas MCP explorando el vault.
+        let casual = isCasualMessage(prompt)
+        let sys: String
+        if casual {
+            // Prompt mínimo: sin menciones de herramientas, scratchpad ni contexto del vault,
+            // para que el modelo no se sienta en "modo trabajo" ni alucine un tool_call.
+            sys = "Eres \(agent.name), un asistente conversacional. Responde de forma breve, natural y en español. No menciones herramientas, archivos, current_session.md ni scratchpad."
+        } else {
+            sys = String(buildSystemPrompt(agent: agent, context: context).prefix(6000))
+        }
+        let openaiTools: [[String: Any]]
+        if casual {
+            openaiTools = []
+        } else {
+            let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
+            openaiTools = convertMcpToolsToOpenAI(toolsJson)
+        }
+        print("[Chat] casual=\(casual) tools_enviadas=\(openaiTools.count)")
 
         Task {
             // Construir conversación desde historial persistente + mensaje nuevo
@@ -671,6 +880,16 @@ struct LocalChatView: View {
                 }
 
                 guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
+                    // Turno casual donde el modelo alucinó un tool_call SIN texto (DeepSeek es "agentic").
+                    // Reintento forzando respuesta directa en texto, sin herramientas.
+                    if casual && result.text == nil {
+                        conversation.append(["role": "user", "content": "Responde directamente en texto. NO invoques ninguna herramienta ni tool_call."])
+                        _ = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [], code: code)
+                        if let last = messages.last, !last.isUser { saveMessage(last) }
+                        await flushPending(text: "", tools: pendingTools, code: code)
+                        await MainActor.run { isGenerating = false }
+                        return
+                    }
                     // El streaming ya agregó el mensaje. Solo guardar.
                     if result.text != nil, !(result.text?.isEmpty ?? true) {
                         if let last = messages.last, !last.isUser { saveMessage(last) }
@@ -726,8 +945,16 @@ struct LocalChatView: View {
         let persisted = chatThreads.loadMessages(threadId: threadId, limit: 20)
 
         // Agregar historial previo (sin el último mensaje que es el nuevo user msg)
-        let previousMsgs = persisted.dropLast()
-        for msg in previousMsgs {
+        let previousMsgs = Array(persisted.dropLast())
+
+        // /reset marca un límite de contexto: el modelo solo ve mensajes POSTERIORES
+        // a la última marca "── … ──" (tipo anchor). El historial queda en la DB y en
+        // el render, pero el AI arranca "limpio" en el reset — como un nuevo chat.
+        let startIdx = previousMsgs.lastIndex { m in
+            m.content.hasPrefix("── ") && m.content.hasSuffix(" ──")
+        }.map { $0 + 1 } ?? 0
+
+        for msg in previousMsgs[startIdx...] {
             switch msg.role {
             case "user":
                 conv.append(["role": "user", "content": msg.content])
@@ -763,10 +990,8 @@ struct LocalChatView: View {
     @MainActor
     private func updateMessage(at idx: Int, text: String, code: String) {
         messages[idx] = LocalChatMessage(text: text, isUser: false, agentCode: code)
-        // Guardar incremental cada ~200 chars para no perder progreso
-        if text.count % 200 < 10 {
-            saveMessage(messages[idx])
-        }
+        // Persistencia solo al final del stream (flushPending/saveMessage):
+        // guardar incremental aquí crearía filas parciales duplicadas en DB.
     }
 
     @MainActor
@@ -794,7 +1019,10 @@ struct LocalChatView: View {
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
         var body: [String: Any] = ["model": agent.model, "messages": apiMessages, "stream": true]
-        if !tools.isEmpty {
+        // Si no declaramos herramientas (turno casual), los tool_calls que emita el modelo
+        // son alucinaciones (DeepSeek es "agentic" y a veces los inventa igual). Se ignoran.
+        let allowTools = !tools.isEmpty
+        if allowTools {
             body["tools"] = tools
             body["tool_choice"] = "auto" // DeepSeek: evitar que abandone tool calling
         }
@@ -839,7 +1067,7 @@ struct LocalChatView: View {
                     }
                 }
 
-                if let tcDeltas = delta["tool_calls"] as? [[String: Any]] {
+                if allowTools, let tcDeltas = delta["tool_calls"] as? [[String: Any]] {
                     for tc in tcDeltas {
                         let idx = tc["index"] as? Int ?? 0
                         var cur = tcAccum[idx] ?? (id: "", name: "", args: "")
@@ -894,17 +1122,22 @@ struct LocalChatView: View {
         if agent.writeContent || agent.writeMetadata || agent.writeSystem {
             sys += "También puedes crear/modificar notas y metadatos.\n"
         }
-        sys += "Cuando el usuario pida hacer algo, USA las herramientas disponibles. No digas 'no puedo' sin antes intentar.\n"
+
+        // Cuándo SÍ y cuándo NO usar herramientas: un saludo no amerita auditar el vault.
+        sys += "\n## Cuándo usar herramientas\n"
+        sys += "- Usa herramientas SOLO si el usuario pide explícitamente explorar, buscar, leer, escribir o hacer algo en el vault.\n"
+        sys += "- Para saludos y conversación casual ('hola', 'qué tal'), respondé breve y naturalmente SIN herramientas.\n"
+        sys += "- No explores el vault por defecto ni al iniciar una conversación.\n"
+        sys += "- Máximo 5 rondas de herramientas en un turno. Sé eficiente.\n"
+
         sys += "\n⚠️ REGLA CRÍTICA: Después de usar herramientas, NUNCA te presentes ni saludes de nuevo.\n"
         sys += "Resumí brevemente lo que encontraste y proponé siguientes pasos. La conversación continúa.\n"
         sys += "No digas frases como 'listo para ayudarte', 'soy tu asistente', 'herramientas cargadas', etc.\n"
 
         // Gestión de contexto: scratchpad obligatorio
         sys += "\n## Reglas de Trabajo\n"
-        sys += "- Máximo 5 rondas de herramientas. Sé eficiente.\n"
         sys += "- Al final de CADA respuesta, actualizá current_session.md con [ACUERDO]/[HITO]/[DESCARTADO].\n"
-        sys += "- Al iniciar una conversación, leé current_session.md para recuperar el contexto de la sesión anterior.\n"
-        sys += "- Si no hay current_session.md, buscá en 01-Diario/ la nota más reciente para entender qué se estaba haciendo.\n"
+        sys += "- Solo cargá contexto previo (current_session.md o 01-Diario/) si el usuario lo pide o la tarea lo requiere. NO de forma automática.\n"
         sys += "- NUNCA preguntes '¿en qué te ayudo?' ni frases de bienvenida. La conversación ya empezó.\n"
 
         if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
@@ -956,6 +1189,22 @@ struct LocalChatView: View {
         case .anthropic: return "CL"
         case .openai: return "OP"
         }
+    }
+
+    /// True si el mensaje es un saludo o frase casual que NO amerita herramientas MCP.
+    /// Mensajes con verbos de acción (buscar, leer, crear, resumir…) se consideran trabajo → herramientas permitidas.
+    private func isCasualMessage(_ prompt: String) -> Bool {
+        let t = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return false }
+        let lower = t.lowercased()
+        // Si el usuario pide hacer algo en el vault, permitir herramientas.
+        let actionHints = ["busca", "buscar", "lee", "leer", "crea", "crear", "escrib", "modifica", "resume",
+                           "resum", "analiza", "list", "muestra", "explora", "examina", "revisa", "investiga",
+                           "organiza", "archiva", "mueve", "renombra", "ejecuta", "plan", "nota ", "busqued",
+                           "sintetiza", "genera", "traduce"]
+        if actionHints.contains(where: { lower.contains($0) }) { return false }
+        // Corto y sin verbo de acción → saludo/casual.
+        return lower.count <= 45
     }
 
     // MARK: - Nota IA (Opciones IA para notas)
@@ -1230,7 +1479,10 @@ struct ChatInputView: NSViewRepresentable {
 
 struct ChatMessagesView: NSViewRepresentable {
     let messages: [LocalChatMessage]
+    var preserveAnchorId: Int64? = nil   // anteponer mensajes sin perder el scroll (ancla = primer visible previo)
+    var pendingScrollToId: Int64? = nil  // saltar y resaltar un mensaje (búsqueda)
     var onApplyNote: ((String) -> Void)? = nil
+    var onRequestOlder: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1238,6 +1490,7 @@ struct ChatMessagesView: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         ucc.add(context.coordinator, name: "noteAIApply")
+        ucc.add(context.coordinator, name: "chatRequestOlder")
         config.userContentController = ucc
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
@@ -1246,19 +1499,44 @@ struct ChatMessagesView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onApplyNote = onApplyNote
+        context.coordinator.onRequestOlder = onRequestOlder
+        // Clave de contenido: solo recargar el HTML si los mensajes o los anclajes cambiaron.
+        // Sin esto, cada re-evaluación del body (p. ej. al teclear en el input) recarga todo
+        // el webview y el frame transparente previo queda de "fantasma" detrás del texto nuevo.
+        let key = renderKey()
+        guard key != context.coordinator.lastRenderKey else { return }
+        context.coordinator.lastRenderKey = key
         webView.loadHTMLString(buildHTML(), baseURL: nil)
     }
 
+    private func renderKey() -> String {
+        var k = ""
+        for msg in messages {
+            k += "\(msg.id)|\(msg.isUser)|\(msg.type ?? "")|\(msg.persistedId.map(String.init) ?? "")|\(msg.effectiveDate.timeIntervalSince1970)|\(msg.text)\n"
+        }
+        k += "anchor=\(preserveAnchorId.map(String.init) ?? "nil")|target=\(pendingScrollToId.map(String.init) ?? "nil")"
+        return k
+    }
+
     private func buildHTML() -> String {
-        let msgsHTML = messages.map { msg -> String in
+        // Umbral de "nueva sesión" tipo WhatsApp: gap > 2h entre mensajes → separador de fecha
+        let sessionGap: TimeInterval = 2 * 60 * 60
+        let dateFmt: DateFormatter = {
+            let f = DateFormatter(); f.dateFormat = "d MMM yyyy, HH:mm"; return f
+        }()
+
+        func renderMessage(_ msg: LocalChatMessage) -> String {
             let side = msg.isUser ? "user" : "agent"
             let agentLabel = msg.isUser ? "Tú" : (msg.agentCode ?? "")
             let agentColor = (msg.agentCode == "LC") ? "#34c759" : "#af52de"
+            // data-mid = id persistido en DuckDB (ancla de lazy loading y salto de búsqueda)
+            let mid = msg.persistedId.map(String.init) ?? ""
+            let midAttr = mid.isEmpty ? "" : " data-mid=\"\(mid)\""
 
             // Mensaje de "pensando…"
             if msg.type == "thinking" {
                 return """
-                <div class="msg agent thinking">
+                <div class="msg agent thinking"\(midAttr)>
                   <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
                   <div class="bubble thinking-bubble">\(escaped(msg.text))</div>
                 </div>
@@ -1276,7 +1554,7 @@ struct ChatMessagesView: NSViewRepresentable {
             if msg.type == "tools" {
                 let toolList = msg.toolNames.map { "<li>\(escaped($0))</li>" }.joined()
                 return """
-                <div class="msg agent tools-section">
+                <div class="msg agent tools-section"\(midAttr)>
                   <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
                   <details class="tools-details">
                     <summary class="tools-summary">\(escaped(msg.text))</summary>
@@ -1305,7 +1583,7 @@ struct ChatMessagesView: NSViewRepresentable {
             }
 
             return """
-            <div class="msg \(side)" data-text="\(safeText)">
+            <div class="msg \(side)"\(midAttr) data-text="\(safeText)">
               <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
               <div class="bubble">\(escaped(msg.text))</div>
               <div class="msg-actions">
@@ -1317,7 +1595,16 @@ struct ChatMessagesView: NSViewRepresentable {
             </div>
             <div class="sep"></div>
             """
-        }.joined()
+        }
+
+        var msgsHTML = ""
+        for (i, msg) in messages.enumerated() {
+            // Separador de sesión cuando hay un salto de tiempo respecto al mensaje anterior
+            if i > 0, msg.effectiveDate.timeIntervalSince(messages[i - 1].effectiveDate) > sessionGap {
+                msgsHTML += "<div class=\"anchor-marker\"><span>── \(dateFmt.string(from: msg.effectiveDate)) ──</span></div>"
+            }
+            msgsHTML += renderMessage(msg)
+        }
 
         func escaped(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;")
@@ -1389,6 +1676,10 @@ struct ChatMessagesView: NSViewRepresentable {
           .apply-btn { background: #34c759; color: #fff; border: none; cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; margin-right: 6px; }
           .apply-btn:hover { filter: brightness(1.1); }
 
+          /* Resaltado al saltar a un resultado de búsqueda */
+          .msg.highlight .bubble { animation: hlFade 2.2s ease-out; }
+          @keyframes hlFade { 0% { background: rgba(255,200,0,0.5); box-shadow: 0 0 0 4px rgba(255,200,0,0.3); } 100% { background: transparent; box-shadow: none; } }
+
           /* Mermaid diagrams */
           .mermaid-diagram { margin: 12px 0; padding: 12px; background: rgba(255,255,255,0.6); border-radius: 8px; overflow-x: auto; }
           .mermaid-diagram svg { max-width: 100%; height: auto; }
@@ -1416,7 +1707,50 @@ struct ChatMessagesView: NSViewRepresentable {
             });
             el.innerHTML = html;
           });
-          requestAnimationFrame(() => { window.scrollTo(0, document.body.scrollHeight); });
+
+          // Chat infinito: al llegar arriba, pedir la página anterior.
+          // El listener se "arma" con un pequeño retraso tras el loadHTMLString:
+          // el reload empieza en scrollY=0 y el scrollToMid del ancla genera un
+          // scroll event que, si estuviera armado, dispararía una carga espuria
+          // en bucle. Armar luego evita re-pedir mientras se restaura la posición.
+          var __loadingOlder = false;
+          setTimeout(function() {
+            window.addEventListener('scroll', function() {
+              if (window.scrollY < 120 && !__loadingOlder) {
+                __loadingOlder = true;
+                window.webkit.messageHandlers.chatRequestOlder.postMessage('');
+              }
+            }, { passive: true });
+          }, 500);
+
+          function scrollToBottom() { window.scrollTo(0, document.body.scrollHeight); }
+          function scrollToMid(id) {
+            var el = document.querySelector('[data-mid="' + id + '"]');
+            // block:'start' (no 'center'): el ancla era el primer mensaje visible
+            // previo; dejarlo arriba es fiel a la posición que el usuario tenía,
+            // sin el "salto visual" de centrarlo.
+            if (el) el.scrollIntoView({ block: 'start' });
+            else scrollToBottom();
+          }
+
+          var anchorId = \(preserveAnchorId.map(String.init) ?? "null");
+          var targetId = \(pendingScrollToId.map(String.init) ?? "null");
+          if (targetId) {
+            // Salto desde búsqueda: centrar y resaltar el mensaje
+            setTimeout(function() {
+              var el = document.querySelector('[data-mid="' + targetId + '"]');
+              if (el) {
+                el.scrollIntoView({ block: 'center' });
+                el.classList.add('highlight');
+                setTimeout(function() { el.classList.remove('highlight'); }, 2300);
+              } else { scrollToBottom(); }
+            }, 0);
+          } else if (anchorId) {
+            // Anteponer mensajes viejos: anclar al primer mensaje visible previo
+            setTimeout(function() { scrollToMid(anchorId); }, 0);
+          } else {
+            requestAnimationFrame(scrollToBottom);
+          }
         </script>
         </body></html>
         """
@@ -1424,10 +1758,17 @@ struct ChatMessagesView: NSViewRepresentable {
 
     class Coordinator: NSObject, WKScriptMessageHandler {
         var onApplyNote: ((String) -> Void)? = nil
+        var onRequestOlder: (() -> Void)? = nil
+        // Clave del último HTML renderizado: si el contenido no cambió, se evita
+        // recargar loadHTMLString (el body de LocalChatView re-evalúa en cada tecla
+        // del input y sin esta cache el webview transparente mostraba "textos en el fondo").
+        var lastRenderKey: String = ""
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "noteAIApply", let id = message.body as? String {
                 onApplyNote?(id)
+            } else if message.name == "chatRequestOlder" {
+                onRequestOlder?()
             }
         }
     }
@@ -1503,5 +1844,48 @@ struct PermBadge: View {
         Text(label)
             .font(.system(size: 9, weight: .bold, design: .monospaced))
             .foregroundColor(allowed ? .green : .secondary.opacity(0.4))
+    }
+}
+
+// MARK: - Resultados de búsqueda (chat infinito)
+
+struct ChatSearchResultsList: View {
+    let results: [PersistentMessage]
+    var onSelect: (Int64) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(results.count) resultado(s)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 4)
+                ForEach(results, id: \.id) { msg in
+                    Button(action: {
+                        if let id = msg.id { onSelect(id) }
+                    }) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(snippet(msg.content))
+                                .font(.caption)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .foregroundColor(.primary)
+                            Text(String(msg.timestamp.prefix(16)))
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 3)
+                    }
+                    .buttonStyle(.plain)
+                    Divider().opacity(0.25)
+                }
+            }
+        }
+    }
+
+    private func snippet(_ s: String) -> String {
+        let flat = s.replacingOccurrences(of: "\n", with: " ")
+        return flat.count > 90 ? String(flat.prefix(90)) + "…" : flat
     }
 }
