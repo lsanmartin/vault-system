@@ -100,6 +100,7 @@ pub trait UiActionListener: Send + Sync {
     fn chat_reset(&self);
     fn chat_clear(&self);
     fn chat_compact(&self);
+    fn get_ui_state(&self) -> String;
 }
 
 static UI_LISTENER: Lazy<Mutex<Option<Box<dyn UiActionListener>>>> = Lazy::new(|| Mutex::new(None));
@@ -1146,15 +1147,16 @@ pub fn query_children(parent_path: String, ignore_patterns: Vec<String>) -> Vec<
     let canonical = canonicalize_path(&parent_path);
     let prefix = if canonical.ends_with('/') { canonical.clone() } else { format!("{}/", canonical) };
 
+    // Escapamos '_' y '%' en el prefix para el LIKE
+    let escaped_prefix = prefix.replace('_', "\\_").replace('%', "\\%");
     let mut sql = format!(
-        "SELECT n.id, n.title, n.path, '' as content, n.is_dir FROM notes n WHERE n.path LIKE '{}%'",
-        prefix
+        "SELECT n.id, n.title, n.path, '' as content, n.is_dir FROM notes n WHERE n.path LIKE '{}%' ESCAPE '\\'",
+        escaped_prefix
     );
     for p in &ignore_patterns {
-        sql.push_str(&format!(" AND n.path NOT LIKE '%{}%'", p));
+        let escaped_p = p.replace('_', "\\_").replace('%', "\\%");
+        sql.push_str(&format!(" AND n.path NOT LIKE '%{}%' ESCAPE '\\'", escaped_p));
     }
-    // Solo hijos directos: el path no debe contener otro '/' después del prefix
-    sql.push_str(&format!(" AND n.path NOT LIKE '{}%/%'", prefix));
     sql.push_str(" ORDER BY n.is_dir DESC, n.title ASC");
 
     let mut stmt = match conn.prepare(&sql) { Ok(s) => s, Err(_) => return Vec::new() };
@@ -1167,7 +1169,18 @@ pub fn query_children(parent_path: String, ignore_patterns: Vec<String>) -> Vec<
             is_dir: row.get(4).unwrap_or(false),
         })
     }) { Ok(i) => i, Err(_) => return Vec::new() };
-    iter.filter_map(|n| n.ok()).collect()
+    iter.filter_map(|n| {
+        let record = n.ok()?;
+        // Filtrar en memoria: solo hijos directos.
+        // Verificamos si la porción de la ruta después del prefijo contiene algún '/'
+        if record.path.len() > prefix.len() {
+            let remainder = &record.path[prefix.len()..];
+            if remainder.contains('/') {
+                return None;
+            }
+        }
+        Some(record)
+    }).collect()
 }
 
 #[uniffi::export]
@@ -2312,6 +2325,11 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         }
                     },
                     {
+                        "name": "vault_ui_get_state",
+                        "description": "Obtiene el estado actual de la interfaz de usuario: workspaces disponibles, carpeta seleccionada actualmente, y notas abiertas en el editor.",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
                         "name": "vault_ui_set_editor_mode",
                         "description": "Cambia el modo de visualizacion del editor en pantalla (ej. 'edit', 'preview').",
                         "inputSchema": {
@@ -2733,6 +2751,17 @@ pub fn mcp_handle_request(json_request: String) -> String {
                         if let Some(listener) = guard.as_ref() {
                             listener.open_note(path.to_string());
                             "Comando de UI de apertura de nota enviado con exito.".to_string()
+                        } else {
+                            "Error: No hay una instancia de la aplicacion macOS escuchando eventos de interfaz.".to_string()
+                        }
+                    } else {
+                        "Error al adquirir bloqueo del listener de interfaz.".to_string()
+                    }
+                },
+                "vault_ui_get_state" => {
+                    if let Ok(guard) = UI_LISTENER.lock() {
+                        if let Some(listener) = guard.as_ref() {
+                            listener.get_ui_state()
                         } else {
                             "Error: No hay una instancia de la aplicacion macOS escuchando eventos de interfaz.".to_string()
                         }

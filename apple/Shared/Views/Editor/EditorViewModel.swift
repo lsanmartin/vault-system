@@ -110,6 +110,8 @@ func fastParentPath(for path: String) -> String {
 }
 
 class EditorViewModel: ObservableObject {
+    static weak var shared: EditorViewModel?
+    
     @Published var tabs: [TabItem] = []
     @Published var activeTabId: String? {
         didSet {
@@ -285,6 +287,7 @@ class EditorViewModel: ObservableObject {
     @Published var telemetryLogs: [String] = []
     
     init() {
+        Self.shared = self
         _ = startIpcServer()
         
         $searchText
@@ -473,12 +476,7 @@ class EditorViewModel: ObservableObject {
                 self.allFolders = newFolders
                 self.allNotes = newNotes
                 
-                addSwiftTelemetryLog(log: "refreshNotes (main): allFolders=\(newFolders.count), allNotes=\(newNotes.count)")
-                if let newNote = newNotes.first(where: { $0.title.contains("Nueva Nota") }) {
-                    addSwiftTelemetryLog(log: "refreshNotes: ¡Nueva Nota ENCONTRADA en allNotes! Path=\(newNote.path)")
-                } else {
-                    addSwiftTelemetryLog(log: "refreshNotes: Nueva Nota NO ESTÁ en allNotes")
-                }
+                // addSwiftTelemetryLog(log: "refreshNotes (main): allFolders=\(newFolders.count), allNotes=\(newNotes.count)")
                 
                 print("VaultSystem DEBUG: allFolders count: \(newFolders.count), allNotes count: \(newNotes.count)")
                 print("VaultSystem DEBUG: childrenByParent keys count: \(newChildrenMap.keys.count)")
@@ -495,7 +493,7 @@ class EditorViewModel: ObservableObject {
                 }
                 self.childrenByParent = newChildrenMap
                 
-                addSwiftTelemetryLog(log: "refreshNotes: Llamando a updateGridForCurrentPath. currentPath=\(self.currentPath)")
+                // addSwiftTelemetryLog(log: "refreshNotes: Llamando a updateGridForCurrentPath. currentPath=\(self.currentPath)")
                 self.updateGridForCurrentPath()
             }
         }
@@ -598,8 +596,7 @@ class EditorViewModel: ObservableObject {
             // Query optimizada: solo hijos directos del path actual
             let ignore = showSystemFiles ? [] : ["_memory.md", "_metadata.md", "agent.md", ".git", "target/", "node_modules/"]
             results = queryChildren(parentPath: normalizedCurrentPath, ignorePatterns: ignore)
-            addSwiftTelemetryLog(log: "updateGrid: currentPath=\(normalizedCurrentPath). results=\(results.count)")
-            print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
+            // print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
 
             // FileManager overlay: agrega archivos no-.md cuando el toggle está activo
             if showAllFiles && !normalizedCurrentPath.isEmpty {

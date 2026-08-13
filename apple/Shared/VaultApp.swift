@@ -184,6 +184,40 @@ class AppUiActionListener: UiActionListener {
             NotificationCenter.default.post(name: NSNotification.Name("ChatCompact"), object: nil)
         }
     }
+    
+    func getUiState() -> String {
+        var result = ""
+        let fetchState = {
+            let workspaces = WorkspaceManager.shared.locations.map { $0.path }
+            let openTabs = EditorViewModel.shared?.tabs.map { $0.id } ?? []
+            let currentPath = EditorViewModel.shared?.currentPath ?? ""
+            let activeTabId = EditorViewModel.shared?.activeTabId ?? ""
+            
+            let stateDict: [String: Any] = [
+                "workspaces": workspaces,
+                "current_folder": currentPath,
+                "open_tabs": openTabs,
+                "active_tab": activeTabId
+            ]
+            
+            if let data = try? JSONSerialization.data(withJSONObject: stateDict, options: .prettyPrinted),
+               let json = String(data: data, encoding: .utf8) {
+                result = json
+            } else {
+                result = "{ \"error\": \"No se pudo serializar el estado UI\" }"
+            }
+        }
+        
+        if Thread.isMainThread {
+            fetchState()
+        } else {
+            DispatchQueue.main.sync {
+                fetchState()
+            }
+        }
+        
+        return result
+    }
 }
 
 /// Intercepta Cmd+Q para que el shutdown del workspace (consolidación + git snapshot)
