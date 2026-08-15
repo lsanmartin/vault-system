@@ -25,6 +25,33 @@ class WebViewModel: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            if let fragment = url.fragment, !fragment.isEmpty {
+                let targetId = fragment.removingPercentEncoding ?? fragment
+                let escapedTarget = targetId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                let js = ##"""
+                (function() {
+                    var target = "\##(escapedTarget)";
+                    var el = document.getElementById(target) || document.getElementsByName(target)[0];
+                    if (!el) {
+                        var headings = document.querySelectorAll("h1, h2, h3, h4, h5, h6, [id]");
+                        for (var i = 0; i < headings.length; i++) {
+                            var h = headings[i];
+                            var id = h.id || h.innerText.toLowerCase().replace(/[^a-z0-9áéíóúñü\s-]/g, "").trim().replace(/\s+/g, "-");
+                            if (id === target || h.innerText.trim() === target) {
+                                el = h;
+                                break;
+                            }
+                        }
+                    }
+                    if (el) {
+                        el.scrollIntoView({ behavior: "smooth" });
+                    }
+                })();
+                """##
+                webView.evaluateJavaScript(js, completionHandler: nil)
+                decisionHandler(.cancel)
+                return
+            }
             onNavigate?(url)
             decisionHandler(.cancel)
             return

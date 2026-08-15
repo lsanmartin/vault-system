@@ -116,7 +116,10 @@ struct CPMTaskBoardView: View {
     // MARK: - Kanban file operations
 
     private func findFirstKanban() -> String? {
+        // Protocolo: kanban.md (minúsculas). Fallback a KANBAN.md por compatibilidad.
         let paths = [
+            "/Users/lsanmartin/dev/vault-system/kanban.md",
+            "/Users/lsanmartin/dev/volley51app/kanban.md",
             "/Users/lsanmartin/dev/vault-system/KANBAN.md",
             "/Users/lsanmartin/dev/volley51app/KANBAN.md"
         ]

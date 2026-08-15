@@ -177,46 +177,49 @@ class WorkspaceManager: ObservableObject {
     /// Fuerza la descarga de iCloud para todos los archivos en lotes throttleados.
     /// Cada lote de 20 archivos, con 0.5s de pausa entre lotes.
     func hydrateAll() {
-        logger.info("Iniciando hidratación masiva (throttle: 20 archivos/lote)...")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            self.logger.info("Iniciando hidratación masiva (throttle: 20 archivos/lote)...")
 
-        let batchSize = 20
-        let batchDelay: useconds_t = 500_000 // 0.5s
+            let batchSize = 20
+            let batchDelay: useconds_t = 500_000 // 0.5s
 
-        for location in locations {
-            guard let url = location.url else { continue }
+            for location in self.locations {
+                guard let url = location.url else { continue }
 
-            let enumerator = FileManager.default.enumerator(
-                at: url,
-                includingPropertiesForKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            )
+                let enumerator = FileManager.default.enumerator(
+                    at: url,
+                    includingPropertiesForKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                )
 
-            var pending: [URL] = []
+                var pending: [URL] = []
 
-            while let fileURL = enumerator?.nextObject() as? URL {
-                do {
-                    let values = try fileURL.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
-                    if values.isUbiquitousItem ?? false {
-                        if values.ubiquitousItemDownloadingStatus != .current {
-                            pending.append(fileURL)
-                            if pending.count >= batchSize {
-                                flushDownloadBatch(pending)
-                                pending.removeAll()
-                                usleep(batchDelay)
+                while let fileURL = enumerator?.nextObject() as? URL {
+                    do {
+                        let values = try fileURL.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+                        if values.isUbiquitousItem ?? false {
+                            if values.ubiquitousItemDownloadingStatus != .current {
+                                pending.append(fileURL)
+                                if pending.count >= batchSize {
+                                    self.flushDownloadBatch(pending)
+                                    pending.removeAll()
+                                    usleep(batchDelay)
+                                }
                             }
                         }
+                    } catch {
+                        self.logger.error("Error al hidratar \(fileURL.path): \(error.localizedDescription)")
                     }
-                } catch {
-                    logger.error("Error al hidratar \(fileURL.path): \(error.localizedDescription)")
+                }
+
+                // Último lote parcial
+                if !pending.isEmpty {
+                    self.flushDownloadBatch(pending)
                 }
             }
-
-            // Último lote parcial
-            if !pending.isEmpty {
-                flushDownloadBatch(pending)
-            }
+            self.logger.info("Hidratación completada.")
         }
-        logger.info("Hidratación completada.")
     }
 
     private func flushDownloadBatch(_ batch: [URL]) {

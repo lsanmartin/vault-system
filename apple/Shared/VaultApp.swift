@@ -74,7 +74,9 @@ struct VaultApp: App {
                     let daemonStatus = startCognitiveDaemon()
                     print("Daemon: \(daemonStatus)")
 
-                    // Inicializar el Cerebro Local y disparar la digestión inicial
+                    // Inicializar el Model Manager (catálogo + escaneo de disco +
+                    // migración legacy) y el Cerebro Local con la digestión inicial
+                    _ = ModelManager.shared
                     LocalBrain.shared.updatePendingCount()
                     LocalBrain.shared.startDigestion()
 

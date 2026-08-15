@@ -122,13 +122,24 @@ app: xcode-build
 .PHONY: install
 install: deploy
 
-release: preflight build-universal xcode-build deploy
+release: ai-balance-start preflight build-universal xcode-build deploy ai-balance-success
 	@echo "=== Release Pipeline Completo ==="
 	@echo "  ✅ Preflight pasado"
 	@echo "  ✅ Rust Core compilado"
 	@echo "  ✅ XCFramework empaquetado"
 	@echo "  ✅ App archivada y desplegada"
 	@echo "  → /Applications/$(APP_NAME).app"
+
+.PHONY: ai-balance-start ai-balance-success
+ai-balance-start:
+	@mkdir -p ~/.ai-balance/tasks
+	@touch ~/.ai-balance/tasks/vault_build.active
+	@rm -f ~/.ai-balance/tasks/vault_build.success ~/.ai-balance/tasks/vault_build.error
+
+ai-balance-success:
+	@rm -f ~/.ai-balance/tasks/vault_build.active
+	@touch ~/.ai-balance/tasks/vault_build.success
+	@sleep 5 && rm -f ~/.ai-balance/tasks/vault_build.success &
 
 
 .PHONY: export-telemetry

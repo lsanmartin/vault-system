@@ -19,9 +19,222 @@ struct LocalChatMessage: Identifiable, Equatable {
     static func == (lhs: LocalChatMessage, rhs: LocalChatMessage) -> Bool { lhs.id == rhs.id }
 }
 
+enum AgentChip: Hashable {
+    case local
+    case external(ExternalAgentConfig)
+
+    var displayName: String {
+        switch self {
+        case .local: return "Local"
+        case .external(let a): return a.name
+        }
+    }
+
+    var detailName: String {
+        switch self {
+        case .local: return "Gemma 4"
+        case .external(let a): return a.provider.rawValue
+        }
+    }
+
+    /// Código estable para DB (no cambia aunque el usuario renombre el agente).
+    /// Es la clave de thread de `ChatThreadManager`; para etiquetas visibles
+    /// (DS/CL/OP) los flujos externos usan `ChatAgentSupport.agentCode(for:)`.
+    var agentCode: String {
+        switch self {
+        case .local: return "LC"
+        case .external(let a): return "ext_\(a.id.prefix(8))"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .local: return .green
+        case .external(let a):
+            switch a.provider {
+            case .deepseek: return .blue
+            case .anthropic: return .orange
+            case .openai: return .teal
+            }
+        }
+    }
+}
+
+/// Sidebar del chat: header global de configuración + N secciones verticales,
+/// una por agente (Local + cada agente externo configurado). Cada sección
+/// (`AgentChatSection`) es un chat independiente con su propio thread, input,
+/// feed WebView y estado. Al agregar un agente externo la lista pasa de 2 a 3
+/// secciones automáticamente (dividen la altura por igual).
 struct LocalChatView: View {
     @ObservedObject var viewModel: EditorViewModel
-    @StateObject private var brain = LocalBrain.shared
+    @ObservedObject private var agentManager = ExternalAgentManager.shared
+
+    @State private var showAgentSettings = false
+    @State private var showModelManager = false
+    /// Pesos de altura por agentCode (proporciones entre secciones, persistidas).
+    /// Vacio = todos iguales. El tirador entre secciones los ajusta y se guardan en UserDefaults.
+    @State private var weights: [String: Double] = [:]
+
+    private static let weightsKey = "vault_chat_weights"
+    private static let minWeight = 0.12   // una sección nunca queda por debajo de esta proporción
+    private static let minSectionHeight: CGFloat = 100   // piso de alto por sección (adaptativo si la ventana es corta)
+    private static let bottomInset: CGFloat = 12          // margen inferior tras el último chat (evita input cortado)
+
+    var chips: [AgentChip] {
+        [.local] + agentManager.agents.map { .external($0) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header global de configuración (no pertenece a ninguna sección)
+            HStack(spacing: 8) {
+                Button(action: { showAgentSettings = true }) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Configurar agentes externos")
+
+                Button(action: { showModelManager = true }) {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Modelos locales (Cerebro MLX)")
+
+                Spacer()
+
+                Text("\(chips.count) \(chips.count == 1 ? "chat" : "chats")")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Secciones por agente: cada una ocupa su proporción de la altura.
+            // Entre secciones hay un tirador que redimensiona la proporción.
+            GeometryReader { geo in
+                // `total` ya descuenta el margen inferior: las secciones nunca llegan al borde de la ventana.
+                let total = max(geo.size.height - Self.bottomInset, 1)
+                let codes = chips.map { $0.agentCode }
+                let sum = codes.reduce(0.0) { acc, c in acc + (weights[c] ?? 1.0) }
+                // Piso adaptativo: si la ventana es tan corta que n×100 supera el alto, el piso baja
+                // para que las secciones sumen ≤ total (nunca desbordan ni quedan traslapadas).
+                let minSection = min(Self.minSectionHeight, total / CGFloat(max(codes.count, 1)))
+                VStack(spacing: 0) {
+                    ForEach(Array(chips.enumerated()), id: \.element) { i, chip in
+                        AgentChatSection(agent: chip, viewModel: viewModel)
+                            .frame(height: max(minSection, total * (weights[chip.agentCode] ?? 1.0) / sum))
+                        if i < chips.count - 1 {
+                            ChatSectionDivider { deltaPts in
+                                resizeWeights(index: i, codes: codes, deltaPts: deltaPts, total: total)
+                            }
+                        }
+                    }
+                    // Margen inferior tras el último chat: el input no queda pegado ni cortado al borde.
+                    Spacer(minLength: Self.bottomInset)
+                }
+            }
+        }
+        .frame(minWidth: 280, maxWidth: 550)
+        .sheet(isPresented: $showAgentSettings) {
+            AgentSettingsView()
+                .frame(width: 560, height: 780)
+        }
+        .sheet(isPresented: $showModelManager) {
+            ModelManagerView()
+                .frame(width: 620, height: 720)
+        }
+        .onAppear {
+            weights = loadWeights()
+        }
+    }
+
+    // MARK: - Proporciones (tirador entre secciones)
+
+    private func loadWeights() -> [String: Double] {
+        guard let data = UserDefaults.standard.data(forKey: Self.weightsKey),
+              let stored = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
+        return stored
+    }
+
+    private func saveWeights(_ w: [String: Double]) {
+        if let data = try? JSONEncoder().encode(w) {
+            UserDefaults.standard.set(data, forKey: Self.weightsKey)
+        }
+    }
+
+    /// Ajusta el peso relativo de las secciones `i` e `i+1` (la del tirador arrastrado).
+    /// `deltaPts` > 0 → la sección superior crece (la inferior se encoge), y viceversa.
+    /// La suma de pesos se conserva; el cambio se persiste (proporción sobrevive al reinicio).
+    private func resizeWeights(index i: Int, codes: [String], deltaPts: CGFloat, total: CGFloat) {
+        guard total > 0, i >= 0, i < codes.count - 1 else { return }
+        let frac = Double(deltaPts / total)
+        var w = weights
+        for c in codes where w[c] == nil { w[c] = 1.0 }
+        let a = codes[i], b = codes[i + 1]
+        let na = (w[a] ?? 1.0) + frac
+        let nb = (w[b] ?? 1.0) - frac
+        guard na > Self.minWeight, nb > Self.minWeight else { return }
+        w[a] = na
+        w[b] = nb
+        weights = w
+        saveWeights(w)
+    }
+}
+
+/// Tirador horizontal entre dos secciones del chat: drag vertical redimensiona la
+/// proporción (la sección superior crece/encoge según la dirección del arrastre).
+struct ChatSectionDivider: View {
+    var onDrag: (CGFloat) -> Void
+    @State private var lastTranslation: CGFloat = 0
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(NSColor.windowBackgroundColor))
+            Rectangle()
+                .fill(Color.secondary.opacity(0.18))
+                .frame(height: 1)
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle()
+                        .fill(Color.secondary.opacity(0.45))
+                        .frame(width: 3, height: 3)
+                }
+            }
+        }
+        .frame(height: 10)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    let d = value.translation.height - lastTranslation
+                    lastTranslation = value.translation.height
+                    if d != 0 { onDrag(d) }
+                }
+                .onEnded { _ in lastTranslation = 0 }
+        )
+        .help("Arrastrar para redimensionar")
+    }
+}
+
+/// Chat independiente de UN agente: header propio (identidad + power + búsqueda
+/// + trash), barra de permisos, opciones de Nota IA, feed WebView e input. Todo
+/// el estado (mensajes, input, generación, búsqueda, lazy-loading) es por sección
+/// y los threads en DuckDB ya están keyed por `agent.agentCode`.
+struct AgentChatSection: View {
+    let agent: AgentChip
+    @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var brain = LocalBrain.shared
     @ObservedObject private var agentManager = ExternalAgentManager.shared
     @ObservedObject private var chatThreads = ChatThreadManager.shared
     @EnvironmentObject var workspaceManager: WorkspaceManager
@@ -30,8 +243,8 @@ struct LocalChatView: View {
     @State private var inputText: String = ""
     @State private var isGenerating: Bool = false
     @State private var generationTask: Task<Void, Never>? = nil
-    @State private var selectedAgent: AgentChip = .local
-    @State private var showAgentSettings = false
+    @State private var streamMsgID: UUID? = nil   // mensaje en streaming (append 1er chunk + update por id)
+    @State private var agentStateEpoch = 0        // fuerza re-render del header al togglear agentes externos
 
     // Lazy loading (chat infinito tipo WhatsApp)
     @State private var hasMoreOlder = true
@@ -44,17 +257,15 @@ struct LocalChatView: View {
     @State private var searchText = ""
     @State private var searchResults: [PersistentMessage] = []
 
-    // Opciones IA para notas
+    // Opciones IA para notas (preferencias globales, compartidas entre secciones)
     @AppStorage("vault_noteai_autoApply") private var noteAIAutoApply = false
     @AppStorage("vault_noteai_mode") private var noteAIModeRaw = "Insertar al final"
     @State private var noteAITitleOverride = ""
+    @State private var notePanelExpanded = false   // panel de Opciones IA desplegado (header en una línea)
 
     private var applyMode: NoteAIMode {
         NoteAIMode(rawValue: noteAIModeRaw) ?? .insertAtEnd
     }
-
-    /// Máximo de caracteres de nota que se envían al modelo (evita exceder límites de tokens).
-    private let maxNoteContentForAI = 12_000
 
     /// Índice del tab activo en `viewModel.tabs`, o nil si no hay nota abierta.
     private var activeTabIndex: Int? {
@@ -69,108 +280,92 @@ struct LocalChatView: View {
         }
     }
 
-    enum AgentChip: Hashable {
-        case local
-        case external(ExternalAgentConfig)
-
-        var displayName: String {
-            switch self {
-            case .local: return "Local"
-            case .external(let a): return a.name
-            }
-        }
-
-        var detailName: String {
-            switch self {
-            case .local: return "Gemma 4"
-            case .external(let a): return a.provider.rawValue
-            }
-        }
-
-        /// Código estable para DB (no cambia aunque el usuario renombre el agente)
-        var agentCode: String {
-            switch self {
-            case .local: return "LC"
-            case .external(let a): return "ext_\(a.id.prefix(8))"
-            }
-        }
-
-        var color: Color {
-            switch self {
-            case .local: return .green
-            case .external(let a):
-                switch a.provider {
-                case .deepseek: return .blue
-                case .anthropic: return .orange
-                case .openai: return .teal
-                }
-            }
-        }
-    }
-
-    var chips: [AgentChip] {
-        [.local] + agentManager.agents.map { .external($0) }
+    /// Contenido de la nota activa (contexto para el modelo), o "" si no hay tab abierta.
+    private func activeNoteContext() -> String {
+        guard let id = viewModel.activeTabId,
+              let tab = viewModel.tabs.first(where: { $0.id == id }) else { return "" }
+        return tab.content
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                // Utilidades (izquierda)
-                HStack(spacing: 8) {
-                    // Toggle on/off para cualquier agente
-                    Button(action: { toggleSelectedAgent() }) {
-                        Image(systemName: isSelectedAgentEnabled ? "power.circle.fill" : "power")
-                            .font(.system(size: 13))
-                            .foregroundColor(isSelectedAgentEnabled ? .green : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(isSelectedAgentEnabled ? "Desactivar \(selectedAgent.displayName)" : "Activar \(selectedAgent.displayName)")
+            // Header de la sección — UNA línea: identidad + permisos inline + acciones.
+            // El panel de Opciones IA se despliega al tocar sparkles ▾ (no ocupa alto si está cerrado).
+            HStack(spacing: 5) {
+                // Grupo izquierdo (identidad + permisos): prioridad BAJA → comprime/trunca
+                // cuando el sidebar es angosto, para que las acciones de la derecha
+                // NUNCA queden fuera del borde (antes el fixedSize las empujaba y no se podían tocar).
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(agent.color)
+                        .frame(width: 7, height: 7)
+                    Text(agent.displayName)
+                        .font(.subheadline).bold()
+                        .lineLimit(1)              // comprime y trunca antes que romper la línea
+                    Text(agent.detailName)
+                        .font(.caption2).foregroundColor(.secondary)
+                        .lineLimit(1)
+                    PermissionsBar(agent: agent)   // badges inline (comprimibles, no fixedSize)
+                        .layoutPriority(0)
+                }
+                .id(agentStateEpoch)   // re-crea el header al togglear agentes externos (UserDefaults no observa)
+                .layoutPriority(0)
 
-                    Button(action: { showAgentSettings = true }) {
-                        Image(systemName: "brain.head.profile")
-                            .font(.system(size: 13))
+                Spacer(minLength: 4)
+
+                // Grupo de acciones: prioridad ALTA → siempre recibe su ancho completo.
+                HStack(spacing: 4) {
+                    // Opciones IA para notas (desplegable desde el header)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.12)) { notePanelExpanded.toggle() }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 9))
+                                .foregroundColor(notePanelExpanded ? .purple : .secondary)
+                            Image(systemName: notePanelExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 7, weight: .bold))
+                        }
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
-                    .help("Configurar agentes externos")
+                    .help("Opciones IA para notas")
 
-                    Button(action: {
-                        messages = [LocalChatMessage(text: "Chat reiniciado.", isUser: false, agentCode: selectedAgent.agentCode)]
-                    }) {
-                        Image(systemName: "trash")
+                    // Toggle on/off de ESTE agente
+                    Button(action: { toggleAgent() }) {
+                        Image(systemName: isAgentEnabled ? "power.circle.fill" : "power")
                             .font(.system(size: 12))
+                            .foregroundColor(isAgentEnabled ? .green : .secondary)
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    .help("/clear — Limpiar vista")
+                    .help(isAgentEnabled ? "Desactivar \(agent.displayName)" : "Activar \(agent.displayName)")
 
+                    // Búsqueda (del thread de esta sección)
                     Button(action: {
                         withAnimation { isSearching.toggle() }
                         if !isSearching { searchText = ""; searchResults = [] }
                     }) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 13))
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(isSearching ? .accentColor : .secondary)
                     .help("Buscar en el chat")
-                }
 
-                Spacer()
-
-                // Agente activo
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(selectedAgent.color)
-                        .frame(width: 8, height: 8)
-                    Text(selectedAgent.displayName)
-                        .font(.headline).bold()
-                    Text(selectedAgent.detailName)
-                        .font(.caption).foregroundColor(.secondary)
+                    // /clear de esta sección
+                    Button(action: {
+                        messages = [LocalChatMessage(text: "Chat reiniciado.", isUser: false, agentCode: agent.agentCode)]
+                    }) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .help("/clear — Limpiar vista")
                 }
+                .layoutPriority(1)
             }
-            .padding(.horizontal).padding(.vertical, 8)
+            .padding(.horizontal).padding(.vertical, 3)
             .background(Color(NSColor.windowBackgroundColor))
 
             // Buscador (chat infinito, tipo WhatsApp)
@@ -196,24 +391,21 @@ struct LocalChatView: View {
                 .transition(.move(edge: .top))
             }
 
-            // Barra de permisos
-            PermissionsBar(agent: selectedAgent)
-                .padding(.horizontal, 12).padding(.bottom, 4)
+            // Panel de Opciones IA para notas (desplegable desde el header)
+            if notePanelExpanded {
+                NoteAIOptionsPanel(
+                    viewModel: viewModel,
+                    isEnabled: isAgentEnabled,
+                    autoApply: $noteAIAutoApply,
+                    modeRaw: $noteAIModeRaw,
+                    titleOverride: $noteAITitleOverride,
+                    onRun: { instruction, title in
+                        runNoteAIAction(instruction: instruction, actionTitle: title)
+                    }
+                )
+                .padding(.horizontal, 10).padding(.bottom, 4)
                 .background(Color(NSColor.windowBackgroundColor))
-
-            // Opciones IA para notas (colapsable)
-            NoteAIOptionsPanel(
-                viewModel: viewModel,
-                isEnabled: isSelectedAgentEnabled,
-                autoApply: $noteAIAutoApply,
-                modeRaw: $noteAIModeRaw,
-                titleOverride: $noteAITitleOverride,
-                onRun: { instruction, title in
-                    runNoteAIAction(instruction: instruction, actionTitle: title)
-                }
-            )
-            .padding(.horizontal, 12).padding(.bottom, 4)
-            .background(Color(NSColor.windowBackgroundColor))
+            }
 
             Divider()
 
@@ -242,47 +434,23 @@ struct LocalChatView: View {
 
             Divider()
 
-            // Píldoras de agentes
-            HStack(spacing: 4) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(chips, id: \.self) { chip in
-                            Button(action: { selectedAgent = chip }) {
-                                HStack(spacing: 3) {
-                                    Text(chip.displayName)
-                                        .font(.caption).bold().monospaced()
-                                }
-                                .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(selectedAgent == chip ? chip.color : Color.secondary.opacity(0.1))
-                                .foregroundColor(selectedAgent == chip ? .white : .primary)
-                                .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }.padding(.horizontal, 8)
-                }
-                .frame(height: 24)
-            }
-            .padding(.vertical, 4)
-            .background(Color(NSColor.windowBackgroundColor))
-
             // Acciones rápidas de IA para notas
             NoteAIQuickActionsRow(
                 actions: NoteAIAction.all,
-                isEnabled: isSelectedAgentEnabled,
+                isEnabled: isAgentEnabled,
                 onAction: { action in
                     runNoteAIAction(instruction: action.instruction, actionTitle: action.title)
                 }
             )
-            .padding(.horizontal, 8).padding(.vertical, 2)
+            .padding(.horizontal, 8).padding(.vertical, 1)
             .background(Color(NSColor.windowBackgroundColor))
 
             // Input
             HStack(alignment: .bottom, spacing: 8) {
-                ChatInputView(text: $inputText, disabled: !isSelectedAgentEnabled, onCommit: send)
-                    .frame(minHeight: 72, maxHeight: 240)
+                ChatInputView(text: $inputText, disabled: !isAgentEnabled, onCommit: send)
+                    .frame(minHeight: 44, maxHeight: 200)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(4)
+                    .padding(3)
                     .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
 
                 if isGenerating {
@@ -299,18 +467,14 @@ struct LocalChatView: View {
                                 ? .secondary.opacity(0.3) : .accentColor)
                     }
                     .buttonStyle(.plain)
-                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isSelectedAgentEnabled)
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isAgentEnabled)
                 }
             }
-            .padding()
+            .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Color(NSColor.windowBackgroundColor))
         }
-        .frame(minWidth: 280, maxWidth: 550)
-        .sheet(isPresented: $showAgentSettings) {
-            AgentSettingsView()
-                .frame(width: 560, height: 780)
-        }
-        .onAppear { loadThread(for: selectedAgent) }
+        .overlay(alignment: .top) { Divider() }
+        .onAppear { loadThread() }
         .onDisappear {
             DispatchQueue.global().async { saveCurrentThreadMessages() }
         }
@@ -319,19 +483,36 @@ struct LocalChatView: View {
                 saveMessage(last)
             }
         }
-        .onChange(of: selectedAgent) { oldValue, newValue in
-            loadThread(for: newValue)
-        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatReset"))) { _ in
-            createAnchorNote(for: selectedAgent)
-            messages = [LocalChatMessage(text: "Sesión reiniciada. Ancla creada en _inbox/.", isUser: false, agentCode: selectedAgent.agentCode)]
+            createAnchorNote(for: agent)
+            messages = [LocalChatMessage(text: "Sesión reiniciada. Ancla creada en _inbox/.", isUser: false, agentCode: agent.agentCode)]
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatClear"))) { _ in
             messages.removeAll()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatCompact"))) { _ in
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
-            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: selectedAgent.agentCode)]
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: agent.agentCode)]
+        }
+        // @mención desde otra sección → este agente la envía en su propio thread
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ChatMentionRedirect"))) { notification in
+            guard let code = notification.userInfo?["agentCode"] as? String,
+                  let text = notification.userInfo?["text"] as? String,
+                  code == agent.agentCode else { return }
+            inputText = ""
+            let userMsg = LocalChatMessage(text: text, isUser: true, agentCode: nil)
+            messages.append(userMsg)
+            saveMessage(userMsg)
+            isGenerating = true
+            let ctx = activeNoteContext()
+            generationTask = Task {
+                switch agent {
+                case .local:
+                    sendLocal(prompt: text, context: ctx)
+                case .external(let a):
+                    sendExternal(prompt: text, agent: a, context: ctx)
+                }
+            }
         }
     }
 
@@ -376,13 +557,13 @@ struct LocalChatView: View {
     // MARK: - Thread Persistence
 
     private var currentThreadId: String {
-        chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
+        chatThreads.getOrCreateThread(for: agent.agentCode)
     }
 
-    private func loadThread(for chip: AgentChip) {
+    private func loadThread() {
         // Recargar threads desde DB (por si se crearon en otra sesión)
         chatThreads.loadThreads()
-        let tid = chatThreads.getOrCreateThread(for: chip.agentCode)
+        let tid = chatThreads.getOrCreateThread(for: agent.agentCode)
         // Carga inicial liviana: últimas 60 (chat infinito → scroll arriba carga el resto)
         let raw = chatThreads.toLocalMessages(threadId: tid, limit: 60)
         // Limpieza de filas decorativas persistidas por versiones anteriores:
@@ -541,30 +722,30 @@ struct LocalChatView: View {
 
     // MARK: - Agent Enable/Disable
 
-    private var isSelectedAgentEnabled: Bool {
-        switch selectedAgent {
+    private var isAgentEnabled: Bool {
+        switch agent {
         case .local: return brain.isEnabled
         case .external(let a): return UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
         }
     }
 
-    private func toggleSelectedAgent() {
-        switch selectedAgent {
+    private func toggleAgent() {
+        switch agent {
         case .local:
             brain.setEnabled(!brain.isEnabled)
         case .external(let a):
             let newVal = !UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
             UserDefaults.standard.set(newVal, forKey: "agent_enabled_\(a.id)")
-            // Refrescar UI
-            selectedAgent = selectedAgent
+            // UserDefaults no es observable: forzar re-render del header (id(agentStateEpoch))
+            agentStateEpoch += 1
         }
     }
 
     // MARK: - /plan
 
-    private func runPlan(prompt: String, target: AgentChip) {
-        guard isSelectedAgentEnabled else {
-            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+    private func runPlan(prompt: String) {
+        guard isAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(agent.displayName) está desactivado.", isUser: false, agentCode: agent.agentCode))
             return
         }
         inputText = ""
@@ -575,15 +756,15 @@ struct LocalChatView: View {
         let sysPrompt = "Eres un planificador de arquitectura de software. Tu tarea es generar un plan detallado paso a paso. NO modifiques ningún archivo. Usa las herramientas disponibles para explorar el vault, leer archivos relevantes y entender el contexto. Luego genera un plan con: 1) Objetivo, 2) Archivos a modificar/crear, 3) Pasos concretos, 4) Riesgos, 5) Esfuerzo estimado. Formato Markdown."
 
         generationTask = Task {
-            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, target: target, readOnly: true)
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, readOnly: true)
         }
     }
 
     // MARK: - /goal
 
-    private func runGoal(prompt: String, target: AgentChip) {
-        guard isSelectedAgentEnabled else {
-            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+    private func runGoal(prompt: String) {
+        guard isAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(agent.displayName) está desactivado.", isUser: false, agentCode: agent.agentCode))
             return
         }
         inputText = ""
@@ -594,15 +775,15 @@ struct LocalChatView: View {
         let sysPrompt = "Eres un ejecutor de tareas en un vault de conocimiento. Tu objetivo es completar la tarea asignada usando las herramientas MCP disponibles. Trabaja de forma autónoma: 1) Explora el contexto, 2) Planifica los pasos, 3) Ejecuta cada paso usando las herramientas (vault_write, vault_search, vault_read, etc.), 4) Verifica cada paso, 5) Reporta el resultado final. Si algo falla, reintenta con un enfoque diferente. Máximo 3 reintentos por paso."
 
         generationTask = Task {
-            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, target: target, readOnly: false)
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: prompt, readOnly: false)
         }
     }
 
     // MARK: - /design
 
-    private func runDesign(prompt: String, target: AgentChip) {
-        guard isSelectedAgentEnabled else {
-            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+    private func runDesign(prompt: String) {
+        guard isAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(agent.displayName) está desactivado.", isUser: false, agentCode: agent.agentCode))
             return
         }
         inputText = ""
@@ -613,36 +794,36 @@ struct LocalChatView: View {
         let sysPrompt = "Eres un arquitecto de software. Genera un diagrama Mermaid que represente: \(prompt). Usa las herramientas para explorar el contexto si es necesario. Responde con el código Mermaid entre ```mermaid y ```. Usa graph TD o flowchart. Incluye componentes, conexiones y etiquetas descriptivas."
 
         generationTask = Task {
-            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: "Genera un diagrama Mermaid para: \(prompt)", target: target, readOnly: true)
+            await runWithPrompt(sysPrompt: sysPrompt, userPrompt: "Genera un diagrama Mermaid para: \(prompt)", readOnly: true)
         }
     }
 
     // MARK: - Shared execution
 
-    private func runWithPrompt(sysPrompt: String, userPrompt: String, target: AgentChip, readOnly: Bool) async {
-        switch target {
+    private func runWithPrompt(sysPrompt: String, userPrompt: String, readOnly: Bool) async {
+        switch agent {
         case .local:
             // Local no tiene tool calling: fallback a chat normal con prompt combinado
             let combinedPrompt = "\(sysPrompt)\n\n---\n\n\(userPrompt)"
             sendLocal(prompt: combinedPrompt, context: "")
-        case .external(let agent):
-            await runExternalPlan(sysPrompt: sysPrompt, userPrompt: userPrompt, agent: agent)
+        case .external(let a):
+            await runExternalPlan(sysPrompt: sysPrompt, userPrompt: userPrompt, agent: a)
         }
     }
 
     private func runExternalPlan(sysPrompt: String, userPrompt: String, agent: ExternalAgentConfig, noteAI: NoteAIApplyInfo? = nil) async {
         guard let key = agentManager.getAPIKey(for: agent.id) else {
             await MainActor.run {
-                messages.append(LocalChatMessage(text: "❌ Sin API key.", isUser: false, agentCode: agentCode(for: agent)))
+                messages.append(LocalChatMessage(text: "❌ Sin API key.", isUser: false, agentCode: ChatAgentSupport.agentCode(for: agent)))
                 isGenerating = false
             }
             return
         }
-        let code = agentCode(for: agent)
+        let code = ChatAgentSupport.agentCode(for: agent)
         let beforeCount = messages.count
 
         let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
-        let openaiTools = convertMcpToolsToOpenAI(toolsJson)
+        let openaiTools = ChatAgentSupport.convertMcpToolsToOpenAI(toolsJson)
 
         var conversation: [[String: Any]] = [
             ["role": "system", "content": String(sysPrompt.prefix(6000))],
@@ -652,21 +833,33 @@ struct LocalChatView: View {
         var wroteActiveNote = false
 
         for turn in 0..<5 {
-            var result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+            var result = await ChatAgentSupport.streamAPI(
+                agent: agent, key: key, apiMessages: conversation, tools: openaiTools,
+                onDelta: { [self] text in
+                    self.streamMessage(text, code: code)
+                }
+            )
             // Reintentar errores de red (timeout, conexión perdida)
             if let error = result.error, (error.contains("Conexión perdida") || error.contains("Red:")) && turn < 3 {
                 try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s
-                result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+                result = await ChatAgentSupport.streamAPI(
+                    agent: agent, key: key, apiMessages: conversation, tools: openaiTools,
+                    onDelta: { [self] text in
+                        self.streamMessage(text, code: code)
+                    }
+                )
             }
             if let error = result.error {
                 await MainActor.run {
                     messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
                     isGenerating = false
+                    streamMsgID = nil
                 }
                 return
             }
             guard let toolCalls = result.toolCalls, !toolCalls.isEmpty else {
                 await flushPending(text: "", tools: pendingTools, code: code)
+                await MainActor.run { streamMsgID = nil }
                 if let noteAI, let text = result.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     await MainActor.run {
                         finalizeNoteAIMessage(noteAI: noteAI, content: text, index: messages.indices.last, wroteActiveNote: wroteActiveNote)
@@ -693,7 +886,7 @@ struct LocalChatView: View {
             }
             conversation.append(assistantMsg)
             for tc in toolCalls {
-                var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
+                var raw = mcpExecuteForAgent(jsonRequest: ChatAgentSupport.buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
                 if raw.count > 1500 { raw = String(raw.prefix(1500)) + "\n…" }
                 conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
             }
@@ -701,8 +894,11 @@ struct LocalChatView: View {
             if total > 1_500_000 { conversation = [conversation[0], conversation[1]] + Array(conversation.suffix(6)) }
         }
         await flushPending(text: "", tools: pendingTools, code: code)
+        await MainActor.run {
+            streamMsgID = nil
+            isGenerating = false
+        }
         _ = beforeCount
-        await MainActor.run { isGenerating = false }
     }
 
     // MARK: - Cancel
@@ -710,11 +906,12 @@ struct LocalChatView: View {
     private func cancelGeneration() {
         generationTask?.cancel()
         generationTask = nil
-        if selectedAgent == .local {
+        if agent == .local {
             brain.cancelChat()
         }
         isGenerating = false
-        messages.append(LocalChatMessage(text: "⏹ Generación cancelada.", isUser: false, agentCode: selectedAgent.agentCode))
+        streamMsgID = nil
+        messages.append(LocalChatMessage(text: "⏹ Generación cancelada.", isUser: false, agentCode: agent.agentCode))
     }
 
     // MARK: - Send
@@ -723,23 +920,37 @@ struct LocalChatView: View {
         let clean = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
 
-        // Detectar @mención
-        var target = selectedAgent
+        // Detectar @mención → redirigir a la sección del agente mencionado.
+        // Solo si apunta a OTRO agente; mencionarse a sí mismo envía normal.
         if let first = clean.split(separator: " ").first, first.hasPrefix("@") {
             let m = String(first.dropFirst()).lowercased()
-            if m == "local" || m == "lc" { target = .local }
-            else if let match = agentManager.agents.first(where: {
+            var targetCode: String? = nil
+            if m == "local" || m == "lc" {
+                targetCode = AgentChip.local.agentCode
+            } else if let match = agentManager.agents.first(where: {
                 $0.name.lowercased().replacingOccurrences(of: " ", with: "") == m
-            }) { target = .external(match) }
+            }) {
+                targetCode = AgentChip.external(match).agentCode
+            }
+            if let targetCode, targetCode != agent.agentCode {
+                // La sección destino (mismo agentCode) recibe el mensaje vía ChatMentionRedirect
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("ChatMentionRedirect"),
+                    object: nil,
+                    userInfo: ["agentCode": targetCode, "text": clean]
+                )
+                inputText = ""
+                return
+            }
         }
 
-        // Comandos
+        // Comandos (pertenecen a la sección actual)
         if clean == "/reset" {
-            createAnchorNote(for: target)
+            createAnchorNote(for: agent)
             let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
             let ts = df.string(from: Date())
             // Marcador visible en el feed (persiste en el MISMO thread, no borra historial)
-            let marker = LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: target.agentCode, type: "anchor")
+            let marker = LocalChatMessage(text: "── Contexto reiniciado \(ts) ──", isUser: false, agentCode: agent.agentCode, type: "anchor")
             messages.append(marker)
             saveMessage(marker)
             inputText = ""; return
@@ -750,30 +961,30 @@ struct LocalChatView: View {
         }
         if clean == "/compact" {
             let summary = "Contexto compactado. \(messages.count) mensajes resumidos."
-            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: target.agentCode)]
+            messages = [LocalChatMessage(text: summary, isUser: false, agentCode: agent.agentCode)]
             inputText = ""; return
         }
         if clean.hasPrefix("/plan ") {
             let goal = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            runPlan(prompt: goal, target: target); return
+            runPlan(prompt: goal); return
         }
         if clean.hasPrefix("/goal ") {
             let goal = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            runGoal(prompt: goal, target: target); return
+            runGoal(prompt: goal); return
         }
         if clean.hasPrefix("/design ") {
             let goal = String(clean.dropFirst(8)).trimmingCharacters(in: .whitespaces)
-            runDesign(prompt: goal, target: target); return
+            runDesign(prompt: goal); return
         }
         if clean.hasPrefix("/nota ") {
             let instruction = String(clean.dropFirst(6)).trimmingCharacters(in: .whitespaces)
             guard !instruction.isEmpty else { inputText = ""; return }
-            runNoteAIAction(instruction: instruction, actionTitle: instruction, target: target)
+            runNoteAIAction(instruction: instruction, actionTitle: instruction)
             return
         }
 
-        guard isSelectedAgentEnabled else {
-            messages.append(LocalChatMessage(text: "\(target.displayName) está desactivado.", isUser: false, agentCode: target.agentCode))
+        guard isAgentEnabled else {
+            messages.append(LocalChatMessage(text: "\(agent.displayName) está desactivado.", isUser: false, agentCode: agent.agentCode))
             return
         }
 
@@ -789,17 +1000,14 @@ struct LocalChatView: View {
         saveMessage(userMsg)
         isGenerating = true
 
-        var ctx = ""
-        if let id = viewModel.activeTabId, let tab = viewModel.tabs.first(where: { $0.id == id }) {
-            ctx = tab.content
-        }
+        let ctx = activeNoteContext()
 
         generationTask = Task {
-            switch target {
+            switch agent {
             case .local:
                 sendLocal(prompt: prompt, context: ctx)
-            case .external(let agent):
-                sendExternal(prompt: prompt, agent: agent, context: ctx)
+            case .external(let a):
+                sendExternal(prompt: prompt, agent: a, context: ctx)
             }
         }
     }
@@ -807,16 +1015,20 @@ struct LocalChatView: View {
     // MARK: - Local Brain
 
     private func sendLocal(prompt: String, context: String, noteAI: NoteAIApplyInfo? = nil) {
+        let code = agent.agentCode
         Task {
             do {
                 let stream = try await brain.chatStream(prompt: prompt, context: context)
-                let msg = LocalChatMessage(text: "", isUser: false, agentCode: "LC")
-                await MainActor.run { messages.append(msg) }
+                let msg = LocalChatMessage(text: "", isUser: false, agentCode: code)
+                await MainActor.run {
+                    streamMsgID = msg.id
+                    messages.append(msg)
+                }
                 var acc = ""
                 for await chunk in stream {
                     acc += chunk
                     await MainActor.run {
-                        if let i = messages.indices.last { messages[i] = LocalChatMessage(text: acc, isUser: false, agentCode: "LC") }
+                        if let i = messages.indices.last { messages[i] = LocalChatMessage(text: acc, isUser: false, agentCode: code) }
                     }
                 }
                 if let noteAI {
@@ -826,10 +1038,13 @@ struct LocalChatView: View {
                 }
             } catch {
                 await MainActor.run {
-                    messages.append(LocalChatMessage(text: "❌ \(error.localizedDescription)", isUser: false, agentCode: "LC"))
+                    messages.append(LocalChatMessage(text: "❌ \(error.localizedDescription)", isUser: false, agentCode: code))
                 }
             }
-            await MainActor.run { isGenerating = false }
+            await MainActor.run {
+                streamMsgID = nil
+                isGenerating = false
+            }
         }
     }
 
@@ -837,44 +1052,51 @@ struct LocalChatView: View {
 
     private func sendExternal(prompt: String, agent: ExternalAgentConfig, context: String) {
         guard let key = agentManager.getAPIKey(for: agent.id) else {
-            messages.append(LocalChatMessage(text: "❌ Sin API key en Keychain.", isUser: false, agentCode: agentCode(for: agent)))
+            messages.append(LocalChatMessage(text: "❌ Sin API key en Keychain.", isUser: false, agentCode: ChatAgentSupport.agentCode(for: agent)))
             isGenerating = false; return
         }
 
-        let code = agentCode(for: agent)
+        let code = ChatAgentSupport.agentCode(for: agent)
         // Saludo/casual: NO se envían herramientas → respuesta breve, sin auditoría del vault.
         // "hola" no debe disparar 9 llamadas MCP explorando el vault.
-        let casual = isCasualMessage(prompt)
+        let casual = ChatAgentSupport.isCasualMessage(prompt)
         let sys: String
         if casual {
             // Prompt mínimo: sin menciones de herramientas, scratchpad ni contexto del vault,
             // para que el modelo no se sienta en "modo trabajo" ni alucine un tool_call.
             sys = "Eres \(agent.name), un asistente conversacional. Responde de forma breve, natural y en español. No menciones herramientas, archivos, current_session.md ni scratchpad."
         } else {
-            sys = String(buildSystemPrompt(agent: agent, context: context).prefix(6000))
+            sys = String(ChatAgentSupport.buildSystemPrompt(agent: agent, context: context).prefix(6000))
         }
         let openaiTools: [[String: Any]]
         if casual {
             openaiTools = []
         } else {
             let toolsJson = getAgentMcpTools(tokenId: agent.tokenId)
-            openaiTools = convertMcpToolsToOpenAI(toolsJson)
+            openaiTools = ChatAgentSupport.convertMcpToolsToOpenAI(toolsJson)
         }
         print("[Chat] casual=\(casual) tools_enviadas=\(openaiTools.count)")
 
         Task {
-            // Construir conversación desde historial persistente + mensaje nuevo
-            let tid = chatThreads.getOrCreateThread(for: selectedAgent.agentCode)
-            var conversation = buildApiConversation(threadId: tid, sys: sys, newUserMsg: prompt)
+            // Construir conversación desde historial persistente + mensaje nuevo.
+            // La clave de thread es el code del chip (ext_<id8>), no el label DS/CL/OP.
+            let tid = chatThreads.getOrCreateThread(for: AgentChip.external(agent).agentCode)
+            var conversation = ChatAgentSupport.buildApiConversation(threadId: tid, sys: sys, newUserMsg: prompt)
 
             var pendingTools: [String] = []
 
             for turn in 0..<5 {
-                let result = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: openaiTools, code: code)
+                let result = await ChatAgentSupport.streamAPI(
+                    agent: agent, key: key, apiMessages: conversation, tools: openaiTools,
+                    onDelta: { [self] text in
+                        self.streamMessage(text, code: code)
+                    }
+                )
                 if let error = result.error {
                     await MainActor.run {
                         messages.append(LocalChatMessage(text: "❌ \(error)", isUser: false, agentCode: code))
                         isGenerating = false
+                        streamMsgID = nil
                     }
                     return
                 }
@@ -884,10 +1106,10 @@ struct LocalChatView: View {
                     // Reintento forzando respuesta directa en texto, sin herramientas.
                     if casual && result.text == nil {
                         conversation.append(["role": "user", "content": "Responde directamente en texto. NO invoques ninguna herramienta ni tool_call."])
-                        _ = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [], code: code)
+                        _ = await ChatAgentSupport.streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [])
                         if let last = messages.last, !last.isUser { saveMessage(last) }
                         await flushPending(text: "", tools: pendingTools, code: code)
-                        await MainActor.run { isGenerating = false }
+                        await MainActor.run { isGenerating = false; streamMsgID = nil }
                         return
                     }
                     // El streaming ya agregó el mensaje. Solo guardar.
@@ -895,7 +1117,7 @@ struct LocalChatView: View {
                         if let last = messages.last, !last.isUser { saveMessage(last) }
                     }
                     await flushPending(text: "", tools: pendingTools, code: code)
-                    await MainActor.run { isGenerating = false }
+                    await MainActor.run { isGenerating = false; streamMsgID = nil }
                     return
                 }
 
@@ -912,13 +1134,13 @@ struct LocalChatView: View {
                 conversation.append(assistantMsg)
 
                 for tc in toolCalls {
-                    var raw = mcpExecuteForAgent(jsonRequest: buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
+                    var raw = mcpExecuteForAgent(jsonRequest: ChatAgentSupport.buildMcpRequest(tokenId: agent.tokenId, toolName: tc.name, arguments: tc.args))
                     if raw.count > 1500 { raw = String(raw.prefix(1500)) + "\n…" }
                     conversation.append(["role": "tool", "tool_call_id": tc.id, "content": raw])
                 }
 
                 // Sliding window: podar tool results viejos, preservar user messages
-                conversation = pruneConversation(conversation)
+                conversation = ChatAgentSupport.pruneConversation(conversation)
             }
 
             // Max turns alcanzado: forzar resumen sin tools
@@ -929,69 +1151,32 @@ struct LocalChatView: View {
                     messages.append(thinking)
                 }
                 conversation.append(["role": "user", "content": "Resumí en 3-5 bullets qué encontraste y proponé siguientes pasos. NO uses herramientas (no están disponibles). Solo texto."])
-                let finalResult = await streamAPI(agent: agent, key: key, apiMessages: conversation, tools: [], code: code)
+                let finalResult = await ChatAgentSupport.streamAPI(
+                    agent: agent, key: key, apiMessages: conversation, tools: [],
+                    onDelta: { [self] text in
+                        self.streamMessage(text, code: code)
+                    }
+                )
                 // El streaming ya agregó el texto. Solo guardar.
                 if finalResult.text != nil, !(finalResult.text?.isEmpty ?? true) {
                     if let last = messages.last, !last.isUser { saveMessage(last) }
                 }
             }
-            await MainActor.run { isGenerating = false }
+            await MainActor.run { isGenerating = false; streamMsgID = nil }
         }
     }
 
-    /// Construye el array de conversación para la API desde mensajes persistidos en DB
-    private func buildApiConversation(threadId: String, sys: String, newUserMsg: String) -> [[String: Any]] {
-        var conv: [[String: Any]] = [["role": "system", "content": sys]]
-        let persisted = chatThreads.loadMessages(threadId: threadId, limit: 20)
-
-        // Agregar historial previo (sin el último mensaje que es el nuevo user msg)
-        let previousMsgs = Array(persisted.dropLast())
-
-        // /reset marca un límite de contexto: el modelo solo ve mensajes POSTERIORES
-        // a la última marca "── … ──" (tipo anchor). El historial queda en la DB y en
-        // el render, pero el AI arranca "limpio" en el reset — como un nuevo chat.
-        let startIdx = previousMsgs.lastIndex { m in
-            m.content.hasPrefix("── ") && m.content.hasSuffix(" ──")
-        }.map { $0 + 1 } ?? 0
-
-        for msg in previousMsgs[startIdx...] {
-            switch msg.role {
-            case "user":
-                conv.append(["role": "user", "content": msg.content])
-            case "assistant":
-                conv.append(["role": "assistant", "content": msg.content])
-            default:
-                break
-            }
-        }
-
-        // Agregar el nuevo mensaje del usuario (no duplicado)
-        conv.append(["role": "user", "content": newUserMsg])
-        return conv
-    }
-
-    /// Sliding window: mantiene system + user messages + últimos tool exchanges
-    private func pruneConversation(_ conv: [[String: Any]]) -> [[String: Any]] {
-        let total = conv.reduce(0) { $0 + (($1["content"] as? String)?.count ?? 0) }
-        guard total > 200_000, conv.count >= 4 else { return conv }
-
-        // Preservar system + user messages + últimos 4 mensajes
-        let systemMsg = conv.first(where: { ($0["role"] as? String) == "system" })
-        let userMsgs = conv.filter { ($0["role"] as? String) == "user" }
-        let recent = conv.suffix(4)
-
-        var result: [[String: Any]] = []
-        if let sys = systemMsg { result.append(sys) }
-        result.append(contentsOf: userMsgs.prefix(3)) // últimos 3 mensajes del usuario
-        result.append(contentsOf: recent)
-        return result
-    }
-
+    /// Streaming del texto de UN mensaje de esta sección: primer chunk → append,
+    /// chunks siguientes → update por `streamMsgID` (sin duplicar ni recargar WebView).
     @MainActor
-    private func updateMessage(at idx: Int, text: String, code: String) {
-        messages[idx] = LocalChatMessage(text: text, isUser: false, agentCode: code)
-        // Persistencia solo al final del stream (flushPending/saveMessage):
-        // guardar incremental aquí crearía filas parciales duplicadas en DB.
+    private func streamMessage(_ fullText: String, code: String) {
+        if let id = streamMsgID, let idx = messages.firstIndex(where: { $0.id == id }) {
+            messages[idx] = LocalChatMessage(text: fullText, isUser: false, agentCode: code)
+        } else {
+            let msg = LocalChatMessage(text: fullText, isUser: false, agentCode: code)
+            messages.append(msg)
+            streamMsgID = msg.id
+        }
     }
 
     @MainActor
@@ -1009,218 +1194,19 @@ struct LocalChatView: View {
         }
     }
 
-    private struct ToolCallResult { let id: String; let name: String; let args: String }
-    private struct StreamResult { let text: String?; let toolCalls: [ToolCallResult]?; let error: String? }
-
-    private func streamAPI(agent: ExternalAgentConfig, key: String, apiMessages: [[String: Any]], tools: [[String: Any]], code: String) async -> StreamResult {
-        var req = URLRequest(url: URL(string: "\(agent.provider.baseURL)/chat/completions")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-
-        var body: [String: Any] = ["model": agent.model, "messages": apiMessages, "stream": true]
-        // Si no declaramos herramientas (turno casual), los tool_calls que emita el modelo
-        // son alucinaciones (DeepSeek es "agentic" y a veces los inventa igual). Se ignoran.
-        let allowTools = !tools.isEmpty
-        if allowTools {
-            body["tools"] = tools
-            body["tool_choice"] = "auto" // DeepSeek: evitar que abandone tool calling
-        }
-
-        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else {
-            return StreamResult(text: nil, toolCalls: nil, error: "Error serializando request")
-        }
-        req.httpBody = httpBody
-
-        do {
-            let (bytes, response) = try await URLSession.shared.bytes(for: req)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                return StreamResult(text: nil, toolCalls: nil, error: "HTTP \( (response as? HTTPURLResponse)?.statusCode ?? 0)")
-            }
-
-            var streamedText = ""
-            var msgIdx: Int? = nil
-            var tcAccum: [Int: (id: String, name: String, args: String)] = [:]
-            var finishReason: String? = nil
-
-            for try await line in bytes.lines {
-                guard line.hasPrefix("data: "), line != "data: [DONE]" else { continue }
-                let jsonStr = String(line.dropFirst(6))
-                guard let d = jsonStr.data(using: .utf8),
-                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                      let choices = obj["choices"] as? [[String: Any]],
-                      let first = choices.first else { continue }
-
-                let delta = first["delta"] as? [String: Any] ?? [:]
-                finishReason = first["finish_reason"] as? String
-
-                if let content = delta["content"] as? String, !content.isEmpty {
-                    if let idx = msgIdx {
-                        streamedText += content
-                        await updateMessage(at: idx, text: streamedText, code: code)
-                    } else {
-                        streamedText = content
-                        await MainActor.run {
-                            messages.append(LocalChatMessage(text: content, isUser: false, agentCode: code))
-                            msgIdx = messages.count - 1
-                        }
-                    }
-                }
-
-                if allowTools, let tcDeltas = delta["tool_calls"] as? [[String: Any]] {
-                    for tc in tcDeltas {
-                        let idx = tc["index"] as? Int ?? 0
-                        var cur = tcAccum[idx] ?? (id: "", name: "", args: "")
-                        if let id = tc["id"] as? String { cur.id = id }
-                        if let fn = tc["function"] as? [String: Any] {
-                            if let n = fn["name"] as? String { cur.name = n }
-                            if let a = fn["arguments"] as? String { cur.args += a }
-                        }
-                        tcAccum[idx] = cur
-                    }
-                }
-            }
-
-            let text = streamedText.isEmpty ? nil : streamedText
-            let toolCalls: [ToolCallResult]? = if finishReason == "tool_calls", !tcAccum.isEmpty {
-                tcAccum.values.sorted(by: { $0.id < $1.id }).map { ToolCallResult(id: $0.id, name: $0.name, args: $0.args) }
-            } else { nil }
-
-            return StreamResult(text: text, toolCalls: toolCalls, error: nil)
-        } catch {
-            let msg = error.localizedDescription
-            if msg.contains("network connection was lost") || msg.contains("timeout") || msg.contains("Network") {
-                return StreamResult(text: nil, toolCalls: nil, error: "Conexión perdida con \(agent.provider.rawValue). Reintentá en unos segundos.")
-            }
-            return StreamResult(text: nil, toolCalls: nil, error: "Red: \(msg)")
-        }
-    }
-
-    private func buildSystemPrompt(agent: ExternalAgentConfig, context: String) -> String {
-        var sys = "Eres \(agent.name), un asistente IA con acceso al Vault System.\n"
-
-        // Inyectar directrices-core.md (framework operativo)
-        let corePath = NSString(string: "~/.vault_system/system_workspace/directrices-core.md").expandingTildeInPath
-        if let core = try? String(contentsOfFile: corePath, encoding: .utf8) {
-            sys += "\n## Directrices Operativas\n\(core.prefix(1500))\n"
-        }
-        // Inyectar conciencia.md (estado global)
-        let concienciaPath = NSString(string: "~/.vault_system/system_workspace/00-Sistema/conciencia.md").expandingTildeInPath
-        if let conciencia = try? String(contentsOfFile: concienciaPath, encoding: .utf8) {
-            sys += "\n## Estado Global del Sistema\n\(conciencia.prefix(2000))\n"
-        }
-        // Inyectar current_session.md (scratchpad: contexto de la sesión anterior)
-        let sessionPath = NSString(string: "~/.vault_system/system_workspace/current_session.md").expandingTildeInPath
-        if let session = try? String(contentsOfFile: sessionPath, encoding: .utf8) {
-            let trimmed = session.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty && trimmed != "# Sesión Actual" {
-                sys += "\n## Sesión Anterior (scratchpad)\n\(session.prefix(1200))\n"
-            }
-        }
-
-        sys += "Puedes usar herramientas MCP para leer, buscar, escribir y explorar el vault.\n"
-        if agent.writeContent || agent.writeMetadata || agent.writeSystem {
-            sys += "También puedes crear/modificar notas y metadatos.\n"
-        }
-
-        // Cuándo SÍ y cuándo NO usar herramientas: un saludo no amerita auditar el vault.
-        sys += "\n## Cuándo usar herramientas\n"
-        sys += "- Usa herramientas SOLO si el usuario pide explícitamente explorar, buscar, leer, escribir o hacer algo en el vault.\n"
-        sys += "- Para saludos y conversación casual ('hola', 'qué tal'), respondé breve y naturalmente SIN herramientas.\n"
-        sys += "- No explores el vault por defecto ni al iniciar una conversación.\n"
-        sys += "- Máximo 5 rondas de herramientas en un turno. Sé eficiente.\n"
-
-        sys += "\n⚠️ REGLA CRÍTICA: Después de usar herramientas, NUNCA te presentes ni saludes de nuevo.\n"
-        sys += "Resumí brevemente lo que encontraste y proponé siguientes pasos. La conversación continúa.\n"
-        sys += "No digas frases como 'listo para ayudarte', 'soy tu asistente', 'herramientas cargadas', etc.\n"
-
-        // Gestión de contexto: scratchpad obligatorio
-        sys += "\n## Reglas de Trabajo\n"
-        sys += "- Al final de CADA respuesta, actualizá current_session.md con [ACUERDO]/[HITO]/[DESCARTADO].\n"
-        sys += "- Solo cargá contexto previo (current_session.md o 01-Diario/) si el usuario lo pide o la tarea lo requiere. NO de forma automática.\n"
-        sys += "- NUNCA preguntes '¿en qué te ayudo?' ni frases de bienvenida. La conversación ya empezó.\n"
-
-        if !context.isEmpty { sys += "\nNota activa en el editor (truncada):\n\(context.prefix(1500))\n" }
-        return sys
-    }
-
-    private func convertMcpToolsToOpenAI(_ mcpToolsJson: String) -> [[String: Any]] {
-        guard let data = mcpToolsJson.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = root["result"] as? [String: Any],
-              let tools = result["tools"] as? [[String: Any]] else { return [] }
-
-        return tools.compactMap { tool -> [String: Any]? in
-            guard let name = tool["name"] as? String,
-                  var desc = tool["description"] as? String else { return nil }
-            if desc.count > 200 { desc = String(desc.prefix(200)) }
-            let schema = tool["inputSchema"] as? [String: Any]
-            var fn: [String: Any] = ["name": name, "description": desc]
-            if let s = schema {
-                fn["parameters"] = ["type": "object", "properties": s["properties"] ?? [:], "required": s["required"] ?? []]
-            }
-            return ["type": "function", "function": fn]
-        }
-    }
-
-    private func buildMcpRequest(tokenId: String, toolName: String, arguments: String) -> String {
-        let parsedArgs: Any
-        if let data = arguments.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) {
-            parsedArgs = obj
-        } else {
-            parsedArgs = arguments
-        }
-        let inner: [String: Any] = [
-            "jsonrpc": "2.0", "method": "tools/call",
-            "params": ["name": toolName, "arguments": parsedArgs],
-            "id": 1, "mcp_client_token": tokenId
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: inner),
-           let str = String(data: data, encoding: .utf8) {
-            return str
-        }
-        return "{}"
-    }
-
-    private func agentCode(for agent: ExternalAgentConfig) -> String {
-        switch agent.provider {
-        case .deepseek: return "DS"
-        case .anthropic: return "CL"
-        case .openai: return "OP"
-        }
-    }
-
-    /// True si el mensaje es un saludo o frase casual que NO amerita herramientas MCP.
-    /// Mensajes con verbos de acción (buscar, leer, crear, resumir…) se consideran trabajo → herramientas permitidas.
-    private func isCasualMessage(_ prompt: String) -> Bool {
-        let t = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return false }
-        let lower = t.lowercased()
-        // Si el usuario pide hacer algo en el vault, permitir herramientas.
-        let actionHints = ["busca", "buscar", "lee", "leer", "crea", "crear", "escrib", "modifica", "resume",
-                           "resum", "analiza", "list", "muestra", "explora", "examina", "revisa", "investiga",
-                           "organiza", "archiva", "mueve", "renombra", "ejecuta", "plan", "nota ", "busqued",
-                           "sintetiza", "genera", "traduce"]
-        if actionHints.contains(where: { lower.contains($0) }) { return false }
-        // Corto y sin verbo de acción → saludo/casual.
-        return lower.count <= 45
-    }
-
     // MARK: - Nota IA (Opciones IA para notas)
 
-    /// Orquesta una acción de IA sobre la nota activa con el agente seleccionado (o `target` si se fuerza).
+    /// Orquesta una acción de IA sobre la nota activa con el agente de ESTA sección.
     /// Sin nota activa —o si la instrucción pide explícitamente crear una nota— el resultado va a una nota nueva.
-    private func runNoteAIAction(instruction: String, actionTitle: String, target: AgentChip? = nil) {
-        let effective = target ?? selectedAgent
+    private func runNoteAIAction(instruction: String, actionTitle: String) {
         let effectiveEnabled: Bool = {
-            switch effective {
+            switch agent {
             case .local: return brain.isEnabled
             case .external(let a): return UserDefaults.standard.bool(forKey: "agent_enabled_\(a.id)")
             }
         }()
         guard effectiveEnabled else {
-            messages.append(LocalChatMessage(text: "\(effective.displayName) está desactivado.", isUser: false, agentCode: effective.agentCode))
+            messages.append(LocalChatMessage(text: "\(agent.displayName) está desactivado.", isUser: false, agentCode: agent.agentCode))
             return
         }
         let wantsNew = wantsCreateNew(instruction)
@@ -1237,7 +1223,7 @@ struct LocalChatView: View {
         messages.append(LocalChatMessage(text: "✍️ Nota · \(actionTitle)", isUser: true, agentCode: nil))
         isGenerating = true
         generationTask = Task {
-            switch effective {
+            switch agent {
             case .local:
                 if noteAI.createNew {
                     // Sin contenido de nota: la instrucción (puede incluir material pegado) es la entrada
@@ -1248,11 +1234,11 @@ struct LocalChatView: View {
                     let prompt = "Nota activa: \(noteAI.noteTitle)\n\nInstrucción: \(instruction)\n\nDevuelve ÚNICAMENTE el texto completo resultante de aplicar la instrucción al texto en Contexto, sin comentarios ni prefacios."
                     sendLocal(prompt: prompt, context: noteAI.originalContent, noteAI: noteAI)
                 }
-            case .external(let agent):
-                let usesTools = agent.writeContent && (noteAI.createNew ? !agent.workspaces.isEmpty : noteInWorkspace(noteAI.noteId ?? "", agent.workspaces))
-                let sys = noteAISystemPrompt(agentName: agent.name, usesTools: usesTools, createNew: noteAI.createNew)
-                let user = noteAIUserPrompt(instruction: instruction, originalText: noteAI.originalContent, title: noteAI.noteTitle, createNew: noteAI.createNew)
-                await runExternalPlan(sysPrompt: sys, userPrompt: user, agent: agent, noteAI: noteAI)
+            case .external(let a):
+                let usesTools = a.writeContent && (noteAI.createNew ? !a.workspaces.isEmpty : noteInWorkspace(noteAI.noteId ?? "", a.workspaces))
+                let sys = ChatAgentSupport.noteAISystemPrompt(agentName: a.name, usesTools: usesTools, createNew: noteAI.createNew)
+                let user = ChatAgentSupport.noteAIUserPrompt(instruction: instruction, originalText: noteAI.originalContent, title: noteAI.noteTitle, createNew: noteAI.createNew)
+                await runExternalPlan(sysPrompt: sys, userPrompt: user, agent: a, noteAI: noteAI)
             }
         }
     }
@@ -1277,15 +1263,15 @@ struct LocalChatView: View {
             if let id = viewModel.activeTabId, let idx = viewModel.tabs.firstIndex(where: { $0.id == id }) {
                 viewModel.tabs[idx].content = newContent
             }
-            messages.append(LocalChatMessage(text: "✓ Nota nueva creada: \(title.isEmpty ? "Nueva nota IA" : title).", isUser: false, agentCode: selectedAgent.agentCode))
+            messages.append(LocalChatMessage(text: "✓ Nota nueva creada: \(title.isEmpty ? "Nueva nota IA" : title).", isUser: false, agentCode: agent.agentCode))
             return
         }
         guard let idx = activeTabIndex else {
-            messages.append(LocalChatMessage(text: "⚠️ No hay nota activa para aplicar.", isUser: false, agentCode: selectedAgent.agentCode))
+            messages.append(LocalChatMessage(text: "⚠️ No hay nota activa para aplicar.", isUser: false, agentCode: agent.agentCode))
             return
         }
         if let noteID, viewModel.activeTabId != noteID {
-            messages.append(LocalChatMessage(text: "⚠️ La nota activa cambió; no se aplicó a '\(viewModel.tabs[idx].title)'.", isUser: false, agentCode: selectedAgent.agentCode))
+            messages.append(LocalChatMessage(text: "⚠️ La nota activa cambió; no se aplicó a '\(viewModel.tabs[idx].title)'.", isUser: false, agentCode: agent.agentCode))
             return
         }
         let tab = viewModel.tabs[idx]
@@ -1302,12 +1288,12 @@ struct LocalChatView: View {
             } else {
                 // Fallback seguro: insertar al final
                 newContent = tab.content + "\n\n---\n### ✨ \(instruction)\n" + applyContent
-                messages.append(LocalChatMessage(text: "ℹ️ Sin selección activa: se insertó al final.", isUser: false, agentCode: selectedAgent.agentCode))
+                messages.append(LocalChatMessage(text: "ℹ️ Sin selección activa: se insertó al final.", isUser: false, agentCode: agent.agentCode))
             }
         }
         viewModel.tabs[idx].content = newContent
         viewModel.saveActiveTab(locations: workspaceManager.allLocations)
-        messages.append(LocalChatMessage(text: "✓ Aplicado a '\(tab.title)' (\(applyMode.rawValue)).", isUser: false, agentCode: selectedAgent.agentCode))
+        messages.append(LocalChatMessage(text: "✓ Aplicado a '\(tab.title)' (\(applyMode.rawValue)).", isUser: false, agentCode: agent.agentCode))
     }
 
     /// Conecta el botón "Aplicar a la nota" del mensaje con la aplicación real.
@@ -1320,15 +1306,15 @@ struct LocalChatView: View {
     @MainActor
     private func finalizeNoteAIMessage(noteAI: NoteAIApplyInfo, content: String, index: Int?, wroteActiveNote: Bool) {
         if wroteActiveNote {
-            messages.append(LocalChatMessage(text: "✍️ El agente escribió la nota directamente (\(noteAI.noteTitle)).", isUser: false, agentCode: selectedAgent.agentCode))
+            messages.append(LocalChatMessage(text: "✍️ El agente escribió la nota directamente (\(noteAI.noteTitle)).", isUser: false, agentCode: agent.agentCode))
             return
         }
         let clean = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else {
-            messages.append(LocalChatMessage(text: "⚠️ El agente no devolvió contenido editable.", isUser: false, agentCode: selectedAgent.agentCode))
+            messages.append(LocalChatMessage(text: "⚠️ El agente no devolvió contenido editable.", isUser: false, agentCode: agent.agentCode))
             return
         }
-        let parsed = parseNoteAIResult(clean)
+        let parsed = ChatAgentSupport.parseNoteAIResult(clean)
         if let i = index, messages.indices.contains(i) {
             messages[i].applyContent = parsed
             messages[i].applyInstruction = noteAI.instruction
@@ -1340,55 +1326,6 @@ struct LocalChatView: View {
         }
     }
 
-    /// System prompt para redacción de notas: pedir SOLO el texto resultante.
-    private func noteAISystemPrompt(agentName: String, usesTools: Bool, createNew: Bool = false) -> String {
-        var s = createNew
-            ? "Eres un redactor inteligente del vault (\(agentName)). Crearás una nota nueva aplicando la instrucción del usuario.\n"
-            : "Eres un redactor inteligente del vault (\(agentName)). Aplicarás la instrucción del usuario sobre la nota activa.\n"
-        s += "Devuelve ÚNICAMENTE el texto completo resultante de aplicar la instrucción, sin comentarios, prefacios ni resúmenes.\n"
-        if !createNew {
-            s += "La nota completa está al final del mensaje del usuario; no la busques con herramientas.\n"
-        }
-        s += usesTools
-            ? "Puedes usar herramientas MCP solo si es estrictamente necesario; lo esperado es devolver el texto editado.\n"
-            : "NO uses herramientas MCP. Responde solo con el texto.\n"
-        return s
-    }
-
-    /// Prompt de usuario para redacción de notas, con el título de la nota y el contenido truncado para límites de tokens.
-    private func noteAIUserPrompt(instruction: String, originalText: String, title: String, createNew: Bool) -> String {
-        if createNew {
-            return "Instrucción: \(instruction)\n\nCrea una nota nueva con el contenido solicitado. Devuelve únicamente el texto completo de la nota nueva."
-        }
-        var text = originalText
-        var truncated = false
-        if text.count > maxNoteContentForAI {
-            text = String(text.prefix(maxNoteContentForAI))
-            truncated = true
-        }
-        let note = truncated ? "\(text)\n… [nota truncada a \(maxNoteContentForAI) caracteres]" : text
-        return "Nota activa: \(title)\n\nInstrucción: \(instruction)\n\nTexto original de la nota:\n---\n\(note)\n---\n\nDevuelve únicamente el texto completo resultante."
-    }
-
-    /// Desempaqueta el bloque fenced ``` más grande si el modelo devolvió el texto envuelto en un code fence.
-    private func parseNoteAIResult(_ raw: String) -> String {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fences = text.components(separatedBy: "```")
-        if fences.count >= 3 {
-            // El bloque de mayor contenido suele ser el texto editable
-            var best = fences[1]
-            for i in 2..<(fences.count - 1) {
-                if fences[i].count > best.count { best = fences[i] }
-            }
-            text = best.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Quitar el lenguaje declarado en la primera línea del fence (p.ej. "md", "markdown")
-            let lines = text.components(separatedBy: .newlines)
-            if let first = lines.first, !first.contains(" ") && first.count <= 12 && !first.contains("#") {
-                text = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        return text
-    }
 }
 
 // MARK: - Bubble
@@ -1801,7 +1738,7 @@ struct ChatMessagesView: NSViewRepresentable {
 // MARK: - Permissions Bar
 
 struct PermissionsBar: View {
-    let agent: LocalChatView.AgentChip
+    let agent: AgentChip
     @State private var showWsPopover = false
 
     var workspaces: [String] {
@@ -1822,6 +1759,7 @@ struct PermissionsBar: View {
                 PermBadge("Telem", allowed: true).help("Lectura de telemetría")
                 Text("·").foregroundColor(.secondary)
                 Text("All").font(.caption2).bold()
+                    .lineLimit(1)   // no rompe línea al comprimirse
                     .help("Todos los workspaces registrados")
             case .external(let a):
                 PermBadge("Read", allowed: a.readContent).help("Lectura de contenido crudo de notas")
@@ -1834,6 +1772,7 @@ struct PermissionsBar: View {
                     Text(wsLabel(a.workspaces))
                         .font(.caption2).bold()
                         .foregroundColor(.secondary)
+                        .lineLimit(1)   // no rompe línea al comprimirse
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showWsPopover, arrowEdge: .bottom) {
@@ -1868,6 +1807,7 @@ struct PermBadge: View {
         Text(label)
             .font(.system(size: 9, weight: .bold, design: .monospaced))
             .foregroundColor(allowed ? .green : .secondary.opacity(0.4))
+            .lineLimit(1)   // no rompe línea al comprimirse
     }
 }
 

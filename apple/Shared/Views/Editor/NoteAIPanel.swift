@@ -74,7 +74,6 @@ struct NoteAIOptionsPanel: View {
     let onRun: (String, String) -> Void
 
     @State private var customInstruction: String = ""
-    @State private var isExpanded: Bool = false
 
     private var activeTab: TabItem? {
         guard let id = viewModel.activeTabId else { return nil }
@@ -88,8 +87,9 @@ struct NoteAIOptionsPanel: View {
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
+        // El panel ya no tiene cabecera propia: se renderiza completo cuando el
+        // header de la sección lo despliega (toggle sparkles ▾), o nada si está cerrado.
+        VStack(alignment: .leading, spacing: 8) {
                 // Nota activa
                 HStack(spacing: 4) {
                     Image(systemName: activeTab == nil ? "doc.text" : "doc.text.fill")
@@ -185,22 +185,8 @@ struct NoteAIOptionsPanel: View {
                 .pickerStyle(.menu)
                 .font(.caption)
             }
-            .padding(.top, 6)
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 10))
-                    .foregroundColor(.purple)
-                Text("Opciones IA para notas")
-                    .font(.caption).bold()
-                Spacer()
-                if activeTab == nil {
-                    Text("creará una nota nueva")
-                        .font(.caption2).foregroundColor(.secondary)
-                }
-            }
-        }
-        .disabled(!isEnabled)
+            .padding(.top, 4)
+            .disabled(!isEnabled)
     }
 
     private func run(_ action: NoteAIAction) {

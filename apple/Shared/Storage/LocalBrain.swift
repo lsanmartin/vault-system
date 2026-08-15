@@ -47,10 +47,12 @@ public final class LocalBrain: ObservableObject {
     // Contenedor caliente persistente en GPU
     private var activeContainer: ModelContainer? = nil
     
-    /// Cancela la descarga del modelo local en ejecucion
+    /// Cancela la descarga del modelo local en ejecucion (delega al Model Manager,
+    /// que es el dueño real de las descargas).
     public func cancelDownload() {
         downloadTask?.cancel()
         downloadTask = nil
+        ModelManager.shared.cancelCurrentDownload()
         DispatchQueue.main.async {
             self.isDownloading = false
             self.downloadProgress = 0.0
@@ -142,7 +144,8 @@ public final class LocalBrain: ObservableObject {
         }
     }
     
-    /// Inicializa u obtiene el contenedor caliente de Gemma de forma segura
+    /// Inicializa u obtiene el contenedor caliente del modelo local de forma segura.
+    /// Resuelve el modelo activo desde `ModelManager` (nunca hardcodeado).
     public func getOrLoadContainer() async throws -> ModelContainer {
         guard isEnabled else {
             throw NSError(domain: "LocalBrain", code: 100, userInfo: [
@@ -152,40 +155,41 @@ public final class LocalBrain: ObservableObject {
         if let container = activeContainer {
             return container
         }
-        
-        let modelId = "mlx-community/gemma-4-12B-it-4bit"
-        
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let tokenURL = home.appendingPathComponent(".cache/huggingface/token")
-        
-        if let tokenData = try? Data(contentsOf: tokenURL),
-           let token = String(data: tokenData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.hasPrefix("hf_oauth_") {
-            setenv("HF_TOKEN", token, 1)
-            Telemetry.shared.log("LocalBrain", eventType: "Auth", message: "Token de Hugging Face inyectado. Hub usara autenticacion.")
-        } else {
-            unsetenv("HF_TOKEN")
-            Telemetry.shared.log("LocalBrain", eventType: "Auth", message: "Token omitido o invalido. Usando sesion anonima publica.")
-        }
-        
-        // Intentar carga rápida offline nativa
-        // El modelo suele estar ya descargado en Documents/huggingface/models/
-        // (ruta legacy de versiones anteriores de la app). Apuntamos
-        // ModelConfiguration ahí para evitar re-descargar 6-7 GB cada vez.
-        let docsModelDir = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("huggingface/models/\(modelId)")
-        let hasLocalModel = docsModelDir.map { dir in
-            FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
-        } ?? false
+
+        let modelId = ModelManager.shared.activeModelID ?? ModelManager.defaultModelID
+        ModelManager.ensureHFEnvironment()
+
+        // 1) Migrar desde el contenedor legacy si aplica (idempotente). Evita
+        //    re-descargar 6-7 GB cuando la app sale del sandbox y la ruta de
+        //    Documents cambia.
+        await ModelManager.shared.ensureMigrated(for: modelId)
+
+        // 2) Resolución de ruta: canónico → cache HF → descarga directa a canónico.
+        let canonicalDir = ModelManager.shared.modelDirectory(for: modelId)
+        let hasCanonical = FileManager.default.fileExists(atPath: canonicalDir.appendingPathComponent("config.json").path)
+
         let config: ModelConfiguration
-        if hasLocalModel, let dir = docsModelDir {
-            // La API de mlx-swift separa init(id:) (HF) e init(directory:) (local)
-            config = ModelConfiguration(directory: dir)
-            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo local encontrado en Documents (\(modelId)). Carga offline sin descarga.")
-        } else {
+        if hasCanonical {
+            // Carga offline instantánea desde la ubicación canónica
+            config = ModelConfiguration(directory: canonicalDir)
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo local encontrado (\(modelId)). Carga offline sin descarga.")
+        } else if ModelManager.shared.modelIsInHubCache(modelId) {
             config = ModelConfiguration(id: modelId)
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo encontrado en cache Hugging Face (\(modelId)). Carga offline.")
+        } else {
+            // No está en disco: descarga directa al directorio canónico. Si el
+            // usuario borró el modelo activo y no eligió otro, no re-descargar
+            // en silencio.
+            guard ModelManager.shared.hasConfiguredModel else {
+                throw NSError(domain: "LocalBrain", code: 100, userInfo: [
+                    NSLocalizedDescriptionKey: "No hay un modelo local activo. Selecciona uno en el Model Manager (icono de cubos en el chat)."
+                ])
+            }
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo \(modelId) no descargado. Iniciando descarga directa.")
+            try await ModelManager.shared.downloadModel(id: modelId)
+            config = ModelConfiguration(directory: canonicalDir)
         }
+
         do {
             await MainActor.run {
                 self.modelStatus = .loading
@@ -202,63 +206,71 @@ public final class LocalBrain: ObservableObject {
             }
             return container
         } catch {
-            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Modelo no disponible localmente. Iniciando descarga: \(error.localizedDescription)")
-            
-            // Descarga manual de red usando Hub de Hugging Face v3
-            let repo = Hub.Repo(id: modelId)
-            do {
-                _ = try await Hub.snapshot(from: repo) { progress in
-                    DispatchQueue.main.async {
-                        self.downloadProgress = progress.fractionCompleted
-                        self.modelStatus = .downloading(progress: progress.fractionCompleted)
-                    }
-                }
-                
+            if isCancelledError(error) {
+                // Cancelación: estado limpio, sin error en la UI.
                 await MainActor.run {
-                    self.modelStatus = .loading
+                    self.isDownloading = false
+                    self.modelStatus = .notLoaded
                 }
-                
-                // Cargar modelo tras la descarga exitosa (config por id → cache HF)
-                let container = try await #huggingFaceLoadModelContainer(configuration: ModelConfiguration(id: modelId))
-                guard self.isEnabled else {
-                    MLX.GPU.clearCache()
-                    throw NSError(domain: "LocalBrain", code: 100, userInfo: [NSLocalizedDescriptionKey: "Carga cancelada: el cerebro local fue desactivado durante la descarga."])
-                }
-                self.activeContainer = container
-                await MainActor.run {
-                    self.modelStatus = .ready
-                }
-                return container
-            } catch let downloadErr {
-                await MainActor.run {
-                    self.modelStatus = .error(downloadErr.localizedDescription)
-                }
-                throw downloadErr
+                throw error
             }
+            Telemetry.shared.log("LocalBrain", eventType: "Error", message: "Error al cargar el modelo \(modelId): \(error.localizedDescription)")
+            await MainActor.run {
+                self.modelStatus = .error(error.localizedDescription)
+            }
+            throw error
+        }
+    }
+
+    /// Verdadero si `error` representa una cancelación de Task.
+    private func isCancelledError(_ error: Error) -> Bool {
+        Task.isCancelled || (error as? CancellationError) != nil
+    }
+
+    /// Libera el modelo actual de la GPU y deja el cerebro listo para cargar otro.
+    /// `modelId` solo se usa para logs; el siguiente `getOrLoadContainer`
+    /// resuelve el modelo activo desde `ModelManager`.
+    public func switchModel(to modelId: String?) {
+        DispatchQueue.main.async {
+            self.activeChatTask?.cancel()
+            self.activeChatTask = nil
+            self.digestionTask?.cancel()
+            self.digestionTask = nil
+            self.cancelDownload()
+            self.activeContainer = nil
+            MLX.GPU.clearCache()
+            self.modelStatus = .notLoaded
+            self.isProcessing = false
+            self.currentNoteTitle = ""
+            self.downloadProgress = 0.0
+        }
+        if let modelId {
+            Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Cambiando modelo local: \(modelId)")
         }
     }
     
-    /// Inicia la precarga/descarga del modelo Gemma en background
+    /// Inicia la precarga/descarga del modelo activo en background
     public func preloadModel() {
         guard isEnabled else { return }
         guard !isProcessing && !isDownloading else { return }
         isDownloading = true
         downloadProgress = 0.0
-        
-        Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Iniciando precarga de Gemma 4 (mlx-community/gemma-4-12B-it-4bit)")
-        
+
+        let modelId = ModelManager.shared.activeModelID ?? ModelManager.defaultModelID
+        Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Iniciando precarga de \(modelId)")
+
         queue.async {
             self.downloadTask = Task {
                 do {
                     _ = try await self.getOrLoadContainer()
-                    
+
                     if Task.isCancelled {
-                        Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Descarga cancelada por el usuario.")
+                        Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Precarga cancelada por el usuario.")
                         return
                     }
-                    
-                    Telemetry.shared.log("LocalBrain", eventType: "Status", message: "¡Modelo Gemma 4 listo en cache y caliente en memoria GPU!")
-                    
+
+                    Telemetry.shared.log("LocalBrain", eventType: "Status", message: "¡Modelo \(modelId) listo y caliente en memoria GPU!")
+
                     DispatchQueue.main.async {
                         self.isDownloading = false
                         self.downloadProgress = 1.0
@@ -266,11 +278,14 @@ public final class LocalBrain: ObservableObject {
                         self.modelStatus = .ready
                     }
                 } catch {
-                    Telemetry.shared.log("LocalBrain", eventType: "Error", message: "Error al precargar el modelo local: \(error.localizedDescription)")
+                    let cancelled = Task.isCancelled || (error as? CancellationError) != nil
+                    if !cancelled {
+                        Telemetry.shared.log("LocalBrain", eventType: "Error", message: "Error al precargar el modelo local: \(error.localizedDescription)")
+                    }
                     DispatchQueue.main.async {
                         self.isDownloading = false
                         self.downloadTask = nil
-                        self.modelStatus = .error(error.localizedDescription)
+                        self.modelStatus = cancelled ? .notLoaded : .error(error.localizedDescription)
                     }
                 }
             }

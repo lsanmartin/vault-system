@@ -75,7 +75,7 @@ struct ContentView: View {
                                     .controlSize(.small)
                                 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Descargando Cerebro Local (Gemma 4 12B)...")
+                                    Text("Descargando Cerebro Local (\(ModelManager.shared.downloadingModelID?.components(separatedBy: "/").last ?? "modelo local"))...")
                                         .font(.subheadline)
                                         .fontWeight(.bold)
                                         .foregroundColor(.primary)

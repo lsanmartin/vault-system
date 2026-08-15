@@ -3,9 +3,15 @@ import os
 
 class CloudWorkspacePresenter: NSObject, NSFilePresenter, ObservableObject {
     var presentedItemURL: URL?
-    var presentedItemOperationQueue: OperationQueue = .main
+    var presentedItemOperationQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
+        return queue
+    }()
     
     private let logger = Logger(subsystem: "cl.nicelio.vault.VaultSystem", category: "CloudSync")
+    private var syncWorkItem: DispatchWorkItem?
 
     init(containerURL: URL) {
         self.presentedItemURL = containerURL
@@ -22,7 +28,15 @@ class CloudWorkspacePresenter: NSObject, NSFilePresenter, ObservableObject {
     func presentedItemDidChange() {
         guard let url = presentedItemURL else { return }
         logger.debug("presentedItemDidChange triggered for: \(url.path)")
-        self.hydrateAndSyncLocalCache(from: url)
+        
+        syncWorkItem?.cancel()
+        
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.hydrateAndSyncLocalCache(from: url)
+        }
+        
+        syncWorkItem = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: workItem)
     }
 
     // Fuerza la descarga de archivos que están en el disco pero "deshidratados" (.icloud)
