@@ -260,9 +260,15 @@ private struct ModelRowView: View {
                         .foregroundColor(.secondary)
                 }
                 if isDownloadingThis {
-                    ProgressView(value: manager.downloadProgress[model.id] ?? 0, total: 1.0)
-                        .progressViewStyle(.linear)
-                        .padding(.top, 2)
+                    HStack(spacing: 6) {
+                        ProgressView(value: manager.downloadProgress[model.id] ?? 0, total: 1.0)
+                            .progressViewStyle(.linear)
+                        Text(String(format: "%.0f%%", (manager.downloadProgress[model.id] ?? 0) * 100))
+                            .font(.caption.monospaced())
+                            .foregroundColor(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                    .padding(.top, 2)
                 }
             }
 

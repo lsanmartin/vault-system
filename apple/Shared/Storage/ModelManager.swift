@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import HuggingFace
 import Hub
 
 /// Error del Model Manager con mensajes legibles para la UI.
@@ -125,6 +124,7 @@ public final class ModelManager: ObservableObject {
 
     private var customModels: [LocalModel] = []
     private var downloadTask: Task<Void, Error>? = nil
+    private var lastReportedPct: [String: Double] = [:]
     private let queue = DispatchQueue(label: "cl.nicelio.vault.modelmanager", qos: .utility)
 
     // MARK: - Init
@@ -314,21 +314,18 @@ public final class ModelManager: ObservableObject {
 
     // MARK: - Descarga
 
-    /// Cliente HF SIN autenticación para descargas.
-    ///
-    /// Los modelos del catálogo son repositorios públicos. `HubClient.default`
-    /// usa `tokenProvider: .environment`, que además de `HF_TOKEN` lee el archivo
-    /// `~/.cache/huggingface/token` — donde el CLI de HF guarda un JWT OAuth
-    /// (`hf_oauth_…`). Si ese token expira/revoca, cada descarga recibe 401
-    /// (`HTTPClientError.errorCode` 1) y falla. Con `tokenProvider: .none` nunca
-    /// se envía `Authorization`, así las descargas públicas siempre funcionan.
-    private static let publicHubClient = HubClient(
-        host: HubClient.defaultHost,
-        tokenProvider: .none
-    )
-
     /// Descarga el snapshot MLX de `id` directo al directorio canónico con
     /// progreso. Serializado: una sola descarga a la vez.
+    ///
+    /// Descarga a `<dir>.partial` y mueve al canónico al terminar, así
+    /// `modelIsDownloaded` (config.json) nunca ve un modelo a medias.
+    ///
+    /// Transporte: `dataTask` + delegate que escribe a disco. NO usar
+    /// `URLSession.downloadTask` ni `bytes(for:)` para pesos grandes: en macOS se
+    /// cuelgan contra el CDN xet-bridge de Hugging Face en archivos ≳25MB — la
+    /// tarea espera sin recibir ni un byte (verificado 2026-08-15 con el peso de
+    /// 3.55GB de gemma-4-e2b). Solo `dataTask` fluye de forma estable
+    /// (91MB/20s en el mismo archivo).
     func downloadModel(id: String) async throws {
         // Serialización con `downloadTask` (no solo `isDownloading`, que se setea
         // async vía bridge): dos callers simultáneos (click "Usar" + generación)
@@ -340,35 +337,64 @@ public final class ModelManager: ObservableObject {
             }
             throw ModelManagerError.alreadyDownloading
         }
-        guard let repo = Repo.ID(rawValue: id) else {
+        guard Self.isValidRepoID(id) else {
             throw ModelManagerError.invalidRepoID(id)
         }
 
         let destination = modelDirectory(for: id)
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let parent = destination.deletingLastPathComponent()
+        let partialDir = parent.appendingPathComponent(destination.lastPathComponent + ".partial")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
 
         // Marcar la descarga ANTES de crear la tarea: el guard reconoce la
         // descarga en curso aunque `bridgeDownload` aún no haya corrido.
         self.downloadingModelID = id
+        // Reset del throttle de progreso: sin esto, una re-descarga del mismo
+        // modelo compara contra el 1.0 previo y el % nunca avanza.
+        self.lastReportedPct[id] = 0
 
         let task = Task<Void, Error> { [weak self] in
             guard let self else { return }
             do {
                 self.bridgeDownload(started: true, progress: 0, modelID: id)
-                _ = try await Self.publicHubClient.downloadSnapshot(
-                    of: repo,
-                    kind: .model,
-                    to: destination,
-                    progressHandler: { [weak self] progress in
-                        self?.bridgeDownload(started: true, progress: progress.fractionCompleted, modelID: id)
+                try? FileManager.default.removeItem(at: partialDir)
+                try FileManager.default.createDirectory(at: partialDir, withIntermediateDirectories: true)
+
+                // 1) Enumerar archivos del repo (API REST HF) para saber el total.
+                let files = try await self.listRemoteFiles(repoID: id)
+                guard !files.isEmpty else {
+                    throw ModelManagerError.invalidRepoID(id)
+                }
+                let totalWeight = files.reduce(Int64(0)) { $0 + $1.size }
+                let counter = DownloadCounter()
+
+                // 2) Descargar cada archivo con `dataTask` + streaming a disco.
+                for file in files {
+                    try Task.checkCancellation()
+                    let fileURL = partialDir.appendingPathComponent(file.path)
+                    let dlURL = Self.resolveDownloadURL(repoID: id, path: file.path)
+                    try await self.streamFile(from: dlURL, to: fileURL) { received in
+                        let soFar = counter.total + received
+                        self.reportDownloadProgress(soFar, total: totalWeight, modelID: id)
                     }
-                )
+                    counter.add(file.size)
+                }
                 if Task.isCancelled { throw CancellationError() }
+
+                // 3) Mover `.partial` → canónico: el modelo aparece completo.
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try? FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: partialDir, to: destination)
+
                 self.scanModels()
                 self.bridgeDownload(started: false, progress: 1.0, modelID: nil)
             } catch {
-                self.cleanupPartialDownload(id: id)
-                if Task.isCancelled || (error as? CancellationError) != nil {
+                try? FileManager.default.removeItem(at: partialDir)
+                let cancelled = Task.isCancelled
+                    || (error as? CancellationError) != nil
+                    || (error as? URLError)?.code == .cancelled
+                if cancelled {
                     self.bridgeDownload(started: false, progress: 0, modelID: nil)
                 } else {
                     self.bridgeDownloadError(error, modelID: id)
@@ -386,15 +412,111 @@ public final class ModelManager: ObservableObject {
         downloadTask = nil
     }
 
-    func cancelCurrentDownload() {
-        downloadTask?.cancel()
+    /// Lista los archivos de un repo HF vía API REST (`/api/models/<id>/tree/main`).
+    /// Devuelve `(path, size)` de cada archivo, sin subdirectorios.
+    private func listRemoteFiles(repoID: String) async throws -> [(path: String, size: Int64)] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repoID)/tree/main?recursive=true") else {
+            throw ModelManagerError.invalidRepoID(repoID)
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw ModelManagerError.invalidRepoID(repoID)
+        }
+        struct TreeFile: Decodable {
+            let type: String
+            let path: String
+            let size: Int?
+        }
+        let entries = try JSONDecoder().decode([TreeFile].self, from: data)
+        return entries
+            .filter { $0.type == "file" }
+            .compactMap { entry -> (path: String, size: Int64)? in
+                guard let size = entry.size, size > 0 else { return nil }
+                return (entry.path, Int64(size))
+            }
     }
 
-    private func cleanupPartialDownload(id: String) {
-        try? FileManager.default.removeItem(at: modelDirectory(for: id))
-        DispatchQueue.main.async {
-            self.downloadProgress.removeValue(forKey: id)
+    private static func resolveDownloadURL(repoID: String, path: String) -> URL {
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        return URL(string: "https://huggingface.co/\(repoID)/resolve/main/\(encoded)")!
+    }
+
+    /// Valida un repo id con formato "namespace/nombre" (equivalente a `Repo.ID` de
+    /// swift-huggingface, replicado sin importar el módulo HuggingFace).
+    private static func isValidRepoID(_ rawValue: String) -> Bool {
+        let components = rawValue.split(separator: "/", maxSplits: 1)
+        return components.count == 2 && !components[0].isEmpty && !components[1].isEmpty
+    }
+
+    /// Descarga un archivo con `dataTask` + delegate que escribe a disco en
+    /// incrementos (evita el cuelgue de `downloadTask` en pesos grandes).
+    private func streamFile(
+        from url: URL,
+        to fileURL: URL,
+        onBytes: @escaping (Int64) -> Void
+    ) async throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: fileURL)
+
+        let downloader = StreamDownloadDelegate(handle: handle, onBytes: onBytes)
+        // `delegateQueue: nil` → URLSession crea su propia cola serial de fondo;
+        // los callbacks de bytes no saturan el hilo principal.
+        let session = URLSession(configuration: .default, delegate: downloader, delegateQueue: nil)
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                downloader.onFinish = { error in
+                    session.invalidateAndCancel()
+                    try? handle.close()
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+                let task = session.dataTask(with: url)
+                downloader.currentTask = task
+                task.resume()
+            }
+        } onCancel: {
+            downloader.currentTask?.cancel()
         }
+    }
+
+    /// Actualiza el progreso global con throttle (cada ~0.4%) para no saturar el
+    /// main actor durante una descarga de gigabytes.
+    private func reportDownloadProgress(_ soFar: Int64, total: Int64, modelID: String) {
+        guard total > 0 else { return }
+        let pct = Double(soFar) / Double(total)
+        let last = lastReportedPct[modelID] ?? 0
+        if pct - last >= 0.004 || pct >= 1.0 {
+            lastReportedPct[modelID] = pct
+            bridgeDownload(started: true, progress: pct, modelID: modelID)
+        }
+    }
+
+    /// Contador atómico del progreso (acumula archivos completados).
+    private final class DownloadCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int64 = 0
+        var total: Int64 {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func add(_ n: Int64) {
+            lock.lock(); defer { lock.unlock() }
+            value += n
+        }
+    }
+
+    func cancelCurrentDownload() {
+        downloadTask?.cancel()
     }
 
     // MARK: - Bridge a LocalBrain (overlay de ContentView)
@@ -511,7 +633,7 @@ public final class ModelManager: ObservableObject {
     @discardableResult
     func addCustomModel(repoID: String) -> Bool {
         let trimmed = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Repo.ID(rawValue: trimmed) != nil else { return false }
+        guard Self.isValidRepoID(trimmed) else { return false }
         guard !models.contains(where: { $0.id == trimmed }) else { return false }
 
         let name = trimmed.components(separatedBy: "/").last?
@@ -553,5 +675,52 @@ public final class ModelManager: ObservableObject {
         } else {
             unsetenv("HF_TOKEN")
         }
+    }
+}
+
+/// Delegate de `dataTask` que escribe los bytes recibidos a disco en incrementos
+/// y notifica progreso.
+///
+/// EXISTENCIA: `URLSession.downloadTask` (y `URLSession.bytes(for:)`) se cuelgan
+/// en macOS contra el CDN xet-bridge de Hugging Face para archivos ≳25MB —
+/// la tarea queda esperando sin recibir bytes (reproducido 2026-08-15 con el
+/// peso de 3.55GB de gemma-4-e2b). `dataTask` con delegate que escribe a disco
+/// fluye de forma estable (91MB/20s), así que las descargas de modelos usan este
+/// camino.
+private final class StreamDownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let handle: FileHandle
+    private let onBytes: (Int64) -> Void
+    private let lock = NSLock()
+    private var received: Int64 = 0
+    weak var currentTask: URLSessionTask?
+    /// Se setea por `streamFile` antes de `resume`; al terminar se llama con el
+    /// error (o nil si OK) y el continuo retoma.
+    var onFinish: ((Error?) -> Void)?
+
+    init(handle: FileHandle, onBytes: @escaping (Int64) -> Void) {
+        self.handle = handle
+        self.onBytes = onBytes
+        super.init()
+    }
+
+    func urlSession(
+        _: URLSession,
+        dataTask _: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        lock.lock()
+        received += Int64(data.count)
+        let r = received
+        lock.unlock()
+        try? handle.write(contentsOf: data)
+        onBytes(r)
+    }
+
+    func urlSession(
+        _: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        onFinish?(error)
     }
 }
