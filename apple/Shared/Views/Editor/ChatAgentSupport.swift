@@ -74,6 +74,7 @@ enum ChatAgentSupport {
             var streamedText = ""
             var tcAccum: [Int: (id: String, name: String, args: String)] = [:]
             var finishReason: String? = nil
+            var lastRender = Date()
 
             for try await line in bytes.lines {
                 guard line.hasPrefix("data: "), line != "data: [DONE]" else { continue }
@@ -89,7 +90,11 @@ enum ChatAgentSupport {
                 if let content = delta["content"] as? String, !content.isEmpty {
                     streamedText += content
                     if let onDelta {
-                        await onDelta(streamedText)
+                        let now = Date()
+                        if now.timeIntervalSince(lastRender) > 0.05 {
+                            lastRender = now
+                            await onDelta(streamedText)
+                        }
                     }
                 }
 
@@ -105,6 +110,11 @@ enum ChatAgentSupport {
                         tcAccum[idx] = cur
                     }
                 }
+            }
+            
+            // Garantizar que el texto final llegue a la UI
+            if let onDelta, !streamedText.isEmpty {
+                await onDelta(streamedText)
             }
 
             let text = streamedText.isEmpty ? nil : streamedText

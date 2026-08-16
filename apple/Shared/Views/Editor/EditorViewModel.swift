@@ -3,7 +3,17 @@ import SwiftUI
 import Combine
 
 // Extender el modelo generado para que SwiftUI pueda identificarlo sin especificar el ID en cada ForEach
-extension NoteRecord: Identifiable {}
+extension NoteRecord: Identifiable {
+    var formattedModificationDate: String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let date = attrs[.modificationDate] as? Date else {
+            return ""
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd/MM/yy HH:mm"
+        return formatter.string(from: date)
+    }
+}
 
 extension Color {
     init(hex: String) {
@@ -44,6 +54,16 @@ struct TabItem: Identifiable, Hashable {
     var language: String {
         if renderMode == .html || id.lowercased().hasSuffix(".html") { return "html" }
         return "markdown"
+    }
+    
+    var formattedModificationDate: String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: id),
+              let date = attrs[.modificationDate] as? Date else {
+            return ""
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd/MM/yy HH:mm"
+        return formatter.string(from: date)
     }
     
     var lastSavedText: String {

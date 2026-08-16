@@ -2,9 +2,30 @@ import SwiftUI
 import Combine
 import WebKit
 
+struct TaskPlan: Equatable {
+    let id = UUID()
+    var name: String
+    var pendingItems: [String]
+    var completedItems: [String] = []
+    var currentTurn: Int = 0
+    let maxTurns: Int = 15
+    
+    var isComplete: Bool { pendingItems.isEmpty }
+    var pendingCount: Int { pendingItems.count }
+    
+    mutating func markCompleted(_ item: String) {
+        if let idx = pendingItems.firstIndex(of: item) {
+            pendingItems.remove(at: idx)
+            if !completedItems.contains(item) {
+                completedItems.append(item)
+            }
+        }
+    }
+}
+
 struct LocalChatMessage: Identifiable, Equatable {
     let id = UUID()
-    let text: String
+    var text: String
     let isUser: Bool
     let agentCode: String?
     let timestamp = Date()
@@ -71,17 +92,14 @@ struct LocalChatView: View {
 
     @State private var showAgentSettings = false
     @State private var showModelManager = false
-    /// Pesos de altura por agentCode (proporciones entre secciones, persistidas).
-    /// Vacio = todos iguales. El tirador entre secciones los ajusta y se guardan en UserDefaults.
-    @State private var weights: [String: Double] = [:]
-
-    private static let weightsKey = "vault_chat_weights"
-    private static let minWeight = 0.12   // una sección nunca queda por debajo de esta proporción
-    private static let minSectionHeight: CGFloat = 100   // piso de alto por sección (adaptativo si la ventana es corta)
-    private static let bottomInset: CGFloat = 12          // margen inferior tras el último chat (evita input cortado)
+    @State private var selectedAgentCode: String? = "LC" // Default to local
 
     var chips: [AgentChip] {
         [.local] + agentManager.agents.map { .external($0) }
+    }
+    
+    var selectedChip: AgentChip {
+        chips.first(where: { $0.agentCode == selectedAgentCode }) ?? .local
     }
 
     var body: some View {
@@ -116,30 +134,35 @@ struct LocalChatView: View {
 
             Divider()
 
-            // Secciones por agente: cada una ocupa su proporción de la altura.
-            // Entre secciones hay un tirador que redimensiona la proporción.
-            GeometryReader { geo in
-                // `total` ya descuenta el margen inferior: las secciones nunca llegan al borde de la ventana.
-                let total = max(geo.size.height - Self.bottomInset, 1)
-                let codes = chips.map { $0.agentCode }
-                let sum = codes.reduce(0.0) { acc, c in acc + (weights[c] ?? 1.0) }
-                // Piso adaptativo: si la ventana es tan corta que n×100 supera el alto, el piso baja
-                // para que las secciones sumen ≤ total (nunca desbordan ni quedan traslapadas).
-                let minSection = min(Self.minSectionHeight, total / CGFloat(max(codes.count, 1)))
-                VStack(spacing: 0) {
-                    ForEach(Array(chips.enumerated()), id: \.element) { i, chip in
-                        AgentChatSection(agent: chip, viewModel: viewModel)
-                            .frame(height: max(minSection, total * (weights[chip.agentCode] ?? 1.0) / sum))
-                        if i < chips.count - 1 {
-                            ChatSectionDivider { deltaPts in
-                                resizeWeights(index: i, codes: codes, deltaPts: deltaPts, total: total)
-                            }
+            // Chat Activo
+            AgentChatSection(agent: selectedChip, viewModel: viewModel)
+            
+            // Selector Inferior de Agentes (Mismo estilo que SidebarColumn)
+            HStack(spacing: 16) {
+                ForEach(chips, id: \.self) { chip in
+                    Button(action: { withAnimation { selectedAgentCode = chip.agentCode } }) {
+                        VStack(spacing: 4) {
+                            iconFor(chip: chip)
+                                .foregroundColor(selectedAgentCode == chip.agentCode ? .primary : viewModel.macControlIcon)
+                            
+                            Circle()
+                                .fill(selectedAgentCode == chip.agentCode ? Color.primary.opacity(0.8) : Color.clear)
+                                .frame(width: 4, height: 4)
                         }
+                        .padding(.top, 6)
+                        .padding(.bottom, 2)
+                        .padding(.horizontal, 8)
+                        .contentShape(Rectangle())
                     }
-                    // Margen inferior tras el último chat: el input no queda pegado ni cortado al borde.
-                    Spacer(minLength: Self.bottomInset)
+                    .buttonStyle(.plain)
+                    .help(chip.displayName)
                 }
             }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .background(AnyView(Rectangle().fill(.ultraThinMaterial)))
+            .overlay(Divider(), alignment: .top)
         }
         .frame(minWidth: 280, maxWidth: 550)
         .sheet(isPresented: $showAgentSettings) {
@@ -151,79 +174,25 @@ struct LocalChatView: View {
                 .frame(width: 620, height: 720)
         }
         .onAppear {
-            weights = loadWeights()
+            if selectedAgentCode == nil {
+                selectedAgentCode = "LC"
+            }
         }
     }
 
-    // MARK: - Proporciones (tirador entre secciones)
-
-    private func loadWeights() -> [String: Double] {
-        guard let data = UserDefaults.standard.data(forKey: Self.weightsKey),
-              let stored = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }
-        return stored
-    }
-
-    private func saveWeights(_ w: [String: Double]) {
-        if let data = try? JSONEncoder().encode(w) {
-            UserDefaults.standard.set(data, forKey: Self.weightsKey)
-        }
-    }
-
-    /// Ajusta el peso relativo de las secciones `i` e `i+1` (la del tirador arrastrado).
-    /// `deltaPts` > 0 → la sección superior crece (la inferior se encoge), y viceversa.
-    /// La suma de pesos se conserva; el cambio se persiste (proporción sobrevive al reinicio).
-    private func resizeWeights(index i: Int, codes: [String], deltaPts: CGFloat, total: CGFloat) {
-        guard total > 0, i >= 0, i < codes.count - 1 else { return }
-        let frac = Double(deltaPts / total)
-        var w = weights
-        for c in codes where w[c] == nil { w[c] = 1.0 }
-        let a = codes[i], b = codes[i + 1]
-        let na = (w[a] ?? 1.0) + frac
-        let nb = (w[b] ?? 1.0) - frac
-        guard na > Self.minWeight, nb > Self.minWeight else { return }
-        w[a] = na
-        w[b] = nb
-        weights = w
-        saveWeights(w)
-    }
-}
-
-/// Tirador horizontal entre dos secciones del chat: drag vertical redimensiona la
-/// proporción (la sección superior crece/encoge según la dirección del arrastre).
-struct ChatSectionDivider: View {
-    var onDrag: (CGFloat) -> Void
-    @State private var lastTranslation: CGFloat = 0
-
-    var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color(NSColor.windowBackgroundColor))
-            Rectangle()
-                .fill(Color.secondary.opacity(0.18))
-                .frame(height: 1)
-            HStack(spacing: 3) {
-                ForEach(0..<3, id: \.self) { _ in
-                    Circle()
-                        .fill(Color.secondary.opacity(0.45))
-                        .frame(width: 3, height: 3)
+    private func iconFor(chip: AgentChip) -> some View {
+        Group {
+            switch chip {
+            case .local:
+                Image(systemName: "cpu").font(.title3)
+            case .external(let a):
+                switch a.provider {
+                case .deepseek: Image(systemName: "water.waves").font(.title3)
+                case .anthropic: Image(systemName: "brain").font(.title3)
+                case .openai: Image(systemName: "sparkles").font(.title3)
                 }
             }
         }
-        .frame(height: 10)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            if hovering { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 2)
-                .onChanged { value in
-                    let d = value.translation.height - lastTranslation
-                    lastTranslation = value.translation.height
-                    if d != 0 { onDrag(d) }
-                }
-                .onEnded { _ in lastTranslation = 0 }
-        )
-        .help("Arrastrar para redimensionar")
     }
 }
 
@@ -245,6 +214,7 @@ struct AgentChatSection: View {
     @State private var generationTask: Task<Void, Never>? = nil
     @State private var streamMsgID: UUID? = nil   // mensaje en streaming (append 1er chunk + update por id)
     @State private var agentStateEpoch = 0        // fuerza re-render del header al togglear agentes externos
+    @State private var currentTaskPlan: TaskPlan? = nil // Plan de ejecución multi-paso actual
 
     // Lazy loading (chat infinito tipo WhatsApp)
     @State private var hasMoreOlder = true
@@ -447,6 +417,19 @@ struct AgentChatSection: View {
 
             // Input
             HStack(alignment: .bottom, spacing: 8) {
+                Menu {
+                    Button("Auditar Memoria (_vault) - /audit") { sendDirectCommand("[CMD: audit_memory_consistency, path: \"_vault\"]") }
+                    Button("Listar Workspace Actual - /list") { sendDirectCommand("[CMD: list_directory, path: \"_vault\"]") }
+                } label: {
+                    Image(systemName: "bolt.fill")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 24)
+                .padding(.bottom, 6)
+
                 ChatInputView(text: $inputText, disabled: !isAgentEnabled, onCommit: send)
                     .frame(minHeight: 44, maxHeight: 200)
                     .fixedSize(horizontal: false, vertical: true)
@@ -475,6 +458,11 @@ struct AgentChatSection: View {
         }
         .overlay(alignment: .top) { Divider() }
         .onAppear { loadThread() }
+        .onChange(of: agent) { _, _ in
+            messages.removeAll()
+            hasMoreOlder = true
+            loadThread()
+        }
         .onDisappear {
             DispatchQueue.global().async { saveCurrentThreadMessages() }
         }
@@ -916,9 +904,23 @@ struct AgentChatSection: View {
 
     // MARK: - Send
 
+    private func sendDirectCommand(_ cmd: String) {
+        inputText = cmd
+        send()
+    }
+
     private func send() {
-        let clean = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var clean = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
+
+        // Expansión de slash commands (Quick Actions)
+        if clean == "/audit" {
+            clean = "Instrucción estricta: Ejecuta la siguiente herramienta y encadena con read_file. Al finalizar, entrega un listado limpio de los resultados. PROHIBIDO decir que la herramienta no fue invocada. \n\n[CMD: audit_memory_consistency, path: \"_vault\"]"
+            inputText = clean
+        } else if clean == "/list" {
+            clean = "Instrucción estricta: Ejecuta la siguiente herramienta y entrega exclusivamente el listado de archivos resultante sin añadir comentarios. \n\n[CMD: list_directory, path: \"_vault\"]"
+            inputText = clean
+        }
 
         // Detectar @mención → redirigir a la sección del agente mencionado.
         // Solo si apunta a OTRO agente; mencionarse a sí mismo envía normal.
@@ -1001,11 +1003,24 @@ struct AgentChatSection: View {
         isGenerating = true
 
         let ctx = activeNoteContext()
+        
+        // Extraer historial excluyendo comandos de UI y el prompt actual (que es el último).
+        // Se preserva el turno de mensajes de rol 'user' y 'model'.
+        var history: [(role: String, content: String)] = []
+        for m in messages.dropLast() { // dropLast porque `userMsg` ya se insertó
+            if m.type == nil && !m.text.starts(with: "/") && !m.text.starts(with: "──") {
+                history.append((role: m.isUser ? "user" : "model", content: m.text))
+            }
+        }
+        // Sliding window simple (últimos 4 turnos / 8 mensajes)
+        if history.count > 8 {
+            history = Array(history.suffix(8))
+        }
 
         generationTask = Task {
             switch agent {
             case .local:
-                sendLocal(prompt: prompt, context: ctx)
+                sendLocal(prompt: prompt, context: ctx, history: history)
             case .external(let a):
                 sendExternal(prompt: prompt, agent: a, context: ctx)
             }
@@ -1014,23 +1029,285 @@ struct AgentChatSection: View {
 
     // MARK: - Local Brain
 
-    private func sendLocal(prompt: String, context: String, noteAI: NoteAIApplyInfo? = nil) {
+    private func sendLocal(prompt: String, context: String, history: [(role: String, content: String)] = [], noteAI: NoteAIApplyInfo? = nil) {
         let code = agent.agentCode
         Task {
             do {
-                let stream = try await brain.chatStream(prompt: prompt, context: context)
+                let stream = try await brain.chatStream(prompt: prompt, context: context, history: history)
                 let msg = LocalChatMessage(text: "", isUser: false, agentCode: code)
                 await MainActor.run {
                     streamMsgID = msg.id
                     messages.append(msg)
                 }
                 var acc = ""
+                var lastRender = Date()
                 for await chunk in stream {
                     acc += chunk
-                    await MainActor.run {
-                        if let i = messages.indices.last { messages[i] = LocalChatMessage(text: acc, isUser: false, agentCode: code) }
+                    let now = Date()
+                    if now.timeIntervalSince(lastRender) > 0.05 {
+                        lastRender = now
+                        await MainActor.run {
+                            if let i = messages.indices.last { messages[i].text = acc }
+                        }
                     }
                 }
+                // Final flush to guarantee last chunks are rendered
+                await MainActor.run {
+                    if let i = messages.indices.last { messages[i].text = acc }
+                }
+                
+                // Loop de herramientas para el Cerebro Local
+                if acc.contains("[CMD: ") {
+                    var toolResult = ""
+                    var toolName = ""
+                    var interceptedOpenNote = false
+                    
+                    if let range = acc.range(of: "\\[CMD: audit_memory_consistency, path: \"([^\"]+)\"\\]", options: .regularExpression) {
+                        let cmdStr = String(acc[range])
+                        if let pathRange = cmdStr.range(of: "(?<=path: \")[^\"]+", options: .regularExpression) {
+                            var path = String(cmdStr[pathRange])
+                            if let ws = WorkspaceManager.shared.locations.first(where: { $0.name == path }) { path = ws.path }
+                            toolName = "audit_memory_consistency(\(URL(fileURLWithPath: path).lastPathComponent))"
+                            
+                            // Macro-Tool: Ejecución determinística masiva en Swift
+                            if let items = try? FileManager.default.contentsOfDirectory(atPath: path) {
+                                var report = "# Reporte de Consistencia de Memoria\n\n"
+                                var audited = 0
+                                for item in items {
+                                    var isDir: ObjCBool = false
+                                    let fullPath = (path as NSString).appendingPathComponent(item)
+                                    if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir), isDir.boolValue, !item.hasPrefix(".") {
+                                        let memPath = (fullPath as NSString).appendingPathComponent("_memory.md")
+                                        if let attrs = try? FileManager.default.attributesOfItem(atPath: memPath),
+                                           let modDate = attrs[.modificationDate] as? Date,
+                                           let size = attrs[.size] as? Int64 {
+                                            report += "- **\(item)**: `_memory.md` OK (\(size) bytes, mod: \(modDate))\n"
+                                        } else {
+                                            let template = "# Memoria: \(item)\n\n## Resumen\n\n## Relacionado\n"
+                                            try? template.write(toFile: memPath, atomically: true, encoding: .utf8)
+                                            report += "- **\(item)**: `_memory.md` CREADO (Template)\n"
+                                        }
+                                        
+                                        // Crear _lore.md y _specs.md proactivamente
+                                        let lorePath = (fullPath as NSString).appendingPathComponent("_lore.md")
+                                        if !FileManager.default.fileExists(atPath: lorePath) {
+                                            let loreTemplate = "# Contexto Fundacional (\(item))\n\nPropósito y narrativa del dominio.\n"
+                                            try? loreTemplate.write(toFile: lorePath, atomically: true, encoding: .utf8)
+                                            report += "  - `_lore.md` CREADO\n"
+                                        }
+                                        let specsPath = (fullPath as NSString).appendingPathComponent("_specs.md")
+                                        if !FileManager.default.fileExists(atPath: specsPath) {
+                                            let specsTemplate = "# Especificación Técnica (\(item))\n\nDecisiones de arquitectura y estándares.\n"
+                                            try? specsTemplate.write(toFile: specsPath, atomically: true, encoding: .utf8)
+                                            report += "  - `_specs.md` CREADO\n"
+                                        }
+                                        
+                                        audited += 1
+                                    }
+                                }
+                                
+                                // Volcado a artefacto para proteger GPU/OOM
+                                let df = DateFormatter(); df.dateFormat = "yyyyMMdd_HHmmss"
+                                let reportPath = (path as NSString).appendingPathComponent("_harness/audit_report_\(df.string(from: Date())).md")
+                                try? FileManager.default.createDirectory(atPath: (path as NSString).appendingPathComponent("_harness"), withIntermediateDirectories: true)
+                                try? report.write(toFile: reportPath, atomically: true, encoding: .utf8)
+                                
+                                toolResult = "Auditoría completada determinísticamente por el Harness (\(audited) carpetas). Reporte generado en: \(reportPath). Ejecuta [CMD: read_file, path: \"\(reportPath)\"] y luego resume los resultados para el usuario."
+                            } else {
+                                toolResult = "Error: Directorio inválido."
+                            }
+                        }
+                    } else if let range = acc.range(of: "\\[CMD: list_directory, path: \"([^\"]+)\"\\]", options: .regularExpression) {
+                        let cmdStr = String(acc[range])
+                        if let pathRange = cmdStr.range(of: "(?<=path: \")[^\"]+", options: .regularExpression) {
+                            var path = String(cmdStr[pathRange])
+                            // Fallback heurístico: si pasó un nombre de workspace, buscar su ruta absoluta
+                            if let ws = WorkspaceManager.shared.locations.first(where: { $0.name == path }) {
+                                path = ws.path
+                            }
+                            toolName = "list_directory(\(URL(fileURLWithPath: path).lastPathComponent))"
+                            if let items = try? FileManager.default.contentsOfDirectory(atPath: path) {
+                                toolResult = items.joined(separator: "\n")
+                                
+                                // Auto-generar TaskPlan si parece ser una tarea masiva
+                                await MainActor.run {
+                                    if currentTaskPlan == nil && messages.count < 6 {
+                                        let filtered = items.filter { !$0.hasPrefix(".") && !$0.contains(".") }
+                                        if filtered.count > 1 {
+                                            currentTaskPlan = TaskPlan(name: "Listado \((URL(fileURLWithPath: path).lastPathComponent))", pendingItems: filtered)
+                                        }
+                                    }
+                                }
+                            } else {
+                                toolResult = "Error: No se pudo leer el directorio. Ruta inválida o no es un directorio absoluto."
+                            }
+                        }
+                    } else if let range = acc.range(of: "\\[CMD: read_file, path: \"([^\"]+)\"\\]", options: .regularExpression) {
+                        let cmdStr = String(acc[range])
+                        if let pathRange = cmdStr.range(of: "(?<=path: \")[^\"]+", options: .regularExpression) {
+                            let path = String(cmdStr[pathRange])
+                            toolName = "read_file(\(URL(fileURLWithPath: path).lastPathComponent))"
+                            if let content = try? String(contentsOfFile: path, encoding: .utf8) {
+                                toolResult = String(content.prefix(3000))
+                            } else {
+                                toolResult = "Error: No se pudo leer el archivo. Ruta inválida."
+                            }
+                            
+                            await MainActor.run {
+                                if currentTaskPlan != nil {
+                                    let folderName = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
+                                    currentTaskPlan?.markCompleted(folderName)
+                                }
+                            }
+                        }
+                    } else if let range = acc.range(of: "\\[CMD: open_note, path: \"([^\"]+)\"\\]", options: .regularExpression) {
+                        let cmdStr = String(acc[range])
+                        if let pathRange = cmdStr.range(of: "(?<=path: \")[^\"]+", options: .regularExpression) {
+                            var path = String(cmdStr[pathRange])
+                            // Validar si intentó abrir un workspace entero
+                            if let ws = WorkspaceManager.shared.locations.first(where: { $0.name == path }) {
+                                path = ws.path
+                            }
+                            
+                            var isDir: ObjCBool = false
+                            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir) {
+                                if isDir.boolValue {
+                                    // Auto-corrección silenciosa: Si es un directorio, listamos el directorio en lugar de fallar
+                                    toolName = "list_directory(\(URL(fileURLWithPath: path).lastPathComponent))"
+                                    if let items = try? FileManager.default.contentsOfDirectory(atPath: path) {
+                                        toolResult = items.joined(separator: "\n")
+                                    } else {
+                                        toolResult = "Error: No se pudo leer el directorio."
+                                    }
+                                    interceptedOpenNote = true
+                                }
+                            } else if !path.starts(with: "/") {
+                                toolName = "open_note_failed(\(path))"
+                                toolResult = "Error: La ruta '\(path)' no existe. Si es un workspace, usa list_directory con su ruta absoluta."
+                                interceptedOpenNote = true
+                            }
+                        }
+                    } else if let range = acc.range(of: "\\[CMD: ([a-zA-Z0-9_]+)", options: .regularExpression) {
+                        let match = acc[range]
+                        // Extracted tool name that is not handled
+                        let toolNameParsed = match.replacingOccurrences(of: "[CMD: ", with: "")
+                        if toolNameParsed == "vault_get_domain_context" || toolNameParsed == "audit_memory_consistency" {
+                            var path = "_vault"
+                            if let domainRange = acc.range(of: "(?<=domain: \")[^\"]+", options: .regularExpression) {
+                                path = String(acc[domainRange])
+                            } else if let paramRange = acc.range(of: "(?<=\\(\"?)[^\")]+", options: .regularExpression) {
+                                path = String(acc[paramRange])
+                            }
+                            toolName = "audit_memory_consistency(\(path))"
+                            // Fallback heurístico: si pasó un nombre de workspace, buscar su ruta absoluta
+                            if let ws = WorkspaceManager.shared.locations.first(where: { $0.name == path }) { path = ws.path }
+                            
+                            if let items = try? FileManager.default.contentsOfDirectory(atPath: path) {
+                                var report = "# Reporte de Consistencia de Memoria\n\n"
+                                var audited = 0
+                                for item in items {
+                                    var isDir: ObjCBool = false
+                                    let fullPath = (path as NSString).appendingPathComponent(item)
+                                    if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir), isDir.boolValue, !item.hasPrefix(".") {
+                                        let memPath = (fullPath as NSString).appendingPathComponent("_memory.md")
+                                        if let attrs = try? FileManager.default.attributesOfItem(atPath: memPath),
+                                           let modDate = attrs[.modificationDate] as? Date,
+                                           let size = attrs[.size] as? Int64 {
+                                            report += "- **\(item)**: `_memory.md` OK (\(size) bytes, mod: \(modDate))\n"
+                                        } else {
+                                            let template = "# Memoria: \(item)\n\n## Resumen\n\n## Relacionado\n"
+                                            try? template.write(toFile: memPath, atomically: true, encoding: .utf8)
+                                            report += "- **\(item)**: `_memory.md` CREADO (Template)\n"
+                                        }
+                                        
+                                        // Crear _lore.md y _specs.md proactivamente
+                                        let lorePath = (fullPath as NSString).appendingPathComponent("_lore.md")
+                                        if !FileManager.default.fileExists(atPath: lorePath) {
+                                            let loreTemplate = "# Contexto Fundacional (\(item))\n\nPropósito y narrativa del dominio.\n"
+                                            try? loreTemplate.write(toFile: lorePath, atomically: true, encoding: .utf8)
+                                            report += "  - `_lore.md` CREADO\n"
+                                        }
+                                        let specsPath = (fullPath as NSString).appendingPathComponent("_specs.md")
+                                        if !FileManager.default.fileExists(atPath: specsPath) {
+                                            let specsTemplate = "# Especificación Técnica (\(item))\n\nDecisiones de arquitectura y estándares.\n"
+                                            try? specsTemplate.write(toFile: specsPath, atomically: true, encoding: .utf8)
+                                            report += "  - `_specs.md` CREADO\n"
+                                        }
+                                        
+                                        audited += 1
+                                    }
+                                }
+                                let df = DateFormatter(); df.dateFormat = "yyyyMMdd_HHmmss"
+                                let reportPath = (path as NSString).appendingPathComponent("_harness/audit_report_\(df.string(from: Date())).md")
+                                try? FileManager.default.createDirectory(atPath: (path as NSString).appendingPathComponent("_harness"), withIntermediateDirectories: true)
+                                try? report.write(toFile: reportPath, atomically: true, encoding: .utf8)
+                                toolResult = "(Auto-corregido a audit_memory_consistency) Auditoría completada determinísticamente por el Harness (\(audited) carpetas). Reporte generado en: \(reportPath). Ejecuta [CMD: read_file, path: \"\(reportPath)\"] y luego resume los resultados para el usuario."
+                            } else {
+                                toolResult = "Error: Directorio inválido."
+                            }
+                        } else {
+                            toolName = "tool_not_found(\(toolNameParsed))"
+                            toolResult = "Error crítico: '\(toolNameParsed)' no existe. DEBES emitir [CMD: list_directory, path: \"...\"] o [CMD: audit_memory_consistency, path: \"...\"] en tu próxima respuesta sin excepciones."
+                        }
+                    }
+                    
+                    if !toolResult.isEmpty {
+                        await MainActor.run {
+                            let toolMsg = LocalChatMessage(text: "🔧 Ejecutado: \(toolName)\n```\n\(toolResult)\n```", isUser: true, agentCode: nil, type: "tools")
+                            messages.append(toolMsg)
+                            saveMessage(toolMsg)
+                        }
+                        
+                        var nextHistory = history
+                        if interceptedOpenNote {
+                            // Remover de la UI el mensaje fallido para no contaminar la visual, pero dejarlo en history
+                            await MainActor.run {
+                                if let i = messages.indices.last, messages[i].text.contains("[CMD: open_note") {
+                                    messages[i].text = messages[i].text.replacingOccurrences(of: "\\[CMD: open_note, path: \"[^\"]+\"\\]", with: "(Auto-corregido a list_directory)", options: .regularExpression)
+                                }
+                            }
+                        }
+                        
+                        nextHistory.append((role: "model", content: acc))
+                        
+                        // Recursión controlada
+                        sendLocal(prompt: "Resultado de herramienta:\n\(toolResult)\n\nContinúa tu respuesta en base a este resultado.", context: context, history: nextHistory, noteAI: noteAI)
+                        return
+                    }
+                }
+                
+                // --- Stop-Hook de Contención (TaskPlan) ---
+                var interceptAndContinue = false
+                var interceptMessage = ""
+                await MainActor.run {
+                    if var p = currentTaskPlan, !p.isComplete {
+                        p.currentTurn += 1
+                        if p.currentTurn > p.maxTurns {
+                            let msg = LocalChatMessage(text: "⚠️ Límite de turnos alcanzado (\(p.maxTurns)). Abortando plan.", isUser: false, agentCode: code)
+                            messages.append(msg)
+                            saveMessage(msg)
+                            currentTaskPlan = nil
+                        } else {
+                            interceptAndContinue = true
+                            let count = p.pendingCount
+                            let pendingStr = p.pendingItems.prefix(3).joined(separator: ", ") + (count > 3 ? " y \(count - 3) más" : "")
+                            interceptMessage = "Quedan \(count) elementos pendientes en el plan: \(pendingStr). Continúa ejecutando comandos para procesar el siguiente elemento."
+                            currentTaskPlan = p
+                        }
+                    } else {
+                        currentTaskPlan = nil // Finalizado limpio
+                    }
+                }
+                
+                if interceptAndContinue {
+                    var nextHistory = history
+                    nextHistory.append((role: "model", content: acc))
+                    sendLocal(prompt: interceptMessage, context: context, history: nextHistory, noteAI: noteAI)
+                    return
+                }
+                // --- Fin Stop-Hook ---
+
+                
                 if let noteAI {
                     await MainActor.run {
                         finalizeNoteAIMessage(noteAI: noteAI, content: acc, index: messages.indices.last, wroteActiveNote: false)
@@ -1171,7 +1448,7 @@ struct AgentChatSection: View {
     @MainActor
     private func streamMessage(_ fullText: String, code: String) {
         if let id = streamMsgID, let idx = messages.firstIndex(where: { $0.id == id }) {
-            messages[idx] = LocalChatMessage(text: fullText, isUser: false, agentCode: code)
+            messages[idx].text = fullText
         } else {
             let msg = LocalChatMessage(text: fullText, isUser: false, agentCode: code)
             messages.append(msg)
@@ -1438,13 +1715,71 @@ struct ChatMessagesView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onApplyNote = onApplyNote
         context.coordinator.onRequestOlder = onRequestOlder
-        // Clave de contenido: solo recargar el HTML si los mensajes o los anclajes cambiaron.
-        // Sin esto, cada re-evaluación del body (p. ej. al teclear en el input) recarga todo
-        // el webview y el frame transparente previo queda de "fantasma" detrás del texto nuevo.
-        let key = renderKey()
-        guard key != context.coordinator.lastRenderKey else { return }
-        context.coordinator.lastRenderKey = key
-        webView.loadHTMLString(buildHTML(), baseURL: nil)
+        
+        let newKey = renderKey()
+        let oldKey = context.coordinator.lastRenderKey
+        guard newKey != oldKey else { return }
+        
+        let oldCount = context.coordinator.lastMessagesCount
+        let newCount = messages.count
+        
+        let isUpdateOnly = (oldCount == newCount) && (messages.last?.isUser == false) && (messages.last?.type == nil)
+        let isAppend = (newCount > oldCount)
+        let isSafeJSOperation = (isUpdateOnly || isAppend) && oldCount > 0
+        
+        context.coordinator.lastRenderKey = newKey
+        context.coordinator.lastMessagesCount = newCount
+        
+        if isSafeJSOperation {
+            var js = "var ok = true;\n"
+            
+            if isUpdateOnly, let lastMsg = messages.last {
+                let safeText = lastMsg.text
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "`", with: "\\`")
+                    .replacingOccurrences(of: "$", with: "\\$")
+                    
+                let safeHTML = renderMessage(lastMsg)
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "`", with: "\\`")
+                    .replacingOccurrences(of: "$", with: "\\$")
+                
+                js += "if (typeof window.appendOrUpdateMessage === 'function') { ok = window.appendOrUpdateMessage('\(lastMsg.id.uuidString)', true, `\(safeText)`, `\(safeHTML)`); } else { ok = false; }\n"
+            } else if isAppend {
+                for i in oldCount..<newCount {
+                    let msg = messages[i]
+                    let safeText = msg.text
+                        .replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "`", with: "\\`")
+                        .replacingOccurrences(of: "$", with: "\\$")
+                        
+                    let safeHTML = renderMessage(msg)
+                        .replacingOccurrences(of: "\\", with: "\\\\")
+                        .replacingOccurrences(of: "`", with: "\\`")
+                        .replacingOccurrences(of: "$", with: "\\$")
+                        
+                    js += "if (typeof window.appendOrUpdateMessage === 'function') { ok = ok && window.appendOrUpdateMessage('\(msg.id.uuidString)', false, `\(safeText)`, `\(safeHTML)`); } else { ok = false; }\n"
+                }
+            }
+            js += "ok;"
+            
+            webView.evaluateJavaScript(js) { res, err in
+                if let err = err {
+                    print("❌ Error JS en chat: \(err)")
+                }
+                if let success = res as? Bool, success {
+                    // DOM actualizado limpiamente
+                } else {
+                    print("⚠️ Fallback JS: no se pudo insertar/actualizar (isUpdateOnly=\(isUpdateOnly))")
+                    if !isUpdateOnly {
+                        webView.loadHTMLString(self.buildHTML(), baseURL: nil)
+                    }
+                }
+            }
+        } else {
+            // Full HTML Reload
+            webView.loadHTMLString(buildHTML(), baseURL: nil)
+        }
     }
 
     private func renderKey() -> String {
@@ -1456,101 +1791,118 @@ struct ChatMessagesView: NSViewRepresentable {
         return k
     }
 
-    private func buildHTML() -> String {
-        // Umbral de "nueva sesión" tipo WhatsApp: gap > 2h entre mensajes → separador de fecha
-        let sessionGap: TimeInterval = 2 * 60 * 60
-        let dateFmt: DateFormatter = {
-            let f = DateFormatter(); f.dateFormat = "d MMM yyyy, HH:mm"; return f
-        }()
+    private func escaped(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+         .replacingOccurrences(of: "<", with: "&lt;")
+         .replacingOccurrences(of: ">", with: "&gt;")
+    }
 
-        func renderMessage(_ msg: LocalChatMessage) -> String {
-            let side = msg.isUser ? "user" : "agent"
-            let agentLabel = msg.isUser ? "Tú" : (msg.agentCode ?? "")
-            let agentColor = (msg.agentCode == "LC") ? "#34c759" : "#af52de"
-            // data-mid = id persistido en DuckDB (ancla de lazy loading y salto de búsqueda)
-            let mid = msg.persistedId.map(String.init) ?? ""
-            let midAttr = mid.isEmpty ? "" : " data-mid=\"\(mid)\""
+    private func renderMessage(_ msg: LocalChatMessage) -> String {
+        let side = msg.isUser ? "user" : "agent"
+        let agentLabel = msg.isUser ? "Tú" : (msg.agentCode ?? "")
+        let agentColor = (msg.agentCode == "LC") ? "#34c759" : "#af52de"
+        let mid = msg.persistedId.map(String.init) ?? ""
+        let midAttr = mid.isEmpty ? "" : " data-mid=\"\(mid)\""
 
-            // Mensaje de "pensando…"
-            if msg.type == "thinking" {
-                return """
-                <div class="msg agent thinking"\(midAttr)>
-                  <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
-                  <div class="bubble thinking-bubble">\(escaped(msg.text))</div>
-                </div>
-                """
-            }
-
-            // Marcador de ancla (sesión iniciada, reset)
-            if msg.type == "anchor" {
-                return """
-                <div class="anchor-marker"><span>\(escaped(msg.text))</span></div>
-                """
-            }
-
-            // Colapsable de herramientas
-            if msg.type == "tools" {
-                let toolList = msg.toolNames.map { "<li>\(escaped($0))</li>" }.joined()
-                return """
-                <div class="msg agent tools-section"\(midAttr)>
-                  <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
-                  <details class="tools-details">
-                    <summary class="tools-summary">\(escaped(msg.text))</summary>
-                    <ul class="tools-list">\(toolList)</ul>
-                  </details>
-                </div>
-                <div class="sep"></div>
-                """
-            }
-
-            // Escapar comillas para atributo data-text
-            let safeText = msg.text
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "\"", with: "&quot;")
-                .replacingOccurrences(of: "'", with: "&#39;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-
-            // Botón "Aplicar a la nota" (o "Crear nota nueva") para resultados de Opciones IA para notas
-            var applyBtn = ""
-            if msg.applyContent != nil {
-                let applyLabel = msg.applyNoteId == nil ? "Crear nota nueva" : "Aplicar a la nota"
-                applyBtn = """
-                <button class="apply-btn" onclick="window.webkit.messageHandlers.noteAIApply.postMessage('\(msg.id.uuidString)')">\(applyLabel)</button>
-                """
-            }
-
+        if msg.type == "thinking" {
             return """
-            <div class="msg \(side)"\(midAttr) data-text="\(safeText)">
+            <div class="msg agent thinking"\(midAttr)>
               <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
-              <div class="bubble">\(escaped(msg.text))</div>
-              <div class="msg-actions">
-                \(applyBtn)
-                <button class="copy-btn" onclick="copyMsg(this, 'plain')" title="Copiar texto">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                </button>
-                <button class="copy-btn md-copy-btn" onclick="copyMsg(this, 'md')" title="Copiar Markdown">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                </button>
+              <div class="bubble thinking-bubble">\(escaped(msg.text))</div>
+            </div>
+            """
+        }
+
+        if msg.type == "anchor" {
+            return """
+            <div class="anchor-marker"><span>\(escaped(msg.text))</span></div>
+            """
+        }
+
+        if msg.type == "tools" {
+            // Extraer el nombre del tool y el resultado
+            let lines = msg.text.components(separatedBy: "\n")
+            let titleLine = lines.first ?? "🔧 Ejecutado: Herramienta"
+            
+            // Buscar el contenido entre los bloques de código ```
+            var resultLines = [String]()
+            var inCodeBlock = false
+            for line in lines.dropFirst() {
+                if line.hasPrefix("```") {
+                    inCodeBlock.toggle()
+                    continue
+                }
+                if inCodeBlock {
+                    resultLines.append(line)
+                }
+            }
+            
+            // Generar preview de 3 líneas
+            let preview = resultLines.prefix(3).joined(separator: "\n")
+            let rest = resultLines.dropFirst(3).joined(separator: "\n")
+            
+            let previewHTML = "<div class=\"tools-preview\" style=\"opacity: 0.8; margin-top: 4px; padding-left: 8px; border-left: 2px solid rgba(128,128,128,0.3); font-family: monospace; font-size: 0.85em; white-space: pre-wrap;\">\(escaped(preview))</div>"
+            
+            let restHTML = rest.isEmpty ? "" : "<details class=\"tools-details\" style=\"margin-top: 4px;\"><summary class=\"tools-summary\" style=\"font-size: 0.8em; color: #007aff;\">Ver más...</summary><div style=\"padding: 8px; background: rgba(128,128,128,0.1); border-radius: 6px; font-family: monospace; font-size: 0.8em; margin-top: 4px; white-space: pre-wrap; max-height: 300px; overflow-y: auto;\">\(escaped(rest))</div></details>"
+            
+            return """
+            <div class="msg user tools-section"\(midAttr)>
+              <div class="agent-label" style="color:\(agentColor)">Sistema</div>
+              <div class="bubble" style="background: rgba(128,128,128,0.08); color: inherit; width: 90%;">
+                <div style="font-weight: 600; font-size: 0.9em; margin-bottom: 4px;">\(escaped(titleLine))</div>
+                \(previewHTML)
+                \(restHTML)
               </div>
             </div>
             <div class="sep"></div>
             """
         }
 
+        let safeText = msg.text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+
+        var applyBtn = ""
+        if msg.applyContent != nil {
+            let applyLabel = msg.applyNoteId == nil ? "Crear nota nueva" : "Aplicar a la nota"
+            applyBtn = """
+            <button class="apply-btn" onclick="window.webkit.messageHandlers.noteAIApply.postMessage('\(msg.id.uuidString)')">\(applyLabel)</button>
+            """
+        }
+
+        return """
+        <div id="msg-\(msg.id.uuidString)" class="msg \(side)"\(midAttr) data-text="\(safeText)">
+          <div class="agent-label" style="color:\(agentColor)">\(agentLabel)</div>
+          <div class="bubble">\(escaped(msg.text))</div>
+          <div class="msg-actions">
+            \(applyBtn)
+            <button class="copy-btn" onclick="copyMsg(this, 'plain')" title="Copiar texto">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <button class="copy-btn md-copy-btn" onclick="copyMsg(this, 'md')" title="Copiar Markdown">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sep"></div>
+        """
+    }
+
+    private func buildHTML() -> String {
+        let sessionGap: TimeInterval = 2 * 60 * 60
+        let dateFmt: DateFormatter = {
+            let f = DateFormatter(); f.dateFormat = "d MMM yyyy, HH:mm"; return f
+        }()
+
         var msgsHTML = ""
         for (i, msg) in messages.enumerated() {
-            // Separador de sesión cuando hay un salto de tiempo respecto al mensaje anterior
             if i > 0, msg.effectiveDate.timeIntervalSince(messages[i - 1].effectiveDate) > sessionGap {
                 msgsHTML += "<div class=\"anchor-marker\"><span>── \(dateFmt.string(from: msg.effectiveDate)) ──</span></div>"
             }
             msgsHTML += renderMessage(msg)
-        }
-
-        func escaped(_ s: String) -> String {
-            s.replacingOccurrences(of: "&", with: "&amp;")
-             .replacingOccurrences(of: "<", with: "&lt;")
-             .replacingOccurrences(of: ">", with: "&gt;")
         }
 
         return """
@@ -1709,6 +2061,44 @@ struct ChatMessagesView: NSViewRepresentable {
           } else {
             requestAnimationFrame(scrollToBottom);
           }
+          
+          window.appendOrUpdateMessage = function(uuid, isUpdate, newText, newHTML) {
+             var msg = document.getElementById('msg-' + uuid);
+             
+             if (!msg) {
+                 // Insertar nuevo mensaje (incluso si isUpdate es true, porque pudo haberse perdido)
+                 document.body.insertAdjacentHTML('beforeend', newHTML);
+                 msg = document.getElementById('msg-' + uuid);
+                 if (!msg) return false;
+                 
+                 // Procesar Markdown/Mermaid inicial
+                 var bubble = msg.querySelector('.bubble');
+                 if (bubble) {
+                     var html = marked.parse(bubble.textContent || '');
+                     html = html.replace(/<pre><code class="language-mermaid">([\\s\\S]*?)<\\/code><\\/pre>/g, function(_, code) {
+                       const id = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+                       setTimeout(() => { mermaid.render(id, code).then(({svg}) => { document.getElementById(id).innerHTML = svg; }); }, 100);
+                       return '<div class="mermaid-diagram" id="' + id + '"></div>';
+                     });
+                     bubble.innerHTML = html;
+                 }
+             } else {
+                 // Actualizar existente
+                 msg.setAttribute('data-text', newText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+                 var bubble = msg.querySelector('.bubble');
+                 if (!bubble) return false;
+                 
+                 var html = marked.parse(newText);
+                 html = html.replace(/<pre><code class="language-mermaid">([\\s\\S]*?)<\\/code><\\/pre>/g, function(_, code) {
+                   const id = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+                   setTimeout(() => { mermaid.render(id, code).then(({svg}) => { document.getElementById(id).innerHTML = svg; }); }, 100);
+                   return '<div class="mermaid-diagram" id="' + id + '"></div>';
+                 });
+                 bubble.innerHTML = html;
+             }
+             scrollToBottom();
+             return true;
+          };
         </script>
         </body></html>
         """
@@ -1721,6 +2111,7 @@ struct ChatMessagesView: NSViewRepresentable {
         // recargar loadHTMLString (el body de LocalChatView re-evalúa en cada tecla
         // del input y sin esta cache el webview transparente mostraba "textos en el fondo").
         var lastRenderKey: String = ""
+        var lastMessagesCount: Int = 0
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "noteAIApply", let id = message.body as? String {

@@ -63,7 +63,8 @@ struct ContentView: View {
                     MainEditorView(
                         showChat: $showChat,
                         showTelemetry: $showTelemetry,
-                        showAgentSettings: $showAgentSettings
+                        showAgentSettings: $showAgentSettings,
+                        showMCPConfig: $showMCPConfig
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     
@@ -115,44 +116,6 @@ struct ContentView: View {
                         .zIndex(50)
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    
-                    // Botones de utilidad apilados (bottom-left)
-                    VStack(spacing: 10) {
-                        // Chat
-                        Button(action: { withAnimation { showChat.toggle() } }) {
-                            Image(systemName: "cpu")
-                                .font(.title3).padding(12)
-                                .background(showChat ? Color.accentColor : Color.blue)
-                                .foregroundColor(.white).clipShape(Circle()).shadow(radius: 4)
-                        }.buttonStyle(.plain).help("Chat IA (@local, @ds, @cl, @op)")
-
-                        // Telemetría
-                        if !showTelemetry {
-                            Button(action: { withAnimation { showTelemetry = true } }) {
-                                Image(systemName: "terminal.fill")
-                                    .font(.title3).padding(12)
-                                    .background(Color.green).foregroundColor(.black)
-                                    .clipShape(Circle()).shadow(radius: 4)
-                            }.buttonStyle(.plain).help("Consola de telemetría")
-                        }
-
-                        // Agentes externos
-                        Button(action: { showAgentSettings = true }) {
-                            Image(systemName: "brain.head.profile")
-                                .font(.title3).padding(12)
-                                .background(Color.purple).foregroundColor(.white)
-                                .clipShape(Circle()).shadow(radius: 4)
-                        }.buttonStyle(.plain).help("Configurar agentes externos")
-
-                        // MCP
-                        Button(action: { withAnimation { showMCPConfig = true } }) {
-                            Image(systemName: "network.badge.shield.half.filled")
-                                .font(.title3).padding(12)
-                                .background(Color.accentColor.opacity(0.8)).foregroundColor(.white)
-                                .clipShape(Circle()).shadow(radius: 4)
-                        }.buttonStyle(.plain).help("Configuración MCP y tokens")
-                    }
-                    .padding(20)
                 }
                 
                 if showMCPConfig {

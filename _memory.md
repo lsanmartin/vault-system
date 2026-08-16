@@ -20,6 +20,7 @@ Vault System es un Knowledge OS nativo macOS que actúa como hub de IA local + e
 - [2026-08-03] Refactor McpTokenRecord: 10 permisos granulares + allowed_paths
 - [2026-08-03] Chat con WebView + marked.js (markdown en burbujas)
 - [2026-08-03] Colapsables para tool calls y gestión de tokens
+- [2026-08-16 11:28] Refactor UI Chat: retorno a vista de chat individual (una por vez) seleccionable con botonera inferior; reubicación de herramientas globales al SidebarColumn.
 
 ## Historial
 - [2026-08-03] DeepSeek auditoría: detectó domain_metadata vacío y _specs.md corrupto en volley51app. Se crea tríada OKF para vault-system.

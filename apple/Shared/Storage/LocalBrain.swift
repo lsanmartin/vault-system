@@ -249,14 +249,18 @@ public final class LocalBrain: ObservableObject {
         }
     }
     
-    /// Inicia la precarga/descarga del modelo activo en background
     public func preloadModel() {
         guard isEnabled else { return }
         guard !isProcessing && !isDownloading else { return }
-        isDownloading = true
-        downloadProgress = 0.0
 
         let modelId = ModelManager.shared.activeModelID ?? ModelManager.defaultModelID
+        let isAlreadyDownloaded = ModelManager.shared.modelIsDownloaded(modelId) || ModelManager.shared.modelIsInHubCache(modelId)
+        
+        if !isAlreadyDownloaded {
+            isDownloading = true
+            downloadProgress = 0.0
+        }
+
         Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Iniciando precarga de \(modelId)")
 
         queue.async {
@@ -338,18 +342,10 @@ public final class LocalBrain: ObservableObject {
         
         do {
             let (summary, entities) = try await GPUInferenceActor.shared.run { () -> (String, [String]) in
-                await MainActor.run {
-                    self.isDownloading = true
-                    self.downloadProgress = 0.0
-                }
                 
                 let modelContainer = try await self.getOrLoadContainer()
                 
                 Telemetry.shared.log("LocalBrain", eventType: "Status", message: "Generando sintesis cognitiva...")
-                
-                await MainActor.run {
-                    self.isDownloading = false
-                }
                 
                 let prompt = """
                 <bos><start_of_turn>user
@@ -412,7 +408,7 @@ public final class LocalBrain: ObservableObject {
     }
     
     /// Realiza inferencia conversacional (Chat) con streaming de tokens
-    public func chatStream(prompt: String, context: String = "") async throws -> AsyncStream<String> {
+    public func chatStream(prompt: String, context: String = "", history: [(role: String, content: String)] = []) async throws -> AsyncStream<String> {
         guard isEnabled else {
             throw NSError(domain: "LocalBrain", code: 100, userInfo: [
                 NSLocalizedDescriptionKey: "El cerebro local está desactivado. Actívalo con el botón de encendido en el panel de chat."
@@ -423,10 +419,6 @@ public final class LocalBrain: ObservableObject {
                 var accumulatedText = ""
                 do {
                     // El chat tiene PRIORIDAD sobre la digestión cognitiva.
-                    // La digestión ocupa el GPUInferenceActor (actor serializado)
-                    // en un bucle de notas; sin esto, el chat esperaba detrás
-                    // de N generaciones y "no respondía". Cancelamos la digestión
-                    // antes de entrar al actor para liberar el GPU de inmediato.
                     self.pauseDigestionForChat()
 
                     try await GPUInferenceActor.shared.run {
@@ -468,31 +460,52 @@ public final class LocalBrain: ObservableObject {
                             Telemetry.shared.log("LocalBrain", eventType: "RAG", message: "Puente RAG con autoconsciencia inyectada.")
                         }
                         
+                        // TRUNCATE context to avoid MLX Metal Abort Trap 6 (OOM / RoPE bounds)
+                        let safeContext = String(finalContext.prefix(6000))
+                        
+                        var sysContext = ""
+                        let corePath = NSString(string: "~/.vault_system/system_workspace/directrices-core.md").expandingTildeInPath
+                        if let core = try? String(contentsOfFile: corePath, encoding: .utf8) { sysContext += "\n## Directrices Operativas\n\(core.prefix(1500))\n" }
+                        let concienciaPath = NSString(string: "~/.vault_system/system_workspace/00-Sistema/conciencia.md").expandingTildeInPath
+                        if let conciencia = try? String(contentsOfFile: concienciaPath, encoding: .utf8) { sysContext += "\n## Estado Global del Sistema\n\(conciencia.prefix(2000))\n" }
+                        let sessionPath = NSString(string: "~/.vault_system/system_workspace/current_session.md").expandingTildeInPath
+                        if let session = try? String(contentsOfFile: sessionPath, encoding: .utf8) {
+                            let trimmed = session.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty && trimmed != "# Sesión Actual" { sysContext += "\n## Sesión Anterior (scratchpad)\n\(session.prefix(1200))\n" }
+                        }
+                        
                         let workspacesList = WorkspaceManager.shared.locations.map { "- \($0.name): \($0.path)" }.joined(separator: "\n")
                         let systemPrompt = """
                         Eres el asistente inteligente del vault personal del usuario.
                         Tus respuestas deben ser concisas y basadas exclusivamente en el contexto provisto.
                         Si la informacion no se encuentra en el contexto, indicalo de forma honesta.
                         
-                        Si el usuario te pide abrir una nota, crear una nota o cambiar el modo de la interfaz, confirma la accion por chat y añade EXACTAMENTE al final de tu respuesta una unica linea con el comando estructurado correspondiente de la siguiente lista:
-                        - [CMD: open_note, path: "ruta_absoluta"]
+                        \(sysContext)
+                        
+                        Si el usuario te pide explorar, listar o ver el contenido de una carpeta/workspace, usa:
+                        - [CMD: list_directory, path: "ruta_absoluta_directorio"]
+                        Si el usuario te pide leer el contenido de un archivo específico, usa:
+                        - [CMD: read_file, path: "ruta_absoluta_archivo"]
+                        IMPORTANTE: Si usas list_directory o read_file, detén tu respuesta inmediatamente. El sistema ejecutará el comando y te devolverá el resultado en el siguiente turno para que continúes.
+
+                        Si el usuario te pide abrir una nota, crear una nota o cambiar el modo de la interfaz, usa:
+                        - [CMD: open_note, path: "ruta_absoluta"] (SOLO para archivos .md, nunca para carpetas)
                         - [CMD: create_note, title: "nombre_archivo", content: "contenido_crudo_markdown"]
                         - [CMD: set_mode, mode: "edit" o "preview"]
                         
                         Workspaces configurados en la aplicacion:
                         \(workspacesList)
                         
-                        Contexto del vault:
-                        \(finalContext)
+                        Contexto del vault (notas más relevantes a la consulta actual):
+                        \(safeContext)
                         """
                         
-                        let fullPrompt = """
-                        <bos><start_of_turn>user
-                        \(systemPrompt)
-                        
-                        Pregunta: \(prompt)<end_of_turn>
-                        <start_of_turn>model
-                        """
+                        var fullPrompt = "<bos><start_of_turn>user\n\(systemPrompt)\n<end_of_turn>\n"
+                        for turn in history {
+                            let turnRole = turn.role == "user" ? "user" : "model"
+                            fullPrompt += "<start_of_turn>\(turnRole)\n\(turn.content)<end_of_turn>\n"
+                        }
+                        fullPrompt += "<start_of_turn>user\nPregunta: \(prompt)<end_of_turn>\n<start_of_turn>model\n"
                         
                         let userInput = UserInput(prompt: fullPrompt)
                         let input = try await container.prepare(input: userInput)

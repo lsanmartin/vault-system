@@ -12,6 +12,19 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-08-16] Fix Glitch Chat Local y Expansión Agentic Loop**:
+    - **Fix Glitch de Scroll/Flickering**: Se resolvió un bug en `LocalChatView.swift` donde el motor Swift recargaba completamente el `WKWebView` (`loadHTMLString`) de forma prematura durante la generación del stream porque JavaScript no encontraba el nodo DOM del mensaje. Esto causaba un salto violento al tope de la página ("vuelve y regresa del primer mensaje"). **Solución**: Se interceptó la recarga en modo streaming (`isUpdateOnly`) y se modificó `appendOrUpdateMessage` en JS para auto-insertar el mensaje en el DOM si no existe, garantizando fluidez sin recargas.
+    - **Expansión Autonomía IA (Agentic Loop)**: Se habilitaron herramientas para que el Cerebro Local explore archivos y carpetas (`[CMD: list_directory]`, `[CMD: read_file]`). Se implementó un bucle recursivo (`sendLocal`) en el código Swift para detectar, ejecutar nativamente estas herramientas vía `FileManager`, e inyectar el resultado al contexto de la IA en milisegundos de forma invisible para el usuario.
+    - **Mecanismo de Auto-Corrección Heurístico**: Se ajustó el prompt del `LocalBrain.swift` para clarificar la diferencia entre abrir notas y listar directorios. Adicionalmente, se programó un sistema "ruedas de entrenamiento" en `LocalChatView.swift` que intercepta comandos inválidos (ej. usar `open_note` en el directorio `_vault`); si detecta que la ruta solicitada es un directorio o un workspace, el código Swift lo auto-corrige silenciosamente a `list_directory` y le entrega los archivos al agente, salvando la incapacidad de modelos pequeños (4B) para recuperarse de errores de ruteo.
+  - **[2026-08-16] Refactor de UI Chat y Fix GPU OOM**:
+    - **Reversión a vista individual**: Eliminado el layout apilado verticalmente de múltiples chats (con `ChatSectionDivider`) para simplificar y aprovechar la altura total de la ventana.
+    - **Selector inferior estilo Mac**: Añadida una botonera inferior en `LocalChatView` para alternar entre el agente local y los externos, utilizando un diseño consistente con `SidebarColumn` y asignando iconos personalizados por provider (`cpu`, `water.waves`, `brain`, `sparkles`). El agente activo ahora se destaca de forma minimalista con un pequeño punto indicador debajo del ícono (estilo Mac Dock).
+    - **Alineación con AI-Launch**: Asegurado que la tarea de compilación y despliegue corra bajo el namespace correcto en background, utilizando el formato exacto `nohup bash -c "exec -a ai-deploy-3m bash -c 'make core && make deploy'" &` para observabilidad universal como proceso temporal (⏳).
+    - **Fix Metal OOM en MLX (`Abort trap: 6`)**: Se aplicó truncamiento a 6,000 caracteres del `finalContext` inyectado en `LocalBrain.chatStream` para prevenir el desbordamiento de memoria GPU (context window limit excedida) que causaba cierres forzados al acumular notas extensas o RAG muy amplio.
+    - **Fix Glitches de UI en Chat**:
+      - **Fluidez de escritura IA**: Implementado sistema de debounce/throttling (50ms) en la actualización y un **Smart DOM Update** vía Javascript para inyectar el texto directamente en el nodo sin recargar el `WKWebView`. Esto elimina el parpadeo de pantalla (flashing) que dejaba ver el fondo intermitentemente durante el stream.
+      - **Indicador fantasma de descarga**: Eliminada la falsa activación de `isDownloading` durante la fase de carga a memoria en el `LocalBrain`.
+      - **Solapamiento visual de chats**: Eliminado el uso destructivo de `.id()` en `AgentChatSection` al cambiar de agente, adoptando un reciclaje mediante `.onChange()` para purgar historial y cargar limpio, evitando colisiones del webview.
   - **[2026-08-15] Fix % de descarga de modelos congelado en 0/1% (root cause definitivo)**:
     - **Bug reportado**: al descargar el modelo `gemma-4-e2b-it-4bit` desde la app, el % no avanzaba (se quedaba en 1% o 0%) aunque la red iba a 7 MB/s vía curl.
     - **Root cause (reproducido con tests aislados en `swiftc`)**: `URLSession.downloadTask` (y `bytes(for:)`) se **cuelgan contra el CDN xet-bridge de HF** (`us.aws.cdn.hf.co`) para archivos ≳25 MB — la tarea espera con 0 bytes indefinidamente. `dataTask` con delegate funciona a cualquier tamaño (50 MB OK; el archivo completo de 3.55 GB streamed a ~4.5 MB/s). Umbral entre 20 MB (OK) y 29 MB (HANG). NO era el HEAD preflight (`fetchFileMetadata` + `SameHostRedirectDelegate`, devuelve 302 + Location xet-bridge en 2.2s), ni la UI (ProgressView correcta), ni locks/disco.
@@ -297,3 +310,11 @@
 
 ### Lección
 - Si una carpeta existe en disco pero no en el sidebar, revisar si hay LIMIT cortando resultados.
+
+## [2026-08-16 14:50] Orquestación Determinista y Quick Actions
+- **Core Loop**: Se modificó `sendLocal` en `LocalChatView.swift` para soportar un `TaskPlan` que rastrea items pendientes de una herramienta recursiva.
+- **Stop-Hook**: Swift ahora intercepta el fin del turno y reinicia el prompt hacia el modelo si el plan no está completado, ahorrando tokens de planificación.
+- **Macro-Tools**: Se creó `audit_memory_consistency` para delegar chequeos profundos de archivos directamente en Swift. Las respuestas se vuelcan a Markdown en `_harness/` y el modelo lee con `read_file`, protegiendo la GPU de OOM.
+- **Fallbacks**: Se añadieron intercepciones a nivel de parseo `[CMD: ...]` para autocorregir alucinaciones (como `vault_get_domain_context` o sintaxis con paréntesis).
+- **UI Quick Actions**: Se implementó un Dropdown Menu y soporte para Slash Commands (`/audit`, `/list`) para emitir llamadas a herramientas directamente, previniendo totalmente las alucinaciones en operaciones frecuentes. Adicionalmente se inyectaron directivas de Anti-Alucinación (Semantic Framing) en la expansión de los comandos para asegurar que el LLM no devuelva disculpas ni confabulaciones al recibir los reportes desde Swift.
+- **UI Metadatos Visuales**: Se agregó el despliegue de fecha y hora de última modificación del archivo (`dd/MM/yy HH:mm`) directamente en el listado de notas (`NoteCard`) y en la cabecera del modo vista/edición (`EditorAreaView`).

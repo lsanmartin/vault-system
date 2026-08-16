@@ -64,10 +64,18 @@ struct NoteCard: View {
                 .foregroundColor(viewModel.macPrimaryText)
             
             Spacer(minLength: 4)
-            Text(displayPath)
-                .font(.system(size: 9, design: .monospaced))
-                .lineLimit(1)
-                .foregroundColor(viewModel.macSecondaryText)
+            HStack {
+                Text(displayPath)
+                    .font(.system(size: 9, design: .monospaced))
+                    .lineLimit(1)
+                    .foregroundColor(viewModel.macSecondaryText)
+                
+                Spacer()
+                
+                Text(note.formattedModificationDate)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundColor(viewModel.macSecondaryText.opacity(0.8))
+            }
         }
         .padding(12).frame(minHeight: 110).frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor)) 
@@ -135,6 +143,10 @@ struct SidebarColumn: View {
     @EnvironmentObject var workspaceManager: WorkspaceManager
     @Environment(\.accessibilityReduceTransparency) var reduceTransparency
     @State private var workspaceToRemove: VaultLocation?
+    @Binding var showChat: Bool
+    @Binding var showTelemetry: Bool
+    @Binding var showAgentSettings: Bool
+    @Binding var showMCPConfig: Bool
 
     // Devuelve el SF Symbol para cada opción de sort
     private func sortIcon(_ opt: SortOption) -> String {
@@ -463,6 +475,50 @@ struct SidebarColumn: View {
                 },
                 secondaryButton: .cancel(Text("Cancelar"))
             )
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack(spacing: 12) {
+                // Chat
+                Button(action: { withAnimation { showChat.toggle() } }) {
+                    Image(systemName: "cpu")
+                        .font(.title3).padding(8)
+                        .background(showChat ? Color.accentColor : Color.clear)
+                        .foregroundColor(showChat ? .white : viewModel.macControlIcon)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).help("Chat IA (@local, @ds, @cl, @op)")
+
+                // Telemetría
+                Button(action: { withAnimation { showTelemetry.toggle() } }) {
+                    Image(systemName: "terminal.fill")
+                        .font(.title3).padding(8)
+                        .background(showTelemetry ? Color.green : Color.clear)
+                        .foregroundColor(showTelemetry ? .black : viewModel.macControlIcon)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).help("Consola de telemetría")
+
+                // Agentes externos
+                Button(action: { showAgentSettings = true }) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.title3).padding(8)
+                        .background(Color.clear)
+                        .foregroundColor(viewModel.macControlIcon)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).help("Configurar agentes externos")
+
+                // MCP
+                Button(action: { withAnimation { showMCPConfig = true } }) {
+                    Image(systemName: "network.badge.shield.half.filled")
+                        .font(.title3).padding(8)
+                        .background(Color.clear)
+                        .foregroundColor(viewModel.macControlIcon)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).help("Configuración MCP y tokens")
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .background(reduceTransparency ? AnyView(viewModel.macSidebar) : AnyView(Rectangle().fill(.ultraThinMaterial)))
+            .overlay(Divider(), alignment: .top)
         }
     }
 }
@@ -968,6 +1024,7 @@ struct MainEditorView: View {
     @Binding var showChat: Bool
     @Binding var showTelemetry: Bool
     @Binding var showAgentSettings: Bool
+    @Binding var showMCPConfig: Bool
     @State private var isNoteHidden = false
     @State private var isSidebarHidden = false
     @State private var showScratchpad = false
@@ -977,7 +1034,13 @@ struct MainEditorView: View {
             NavigationStack {
                 HSplitView {
                     if !isSidebarHidden {
-                        SidebarColumn(viewModel: viewModel)
+                        SidebarColumn(
+                            viewModel: viewModel,
+                            showChat: $showChat,
+                            showTelemetry: $showTelemetry,
+                            showAgentSettings: $showAgentSettings,
+                            showMCPConfig: $showMCPConfig
+                        )
                             .frame(minWidth: 250, idealWidth: 400, maxWidth: 600)
                         
                         MainContentColumn(viewModel: viewModel, isNoteHidden: $isNoteHidden)
@@ -1255,12 +1318,18 @@ struct EditorAreaView: View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
-                    if !tab.lastSavedText.isEmpty {
-                        Text(tab.lastSavedText)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 8)
+                    HStack(spacing: 8) {
+                        if !tab.lastSavedText.isEmpty {
+                            Text(tab.lastSavedText)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        } else if !tab.formattedModificationDate.isEmpty {
+                            Text("Modificado: \(tab.formattedModificationDate)")
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .foregroundColor(.secondary.opacity(0.8))
+                        }
                     }
+                    .padding(.leading, 8)
                     
                     Spacer()
                     
