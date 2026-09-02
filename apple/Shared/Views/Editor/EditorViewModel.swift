@@ -638,6 +638,15 @@ class EditorViewModel: ObservableObject {
             results = queryChildren(parentPath: normalizedCurrentPath, ignorePatterns: ignore)
             // print("VaultSystem DEBUG GRID: currentPath = \(normalizedCurrentPath), results count = \(results.count)")
 
+            // Merge de pendientes: notas/carpetas recién creadas que aún no están en
+            // DuckDB (upsert falló durante el escaneo inicial). Viven en allFolders/allNotes
+            // vía el PATCH manual del flujo de creación, así aparecen al instante en la columna.
+            let indexedPaths = Set(results.map { $0.path })
+            let pendingChildren = (self.allFolders + self.allNotes).filter {
+                fastParentPath(for: $0.path) == normalizedCurrentPath && !indexedPaths.contains($0.path)
+            }
+            results.append(contentsOf: pendingChildren)
+
             // FileManager overlay: agrega archivos no-.md cuando el toggle está activo
             if showAllFiles && !normalizedCurrentPath.isEmpty {
                 appendFileSystemItems(to: &results, in: normalizedCurrentPath)
