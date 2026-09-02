@@ -196,10 +196,11 @@ class EditorViewModel: ObservableObject {
     }
     
     func togglePin(for path: String, locations: [VaultLocation]) {
-        if pinnedPaths.contains(path) {
-            pinnedPaths.remove(path)
+        let normPath = path.precomposedStringWithCanonicalMapping
+        if pinnedPaths.contains(normPath) {
+            pinnedPaths.remove(normPath)
         } else {
-            pinnedPaths.insert(path)
+            pinnedPaths.insert(normPath)
         }
         UserDefaults.standard.set(Array(pinnedPaths), forKey: "vault_pinned_paths")
         refreshNotes(locations: locations)
@@ -226,15 +227,14 @@ class EditorViewModel: ObservableObject {
         didSet {
             if let id = selectedLocationId {
                 UserDefaults.standard.set(id.uuidString, forKey: "vault_last_selected_location")
-                // Al cambiar de workspace, ir a la raíz y limpiar selección
+                // Al cambiar de workspace, ir a la raíz y limpiar selección.
+                // El refresh lo dispara MainEditorView.onChange → resetToWorkspaceRoot,
+                // evitando el doble refresh (didSet + onChange).
                 if let location = currentLocations?.first(where: { $0.id == id }) {
                     DispatchQueue.main.async { [weak self] in
                         self?.selectedItemIds.removeAll()
                         let p = location.path
                         self?.currentPath = p.hasSuffix("/") && p.count > 1 ? String(p.dropLast()) : p
-                        if let locs = self?.currentLocations {
-                            self?.refreshNotes(locations: locs)
-                        }
                     }
                 }
             }
@@ -323,7 +323,7 @@ class EditorViewModel: ObservableObject {
         }
         
         if let savedPinned = UserDefaults.standard.stringArray(forKey: "vault_pinned_paths") {
-            self.pinnedPaths = Set(savedPinned)
+            self.pinnedPaths = Set(savedPinned.map { $0.precomposedStringWithCanonicalMapping })
         }
         
         if let savedThemeRaw = UserDefaults.standard.string(forKey: "vault_selected_theme"),
@@ -391,13 +391,27 @@ class EditorViewModel: ObservableObject {
         }
     }
 
+    private var refreshDebounceWork: DispatchWorkItem?
+
+    /// Punto de entrada con debounce (~150ms): coalesce ráfagas de refrescos
+    /// (poller 1s + triggers directos de mutación + VaultScanDidFinish).
     func refreshNotes(locations: [VaultLocation]) {
+        refreshDebounceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performRefreshNotes(locations: locations)
+        }
+        refreshDebounceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func performRefreshNotes(locations: [VaultLocation]) {
         // CRÍTICO: capturar propiedades @Published en main thread ANTES del dispatch.
         // selectedLocationId y explorationFilter son Main Actor y no pueden leerse
         // desde DispatchQueue.global — hacerlo retorna nil intermitentemente.
         let capturedLocationId = self.selectedLocationId
         let capturedFilter = self.explorationFilter
         let capturedDeletedPaths = self.deletedPathsThisSession
+        let capturedExpandedPaths = self.expandedPaths
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -458,7 +472,7 @@ class EditorViewModel: ObservableObject {
             var newNotes: [NoteRecord] = []
             var newExpandedPaths: Set<String> = []
             
-            if self.explorationFilter != .all {
+            if capturedFilter != .all {
                 newNotes = allItems.filter { !$0.isDir }
             } else if currentSearchText.isEmpty {
                 newFolders = allItems.filter { $0.isDir }
@@ -486,10 +500,25 @@ class EditorViewModel: ObservableObject {
                 }
             }
             let newAllItems = newFolders + newNotes
+            // Árbol lazy: solo puebla la raíz + carpetas actualmente expandidas.
+            // El resto se carga on-demand en toggleExpansion desde allFolders/allNotes,
+            // evitando reconstruir el mapa completo (O(n) sobre todas las notas).
             var newChildrenMap: [String: [NoteRecord]] = [:]
-            for item in newAllItems {
-                let parent = fastParentPath(for: item.path)
-                newChildrenMap[parent, default: []].append(item)
+            if let rootPath = rootWorkspacePath {
+                let normalizedRoot = rootPath.hasSuffix("/") && rootPath.count > 1 ? String(rootPath.dropLast()) : rootPath
+                var wanted = capturedExpandedPaths
+                wanted.insert(normalizedRoot)
+                if !currentSearchText.isEmpty {
+                    // En búsqueda, las carpetas auto-expandidas deben poblarse en el
+                    // mapa (comportamiento original), o quedarían expandidas sin hijos.
+                    wanted.formUnion(newExpandedPaths)
+                }
+                for item in newAllItems {
+                    let parent = fastParentPath(for: item.path)
+                    if wanted.contains(parent) {
+                        newChildrenMap[parent, default: []].append(item)
+                    }
+                }
             }
             
             DispatchQueue.main.async {
@@ -497,15 +526,6 @@ class EditorViewModel: ObservableObject {
                 self.allNotes = newNotes
                 
                 // addSwiftTelemetryLog(log: "refreshNotes (main): allFolders=\(newFolders.count), allNotes=\(newNotes.count)")
-                
-                print("VaultSystem DEBUG: allFolders count: \(newFolders.count), allNotes count: \(newNotes.count)")
-                print("VaultSystem DEBUG: childrenByParent keys count: \(newChildrenMap.keys.count)")
-                if let rootPath = rootWorkspacePath {
-                    let normalizedRoot = rootPath.hasSuffix("/") && rootPath.count > 1 ? String(rootPath.dropLast()) : rootPath
-                    print("VaultSystem DEBUG: rootPath: \(rootPath), normalizedRoot: \(normalizedRoot)")
-                    print("VaultSystem DEBUG: children at rootPath: \(newChildrenMap[rootPath]?.count ?? 0)")
-                    print("VaultSystem DEBUG: children at normalizedRoot: \(newChildrenMap[normalizedRoot]?.count ?? 0)")
-                }
                 if !currentSearchText.isEmpty {
                     for path in newExpandedPaths {
                         self.expandedPaths.insert(path)
@@ -624,36 +644,38 @@ class EditorViewModel: ObservableObject {
             }
         }
         
-        // Aplicar ordenamiento
-        if self.explorationFilter == .all {
+        // Aplicar ordenamiento (fijados arriba, respetando el tipo de orden seleccionado)
+        struct SortedItem {
+            let record: NoteRecord
+            let originalIndex: Int
+        }
+        let itemsWithIndex = results.enumerated().map { SortedItem(record: $0.element, originalIndex: $0.offset) }
+        let sortedItems = itemsWithIndex.sorted { a, b in
+            let aPinned = self.pinnedPaths.contains(a.record.path.precomposedStringWithCanonicalMapping)
+            let bPinned = self.pinnedPaths.contains(b.record.path.precomposedStringWithCanonicalMapping)
+            
+            // Grupos: 0=Carpeta Fijada, 1=Carpeta No Fijada, 2=Nota Fijada, 3=Nota No Fijada
+            let aGroup = (a.record.isDir ? 0 : 2) + (aPinned ? 0 : 1)
+            let bGroup = (b.record.isDir ? 0 : 2) + (bPinned ? 0 : 1)
+            
+            if aGroup != bGroup {
+                return aGroup < bGroup
+            }
+            
             switch sortOption {
-            case .nameAsc, .nameDesc:
-                let desc = sortOption.isDescending
-                results.sort { a, b in
-                    let aPinned = self.pinnedPaths.contains(a.path)
-                    let bPinned = self.pinnedPaths.contains(b.path)
-                    if aPinned != bPinned { return aPinned }
-                    if a.isDir != b.isDir { return a.isDir } // Carpetas siempre primero
-                    let cmp = a.title.lowercased() < b.title.lowercased()
-                    return desc ? !cmp : cmp
-                }
+            case .nameAsc:
+                return a.record.title.lowercased() < b.record.title.lowercased()
+            case .nameDesc:
+                return a.record.title.lowercased() > b.record.title.lowercased()
             case .dateDesc:
-                // DuckDB ya retorna ORDER BY created_at DESC — solo garantizamos carpetas primero
-                results.sort { a, b in
-                    if a.isDir != b.isDir { return a.isDir }
-                    return false // mantener orden DB
-                }
+                // DB retorna más reciente primero -> menor índice original
+                return a.originalIndex < b.originalIndex
             case .dateAsc:
-                results.sort { a, b in
-                    if a.isDir != b.isDir { return a.isDir }
-                    return false
-                }
-                // Invertir solo notas (no carpetas) para orden ascendente
-                let folders = results.filter { $0.isDir }
-                let notes   = results.filter { !$0.isDir }.reversed()
-                results = folders + Array(notes)
+                // Más antiguo primero -> mayor índice original (inverso de la DB)
+                return a.originalIndex > b.originalIndex
             }
         }
+        results = sortedItems.map { $0.record }
         
         // Separar carpetas y notas para el layout táctico
         self.folders = results.filter { $0.isDir }
@@ -796,6 +818,11 @@ class EditorViewModel: ObservableObject {
             expandedPaths.remove(path)
         } else {
             expandedPaths.insert(path)
+            // Lazy load: poblar los hijos de esta carpeta on-demand si aún no están en el caché.
+            let normalized = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+            if childrenByParent[normalized] == nil {
+                childrenByParent[normalized] = (allFolders + allNotes).filter { fastParentPath(for: $0.path) == normalized }
+            }
         }
     }
     func clearSearch() {

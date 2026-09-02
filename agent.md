@@ -1,6 +1,8 @@
 # Contexto del Agente
 
-Última actualización: [2026-08-10]
+> **Voz del usuario / supervisor**: `_definitions/_index.md` — cargar al inicio (objective|constraint|important|decision).
+
+Última actualización: [2026-09-02]
 
 **📋 Agenda de trabajo:** `KANBAN.md` — fuente de verdad para fases y tareas. Leer al iniciar sesión.
 
@@ -12,6 +14,11 @@
 ## Resumen Técnico
 - **Objetivo**: Implementación nativa de Soberanía Cognitiva (Tríada de metadatos, Scratchpad SwiftUI y telemetría de fricción).
 - **Cambios Realizados**:
+  - **[2026-09-02] Perf sidebar lazy (Fase 1+2) — branch `perf/lazy-sidebar`**:
+    - `EditorViewModel.swift`: (1) dedupe doble-refresh al cambiar workspace (quitado `refreshNotes` del `didSet selectedLocationId`; lo dispara `MainEditorView.onChange → resetToWorkspaceRoot`); (2) debounce 150ms en `refreshNotes` (coalesce ráfagas poller 1s + mutaciones + VaultScanDidFinish); (3) `childrenByParent` pasa a caché lazy (solo raíz + `expandedPaths`, + `newExpandedPaths` en búsqueda); (4) `toggleExpansion` carga hijos on-demand desde `allFolders`/`allNotes` (que se mantienen completos); (5) 5 prints debug eliminados; (6) fix `capturedFilter` (antes leía `self.explorationFilter` en background queue).
+    - Build verificado: `make build-universal` + `make xcode-build` → ARCHIVE SUCCEEDED (sin errores Swift).
+    - **Medición (timers temporales, 2026-09-02):** `query_notes` 22-27ms (15.467 notas), `query_children` 7-22ms, `performRefreshNotes` 69-97ms, **cero contención de mutex**. La hipótesis RC-1 (mutex→sidebar vacío) quedó refutada; la "latencia de 3000ms" del diagnóstico era misdiagnóstico. Fase 3 (pool Rust) ya no es prioridad por perf.
+    - Decisiones registradas en `_definitions/`: `sidebar-lazy-cache` (decision) + `rc1-mutex-raiz-latencia` (important).
   - **[2026-08-16] Fix Glitch Chat Local y Expansión Agentic Loop**:
     - **Fix Glitch de Scroll/Flickering**: Se resolvió un bug en `LocalChatView.swift` donde el motor Swift recargaba completamente el `WKWebView` (`loadHTMLString`) de forma prematura durante la generación del stream porque JavaScript no encontraba el nodo DOM del mensaje. Esto causaba un salto violento al tope de la página ("vuelve y regresa del primer mensaje"). **Solución**: Se interceptó la recarga en modo streaming (`isUpdateOnly`) y se modificó `appendOrUpdateMessage` en JS para auto-insertar el mensaje en el DOM si no existe, garantizando fluidez sin recargas.
     - **Expansión Autonomía IA (Agentic Loop)**: Se habilitaron herramientas para que el Cerebro Local explore archivos y carpetas (`[CMD: list_directory]`, `[CMD: read_file]`). Se implementó un bucle recursivo (`sendLocal`) en el código Swift para detectar, ejecutar nativamente estas herramientas vía `FileManager`, e inyectar el resultado al contexto de la IA en milisegundos de forma invisible para el usuario.

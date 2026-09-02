@@ -20,7 +20,7 @@ pub mod lats_agent;
 
 uniffi::setup_scaffolding!();
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct NoteRecord {
     pub id: String,
     pub title: String,
@@ -131,6 +131,14 @@ static WATCHER_PENDING_EVENTS: Lazy<Mutex<Vec<(String, bool)>>> = Lazy::new(|| M
 
 // Tamaño de lote reducido para evitar saturar FixedSizeAllocator de DuckDB
 const BATCH_SIZE: usize = 200;
+
+// --- CACHÉ LRU DE BÚSQUEDA ---
+// 32 slots. Llave: "term:path_filter:last_sync_ts" → invalida automáticamente
+// cuando el vault cambia (update_sync_ts() se llama en save_note/delete/watcher).
+static QUERY_CACHE: Lazy<std::sync::Mutex<lru::LruCache<String, std::sync::Arc<Vec<NoteRecord>>>>> =
+    Lazy::new(|| std::sync::Mutex::new(lru::LruCache::new(
+        std::num::NonZeroUsize::new(32).unwrap()
+    )));
 
 #[uniffi::export]
 pub fn get_scan_progress(path: String) -> f32 {
@@ -541,6 +549,21 @@ pub fn init_knowledge_base() -> String {
                 }
             }
 
+            // Migración v3: Índice FTS BM25 sobre notes (title + content).
+            // DuckDB FTS requiere la extensión 'fts'. Si no está disponible, se degrada
+            // a ILIKE gracefully. El índice se reconstruye automáticamente en scans completos.
+            if current_version < 3 {
+                let fts_res = conn.execute_batch(
+                    "INSTALL fts; LOAD fts; \
+                     PRAGMA create_fts_index('notes', 'id', 'title', 'content', overwrite=1); \
+                     INSERT INTO _schema_version (version) VALUES (3);"
+                );
+                match fts_res {
+                    Ok(_) => crate::add_telemetry_log("DB: FTS BM25 index creado sobre notes (title+content) v3 OK".into()),
+                    Err(e) => crate::add_telemetry_log(format!("DB: FTS v3 no disponible (degradando a ILIKE): {}", e)),
+                }
+            }
+
             // Ejecutar deduplicación preventiva de rowids
             dedup_and_vacuum(&conn);
 
@@ -569,6 +592,26 @@ fn dedup_and_vacuum(conn: &Connection) {
     }
     // Compactar espacio en disco
     let _ = conn.execute("CHECKPOINT", []);
+}
+
+/// Reconstruye el índice FTS BM25 sobre notes (title + content).
+/// Llamar después de scans completos o cuando el índice pueda estar desactualizado.
+/// Degrada gracefully si la extensión FTS no está disponible.
+#[uniffi::export]
+pub fn rebuild_fts_index() -> String {
+    let conn = match get_db_connection() {
+        Some(c) => c,
+        None => return "DB no disponible".to_string(),
+    };
+    match conn.execute_batch(
+        "LOAD fts; PRAGMA create_fts_index('notes', 'id', 'title', 'content', overwrite=1);"
+    ) {
+        Ok(_) => {
+            crate::add_telemetry_log("FTS: Índice BM25 reconstruido OK".into());
+            "FTS index reconstruido correctamente".to_string()
+        }
+        Err(e) => format!("FTS index no disponible (usando ILIKE): {}", e),
+    }
 }
 
 #[uniffi::export]
@@ -1015,6 +1058,27 @@ pub fn delete_item(path: String) -> bool {
         fs::remove_file(target).is_ok()
     }
 }
+fn strip_accents(s: &str) -> String {
+    s.chars()
+        .filter(|&c| !(c >= '\u{0300}' && c <= '\u{036F}'))
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' => 'a',
+            'Á' | 'À' | 'Â' | 'Ä' | 'Ã' => 'A',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'É' | 'È' | 'Ê' | 'Ë' => 'E',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'Í' | 'Ì' | 'Î' | 'Ï' => 'I',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'O',
+            'u' | 'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'Ú' | 'Ù' | 'Û' | 'Ü' => 'U',
+            'ñ' => 'n',
+            'Ñ' => 'N',
+            other => other,
+        })
+        .collect()
+}
+
 fn make_accent_insensitive_regex(word: &str) -> String {
     let mut regex = String::new();
     for c in word.chars() {
@@ -1038,6 +1102,21 @@ fn make_accent_insensitive_regex(word: &str) -> String {
 
 #[uniffi::export]
 pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ignore_patterns: Vec<String>) -> Vec<NoteRecord> {
+    // --- LRU CACHE CHECK ---
+    // Llave: "term|path_filter|last_sync_ts". El ts cambia cada vez que el vault
+    // se modifica (save_note / delete_item / watcher), invalidando la caché automáticamente.
+    let cache_key = format!(
+        "{}|{}|{}",
+        search_term.as_deref().unwrap_or(""),
+        path_filter.as_deref().unwrap_or(""),
+        LAST_SYNC_TS.lock().map(|t| *t).unwrap_or(0)
+    );
+    if let Ok(mut cache) = QUERY_CACHE.lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.as_ref().clone();
+        }
+    }
+
     let conn = match get_db_connection() {
         Some(c) => c,
         None => return Vec::new(),
@@ -1066,6 +1145,62 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         }
     }
 
+
+    let mut results: Vec<NoteRecord> = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+
+    // --- BM25 FTS PATH ---
+    // Intenta FTS BM25 nativo de DuckDB para obtener ranking de relevancia.
+    if let Some(ref term) = search_term {
+        if !term.is_empty() && !is_semantic {
+            let safe_fts_term = term.replace("'", "''");
+            let path_clause = if let Some(ref pf) = path_filter {
+                if !pf.is_empty() {
+                    let cp = canonicalize_path(pf);
+                    format!("AND (n.path = '{cp}' OR n.path LIKE '{cp}/%')", cp = cp)
+                } else { String::new() }
+            } else { String::new() };
+            let ignore_clause: String = ignore_patterns.iter()
+                .map(|p| format!("AND n.path NOT LIKE '%{}%'", p))
+                .collect::<Vec<_>>().join(" ");
+
+            let fts_sql = format!(
+                "SELECT n.id, n.title, n.path, n.content, n.is_dir \
+                 FROM notes n \
+                 WHERE fts_main_notes.match_bm25(n.id, '{term}') IS NOT NULL \
+                   {path_clause} {ignore_clause} \
+                 ORDER BY fts_main_notes.match_bm25(n.id, '{term}') DESC \
+                 LIMIT 200",
+                term = safe_fts_term,
+                path_clause = path_clause,
+                ignore_clause = ignore_clause
+            );
+
+            if let Ok(mut fts_stmt) = conn.prepare(&fts_sql) {
+                if let Ok(fts_iter) = fts_stmt.query_map([], |row| {
+                    Ok(NoteRecord {
+                        id: row.get(0).unwrap_or_default(),
+                        title: row.get(1).unwrap_or_default(),
+                        path: row.get(2).unwrap_or_default(),
+                        content: row.get(3).unwrap_or_default(),
+                        is_dir: row.get(4).unwrap_or(false),
+                    })
+                }) {
+                    for note in fts_iter.filter_map(|n| n.ok()) {
+                        seen_paths.insert(note.path.clone());
+                        results.push(note);
+                    }
+                    if !results.is_empty() {
+                        crate::add_telemetry_log(format!("FTS: BM25 hit '{}' → {} resultados", term, results.len()));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- ILIKE PATH (completitud y fallback) ---
+    // Buscar con ILIKE e ignorando diacríticos nativamente con strip_accents de DuckDB.
+    // Esto garantiza encontrar elementos que FTS BM25 pudiera haber omitido por diferencias de codificación (NFC/NFD).
     let mut sql = if is_semantic {
         format!(
             "SELECT n.id, n.title, n.path, n.content, n.is_dir, array_cosine_similarity(n.embedding, {}) as similarity FROM notes n WHERE 1=1",
@@ -1080,7 +1215,6 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         format!("SELECT n.id, n.title, n.path, {}, n.is_dir FROM notes n WHERE 1=1", select_content)
     };
     
-    // Filtro por Workspace (Path)
     if let Some(path) = path_filter {
         if !path.is_empty() {
             let canonical_path = canonicalize_path(&path);
@@ -1088,55 +1222,59 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         }
     }
 
-    // Aplicar filtros de ignorado
     for pattern in ignore_patterns {
         sql.push_str(&format!(" AND n.path NOT LIKE '%{}%'", pattern));
     }
 
     if let Some(ref term) = search_term {
         if !term.is_empty() {
-            // Filtrado estricto por palabras: Intersección (AND) de todos los tokens con soporte para acentos y NFD
             for word in term.split_whitespace() {
-                let safe_word = word.replace("'", "''"); // Evitar inyección
-                let regex_pattern = format!("(?i){}", make_accent_insensitive_regex(&safe_word));
-                sql.push_str(&format!(" AND (regexp_matches(n.title, '{}') OR regexp_matches(n.content, '{}') OR regexp_matches(n.path, '{}'))", regex_pattern, regex_pattern, regex_pattern));
+                let safe_word = word.replace("'", "''");
+                let safe_word_noacc = strip_accents(&safe_word);
+                sql.push_str(&format!(
+                    " AND (strip_accents(n.title) ILIKE '%{na}%' \
+                          OR strip_accents(n.content) ILIKE '%{na}%' \
+                          OR strip_accents(n.path) ILIKE '%{na}%')",
+                    na = safe_word_noacc
+                ));
             }
         }
     }
 
     if is_semantic {
         sql.push_str(" ORDER BY similarity DESC LIMIT 10000");
+    } else if search_term.as_ref().map(|t| !t.is_empty()).unwrap_or(false) {
+        sql.push_str(" ORDER BY n.title ASC LIMIT 200");
     } else {
-        // Sin LIMIT para queries de navegación (necesita ver todos los items del workspace)
-        // El filtro por path ya restringe el scope lo suficiente
-        sql.push_str(" ORDER BY created_at DESC");
+        sql.push_str(" ORDER BY n.is_dir DESC, n.title ASC");
     }
 
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("DuckDB prepare error: {}", e);
-            return Vec::new();
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(note_iter) = stmt.query_map([], |row| {
+            Ok(NoteRecord {
+                id: row.get(0).unwrap_or_default(),
+                title: row.get(1).unwrap_or_default(),
+                path: row.get(2).unwrap_or_default(),
+                content: row.get(3).unwrap_or_default(),
+                is_dir: row.get(4).unwrap_or(false),
+            })
+        }) {
+            for note in note_iter.filter_map(|n| n.ok()) {
+                if seen_paths.insert(note.path.clone()) {
+                    results.push(note);
+                }
+            }
         }
-    };
-    
-    let note_iter = match stmt.query_map([], |row| {
-        Ok(NoteRecord {
-            id: row.get(0).unwrap_or_default(),
-            title: row.get(1).unwrap_or_default(),
-            path: row.get(2).unwrap_or_default(),
-            content: row.get(3).unwrap_or_default(),
-            is_dir: row.get(4).unwrap_or(false),
-        })
-    }) {
-        Ok(iter) => iter,
-        Err(e) => {
-            println!("DuckDB query_map error: {}", e);
-            return Vec::new();
-        }
-    };
+    }
 
-    note_iter.filter_map(|n| n.ok()).collect()
+    // Guardar en caché LRU si hay resultados
+    if !results.is_empty() {
+        if let Ok(mut cache) = QUERY_CACHE.lock() {
+            cache.put(cache_key, std::sync::Arc::new(results.clone()));
+        }
+    }
+
+    results
 }
 
 /// Query optimizada para navegación: devuelve hijos directos de un path (carpetas + archivos).
@@ -2223,7 +2361,7 @@ pub fn mcp_handle_request(json_request: String) -> String {
                     },
                     {
                         "name": "vault_search",
-                        "description": "Busca notas en todo el Vault. Usa texto o palabras clave.",
+                        "description": "Busca notas en todo el Vault. Usa BM25 (ranking por relevancia) con fallback a ILIKE. Soporta acentos y multi-token AND.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -2231,6 +2369,11 @@ pub fn mcp_handle_request(json_request: String) -> String {
                             },
                             "required": ["query"]
                         }
+                    },
+                    {
+                        "name": "vault_rebuild_fts",
+                        "description": "Reconstruye el índice FTS BM25 sobre las notas del vault. Usar cuando los resultados de vault_search parezcan desactualizados tras un scan masivo.",
+                        "inputSchema": { "type": "object", "properties": {} }
                     },
                     {
                         "name": "vault_read",
@@ -2535,6 +2678,9 @@ pub fn mcp_handle_request(json_request: String) -> String {
                                 r.path, if r.is_dir { "Carpeta" } else { "Archivo" }, r.title, display_content)
                         }).collect::<Vec<String>>().join("\n\n")
                     }
+                },
+                "vault_rebuild_fts" => {
+                    crate::rebuild_fts_index()
                 },
                 "vault_read" => {
                     if !allow_raw {

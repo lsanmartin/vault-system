@@ -773,8 +773,8 @@ struct VaultTreeView: View {
         let notes = showNotes ? allRoot.filter { !$0.isDir } : []
         let combined = folders + notes
         return combined.sorted { a, b in
-            let aPinned = viewModel.pinnedPaths.contains(a.path)
-            let bPinned = viewModel.pinnedPaths.contains(b.path)
+            let aPinned = viewModel.pinnedPaths.contains(a.path.precomposedStringWithCanonicalMapping)
+            let bPinned = viewModel.pinnedPaths.contains(b.path.precomposedStringWithCanonicalMapping)
             if aPinned != bPinned { return aPinned }
             if a.isDir != b.isDir { return a.isDir }
             let ascending = !viewModel.treeSortOption.isDescending
@@ -865,8 +865,8 @@ struct VaultTreeRow: View {
         let subnotes = showNotes ? allChildren.filter { !$0.isDir } : []
         let combined = subfolders + subnotes
         return combined.sorted { a, b in
-            let aPinned = viewModel.pinnedPaths.contains(a.path)
-            let bPinned = viewModel.pinnedPaths.contains(b.path)
+            let aPinned = viewModel.pinnedPaths.contains(a.path.precomposedStringWithCanonicalMapping)
+            let bPinned = viewModel.pinnedPaths.contains(b.path.precomposedStringWithCanonicalMapping)
             if aPinned != bPinned { return aPinned }
             if a.isDir != b.isDir { return a.isDir }
             let ascending = !viewModel.treeSortOption.isDescending
