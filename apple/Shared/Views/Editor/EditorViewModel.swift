@@ -1147,18 +1147,40 @@ class EditorViewModel: ObservableObject {
             // Modo Universal por defecto para todas las nuevas pestañas
             let initialMode: RenderMode = .universal
 
-            // Cargar content desde disco si viene vacío (optimización listados)
-            let noteContent: String
             if note.content.isEmpty {
-                noteContent = (try? String(contentsOf: URL(fileURLWithPath: note.id), encoding: .utf8)) ?? ""
+                // Leer contenido desde DuckDB (rápido, indexado por id). Evita el
+                // round-trip asíncrono a disco que dejaba la nota abierta en vacío:
+                // en vaults iCloud el archivo puede estar sin materializar y leerlo
+                // en background no actualizaba el editor de forma fiable.
+                let path = note.id
+                let dbContent = getNoteContent(path: path)
+                if !dbContent.isEmpty {
+                    var newTab = TabItem(id: path, title: note.title, content: dbContent, renderMode: initialMode)
+                    newTab.lastSavedAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
+                    tabs.append(newTab)
+                } else {
+                    // Fallback: la nota aún no está en DB (archivo nuevo sin escanear).
+                    // Leer desde disco en background para no bloquear el main thread.
+                    var newTab = TabItem(id: path, title: note.title, content: "", renderMode: initialMode)
+                    newTab.lastSavedAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
+                    tabs.append(newTab)
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        let content = (try? String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8)) ?? ""
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            if let idx = self.tabs.firstIndex(where: { $0.id == path }) {
+                                var updated = self.tabs[idx]
+                                updated.content = content
+                                self.tabs[idx] = updated
+                            }
+                        }
+                    }
+                }
             } else {
-                noteContent = note.content
+                var newTab = TabItem(id: note.id, title: note.title, content: note.content, renderMode: initialMode)
+                newTab.lastSavedAt = (try? FileManager.default.attributesOfItem(atPath: note.id)[.modificationDate] as? Date)
+                tabs.append(newTab)
             }
-
-            var newTab = TabItem(id: note.id, title: note.title, content: noteContent, renderMode: initialMode)
-            let fileModDate = (try? FileManager.default.attributesOfItem(atPath: note.id)[.modificationDate] as? Date)
-            newTab.lastSavedAt = fileModDate
-            tabs.append(newTab)
         }
         activeTabId = note.id
         Telemetry.shared.log("Editor", eventType: "OpenNote", message: "Abierta: \(note.title)")
@@ -1169,11 +1191,24 @@ class EditorViewModel: ObservableObject {
         if !tabs.contains(where: { $0.id == path }) {
             let initialMode: RenderMode = .universal
             let title = url.lastPathComponent
-            let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-            var newTab = TabItem(id: path, title: title, content: content, renderMode: initialMode)
-            let fileModDate = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
-            newTab.lastSavedAt = fileModDate
+            // Preferir DuckDB (rápido) al disco; fallback a background si aún no está indexada.
+            let dbContent = getNoteContent(path: path)
+            var newTab = TabItem(id: path, title: title, content: dbContent, renderMode: initialMode)
+            newTab.lastSavedAt = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)
             tabs.append(newTab)
+            if dbContent.isEmpty {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        if let idx = self.tabs.firstIndex(where: { $0.id == path }) {
+                            var updated = self.tabs[idx]
+                            updated.content = content
+                            self.tabs[idx] = updated
+                        }
+                    }
+                }
+            }
         }
         activeTabId = path
         Telemetry.shared.log("Editor", eventType: "OpenNote", message: "Abierta vía externa: \(url.lastPathComponent)")

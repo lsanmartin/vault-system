@@ -13,3 +13,4 @@ Corpus de la voz del usuario. Formato: `00-Sistema/protocolo-definiciones.md`.
 
 ## decision
 - [[sidebar-lazy-cache]] — Sidebar lazy vía `childrenByParent` on-demand; `allFolders`/`allNotes` completos.
+- [[unique-index-notes-upsert]] — UNIQUE INDEX sobre `notes.id` + UPSERT `ON CONFLICT` (migración v4); supera el principio #33-34 para DuckDB 1.5.x.

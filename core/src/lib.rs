@@ -388,7 +388,9 @@ pub fn init_knowledge_base() -> String {
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
 
-    // Crear tablas sin restricciones PRIMARY KEY ni índices secundarios para evitar corrupción y crashes al borrar filas
+    // Crear tablas base. El índice UNIQUE sobre notes.id y los índices secundarios
+    // (modified_ts/created_at) se agregan en la migración v4: DuckDB 1.5.x los soporta
+    // sin corrupción (verificado en smoke test), y habilitan el UPSERT por id.
     let schema_res = conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
             id VARCHAR,
@@ -564,11 +566,32 @@ pub fn init_knowledge_base() -> String {
                 }
             }
 
+            // Migración v4: índice UNIQUE sobre notes.id + índices secundarios sobre
+            // modified_ts/created_at. Habilita el UPSERT (INSERT ... ON CONFLICT (id) DO UPDATE),
+            // eliminando el patrón O(n²) DELETE+INSERT por fila. Verificado contra DuckDB 1.5.x
+            // (smoke test): UNIQUE INDEX + churn DELETE/INSERT sin errores ART/TransformToDeprecated.
+            // Es un INDEX (no PK), así que no hay que reconstruir la tabla ni el índice FTS.
+            if current_version < 4 {
+                let mig_res = conn.execute_batch(
+                    "DELETE FROM notes WHERE rowid NOT IN (SELECT MAX(rowid) FROM notes GROUP BY id);
+                     DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MAX(rowid) FROM semantic_summaries GROUP BY note_id);
+                     DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MAX(rowid) FROM domain_metadata GROUP BY dir_path);
+                     CREATE UNIQUE INDEX IF NOT EXISTS ux_notes_id ON notes(id);
+                     CREATE INDEX IF NOT EXISTS idx_notes_modified_ts ON notes(modified_ts);
+                     CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes(created_at);
+                     INSERT INTO _schema_version (version) VALUES (4);"
+                );
+                match mig_res {
+                    Ok(_) => crate::add_telemetry_log("DB: Migración v4 (UNIQUE notes.id + índices modified_ts/created_at) OK".into()),
+                    Err(e) => crate::add_telemetry_log(format!("DB: Migración v4 FALLÓ: {}", e)),
+                }
+            }
+
             // Ejecutar deduplicación preventiva de rowids
             dedup_and_vacuum(&conn);
 
             *conn_guard = Some(conn);
-            "Knowledge Base inicializada (DuckDB sin índices secundarios para evitar corrupción)".to_string()
+            "Knowledge Base inicializada (DuckDB, índice UNIQUE notes.id + índices modified_ts/created_at)".to_string()
         },
         Err(e) => format!("Error de Esquema: {}", e),
     }
@@ -576,7 +599,9 @@ pub fn init_knowledge_base() -> String {
 
 
 
-/// Deduplica filas y compacta la DB. Previene hinchazón por scans repetidos.
+/// Deduplica filas (conservando la más reciente). El CHECKPOINT se dejó fuera de esta
+/// función para no bloquear queries bajo DB_QUERY_MUTEX en el hot path del scan; DuckDB
+/// hace auto-checkpoint del WAL y `maintenance_dedup_and_vacuum` fuerza el flush explícito.
 fn dedup_and_vacuum(conn: &Connection) {
     let tables = [
         ("notes", "id"),
@@ -585,13 +610,11 @@ fn dedup_and_vacuum(conn: &Connection) {
     ];
     for (table, col) in &tables {
         let sql = format!(
-            "DELETE FROM {} WHERE rowid NOT IN (SELECT MIN(rowid) FROM {} GROUP BY {})",
+            "DELETE FROM {} WHERE rowid NOT IN (SELECT MAX(rowid) FROM {} GROUP BY {})",
             table, table, col
         );
         let _ = conn.execute(&sql, []);
     }
-    // Compactar espacio en disco
-    let _ = conn.execute("CHECKPOINT", []);
 }
 
 /// Reconstruye el índice FTS BM25 sobre notes (title + content).
@@ -618,6 +641,7 @@ pub fn rebuild_fts_index() -> String {
 pub fn maintenance_dedup_and_vacuum() -> String {
     let conn = match get_db_connection() { Some(c) => c, None => return "DB no disponible".into() };
     dedup_and_vacuum(&conn);
+    let _ = conn.execute("CHECKPOINT", []);
     let size = std::fs::metadata(
         format!("{}/.vault_system/vault.duckdb", std::env::var("HOME").unwrap_or_default())
     ).map(|m| m.len()).unwrap_or(0);
@@ -653,11 +677,23 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     // Primera pasada: recolectar y contar todas las entradas válidas
     let mut entries = Vec::new();
     let it = WalkDir::new(vault_path).into_iter().filter_entry(|e| {
-        let is_hidden = e.file_name()
-             .to_str()
-             .map(|s| s.starts_with("."))
-             .unwrap_or(false);
-        !is_hidden
+        let name = e.file_name().to_str().unwrap_or("");
+        // Podar directorios ocultos (".git", ".obsidian", ".next", ...) y de
+        // dependencias/build ("node_modules", "target", "dist", "__pycache__")
+        // por NOMBRE EXACTO, para que walkdir NI SIQUIERA descienda en ellos.
+        // Sin esto, el scan camina cientos de miles de archivos vía readdir
+        // (aunque luego no los indexe); en workspaces grandes o en iCloud eso
+        // ahoga el arranque.
+        if name.starts_with(".") {
+            return false;
+        }
+        if e.file_type().is_dir() {
+            const JUNK_DIRS: [&str; 4] = ["node_modules", "target", "dist", "__pycache__"];
+            if JUNK_DIRS.contains(&name) {
+                return false;
+            }
+        }
+        true
     });
     
     for entry in it.filter_map(|e| e.ok())
@@ -744,16 +780,17 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                 
                 for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
                     if tx_failed { continue; }
-                    
-                    let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![p]);
+
                     let res = if is_dir {
                         conn.execute(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, modified_ts=excluded.modified_ts",
                             duckdb::params![p, t, p, c, mtime as i64]
                         )
                     } else {
                         let sql = format!(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, embedding=excluded.embedding, modified_ts=excluded.modified_ts",
                             vector_to_sql_array(&emb)
                         );
                         conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
@@ -798,16 +835,17 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             
             for (p, t, c, emb, is_dir, mtime) in batch_inserts.drain(..) {
                 if tx_failed { continue; }
-                
-                let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![p]);
+
                 let res = if is_dir {
                     conn.execute(
-                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?)",
+                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), ?) \
+                         ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, modified_ts=excluded.modified_ts",
                         duckdb::params![p, t, p, c, mtime as i64]
                     )
                 } else {
                     let sql = format!(
-                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                        "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?) \
+                         ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, embedding=excluded.embedding, modified_ts=excluded.modified_ts",
                         vector_to_sql_array(&emb)
                     );
                     conn.execute(&sql, duckdb::params![p, t, p, c, mtime as i64])
@@ -859,9 +897,9 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
 
     // Dedup post-scan (ejecutar después de inserts para evitar contention)
     if let Some(conn) = get_db_connection() {
-        let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MIN(rowid) FROM notes GROUP BY id)", []);
-        let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MIN(rowid) FROM semantic_summaries GROUP BY note_id)", []);
-        let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MIN(rowid) FROM domain_metadata GROUP BY dir_path)", []);
+        let _ = conn.execute("DELETE FROM notes WHERE rowid NOT IN (SELECT MAX(rowid) FROM notes GROUP BY id)", []);
+        let _ = conn.execute("DELETE FROM semantic_summaries WHERE rowid NOT IN (SELECT MAX(rowid) FROM semantic_summaries GROUP BY note_id)", []);
+        let _ = conn.execute("DELETE FROM domain_metadata WHERE rowid NOT IN (SELECT MAX(rowid) FROM domain_metadata GROUP BY dir_path)", []);
     }
 
     let stub_count = pending_stubs.len();
@@ -885,11 +923,11 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             eprintln!("[vault-core] Procesando {} eventos del watcher acumulados durante scan", pending.len());
             if let Some(conn) = get_db_connection() {
                 for (p, is_dir) in pending.drain(..) {
-                    let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![&p]);
                     if is_dir {
                         let title = std::path::Path::new(&p).file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
                         let _ = conn.execute(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, modified_ts=excluded.modified_ts",
                             duckdb::params![&p, title, &p, ""],
                         );
                     } else if p.ends_with(".md") || p.ends_with(".log") {
@@ -897,7 +935,8 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                         let title = std::path::Path::new(&p).file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
                         let emb = generate_embedding(&content);
                         let sql = format!(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, embedding=excluded.embedding, modified_ts=excluded.modified_ts",
                             vector_to_sql_array(&emb)
                         );
                         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
@@ -985,10 +1024,10 @@ pub fn upsert_note_item(path: String, title: String, content: String, is_dir: bo
     if let Some(conn) = get_db_connection() {
         let canonical = canonicalize_path(&path);
         crate::add_telemetry_log(format!("upsert_note_item: canonical_path={}", canonical));
-        let _ = conn.execute("DELETE FROM notes WHERE id = ?", params![&canonical]);
         if is_dir {
             return conn.execute(
-                "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0) \
+                 ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, modified_ts=excluded.modified_ts",
                 params![&canonical, &title, &canonical, &content],
             ).is_ok();
         } else {
@@ -999,7 +1038,8 @@ pub fn upsert_note_item(path: String, title: String, content: String, is_dir: bo
             let emb = generate_embedding(&content);
             let sql_array = vector_to_sql_array(&emb);
             let sql = format!(
-                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?) \
+                 ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, embedding=excluded.embedding, modified_ts=excluded.modified_ts",
                 sql_array
             );
             crate::add_telemetry_log(format!("upsert_note_item: Ejecutando SQL: {}", sql));
@@ -1249,19 +1289,24 @@ pub fn query_notes(search_term: Option<String>, path_filter: Option<String>, ign
         sql.push_str(" ORDER BY n.is_dir DESC, n.title ASC");
     }
 
-    if let Ok(mut stmt) = conn.prepare(&sql) {
-        if let Ok(note_iter) = stmt.query_map([], |row| {
-            Ok(NoteRecord {
-                id: row.get(0).unwrap_or_default(),
-                title: row.get(1).unwrap_or_default(),
-                path: row.get(2).unwrap_or_default(),
-                content: row.get(3).unwrap_or_default(),
-                is_dir: row.get(4).unwrap_or(false),
-            })
-        }) {
-            for note in note_iter.filter_map(|n| n.ok()) {
-                if seen_paths.insert(note.path.clone()) {
-                    results.push(note);
+    // 1d: ejecutar la consulta ILIKE/listing/semántica solo si FTS BM25 no devolvió resultados.
+    // Evita el full-scan redundante tras un hit de FTS (el SQL ya está construido; el costo real
+    // es el barrido completo de la tabla, no el armado del string).
+    if results.is_empty() {
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(note_iter) = stmt.query_map([], |row| {
+                Ok(NoteRecord {
+                    id: row.get(0).unwrap_or_default(),
+                    title: row.get(1).unwrap_or_default(),
+                    path: row.get(2).unwrap_or_default(),
+                    content: row.get(3).unwrap_or_default(),
+                    is_dir: row.get(4).unwrap_or(false),
+                })
+            }) {
+                for note in note_iter.filter_map(|n| n.ok()) {
+                    if seen_paths.insert(note.path.clone()) {
+                        results.push(note);
+                    }
                 }
             }
         }
@@ -1389,6 +1434,128 @@ pub fn query_recent_modified(path_filter: Option<String>, limit: i32) -> Vec<Not
     note_iter.filter_map(|n| n.ok()).collect()
 }
 
+// ===== Fase 2: git auto-commit en background =====
+
+struct GitCommitJob {
+    parent: String,
+    file: String,
+}
+
+/// Cola de commits git. Un único worker thread los serializa (evita que dos commits internos
+/// se pisen entre sí), y el retry ante `index.lock` coordina con escritores externos al proceso
+/// (Obsidian Git auto-save, agentes IA en esta máquina). Se arranca de forma lazy al primer save.
+static GIT_COMMIT_TX: Lazy<Mutex<Option<std::sync::mpsc::Sender<GitCommitJob>>>> = Lazy::new(|| Mutex::new(None));
+
+/// Número de commits git en cola + en vuelo (para poder drenar la cola en el cierre).
+static GIT_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn enqueue_git_commit(parent: String, file: String) {
+    let mut guard = match GIT_COMMIT_TX.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel::<GitCommitJob>();
+        thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                git_add_and_commit(&job.parent, &job.file);
+                GIT_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        *guard = Some(tx);
+    }
+    if let Some(tx) = guard.as_ref() {
+        GIT_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if tx.send(GitCommitJob { parent, file }).is_err() {
+            GIT_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Espera a que el worker drene la cola de commits git (con timeout de 5s).
+/// Usado en `shutdown_vault_session` para no perder commits ni chocar con el snapshot de sesión.
+fn flush_git_commits() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while GIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        if std::time::Instant::now() >= deadline {
+            crate::add_telemetry_log(format!(
+                "Git: flush con timeout, {} commits pendientes",
+                GIT_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire)
+            ));
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Ejecuta `git add <file>` + `git commit` de una nota. Llamado desde el worker thread.
+fn git_add_and_commit(parent: &str, file: &str) {
+    let (add_ok, add_err) = run_git_command(&["-C", parent, "-c", "safe.directory=*", "add", file]);
+    if !add_ok {
+        crate::add_telemetry_log(format!("Git Add Error: {}", add_err));
+        crate::log_friction_event("Git".to_string(), "Git Add Error".to_string(), add_err);
+        return;
+    }
+
+    let commit_msg = format!("[Vault Auto-Save] {}", file);
+    let (commit_ok, commit_err) = run_git_command(&[
+        "-C", parent,
+        "-c", "safe.directory=*",
+        "-c", "user.name=Vault Auto-Save",
+        "-c", "user.email=vault-autosave@lsm.cl",
+        "commit", "-m", commit_msg.as_str(),
+    ]);
+    if commit_ok {
+        crate::add_telemetry_log(format!("Git: Commit exitoso para {}", file));
+    } else if commit_err.contains("nothing to commit") || commit_err.contains("no changes") {
+        crate::add_telemetry_log("Git: Sin cambios detectados para commit".to_string());
+    } else {
+        crate::add_telemetry_log(format!("Git Commit Error: {}", commit_err));
+        crate::log_friction_event("Git".to_string(), "Git Commit Error".to_string(), commit_err);
+    }
+}
+
+/// Ejecuta un comando git con reintento ante `index.lock` (contienda con otro proceso git).
+/// Devuelve (status_ok, stderr). Reintenta hasta 5 veces con backoff de 150ms*n.
+fn run_git_command(args: &[&str]) -> (bool, String) {
+    let mut last_err = String::new();
+    for attempt in 0..5 {
+        let out = std::process::Command::new("/usr/bin/git")
+            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .args(args)
+            .output();
+        match out {
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).to_string();
+                if o.status.success() {
+                    return (true, err);
+                }
+                let retriable = err.contains("index.lock") || err.contains("Unable to create");
+                if retriable && attempt < 4 {
+                    last_err = err;
+                    thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
+                    continue;
+                }
+                return (false, err);
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 4 {
+                    thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
+                    continue;
+                }
+                return (false, last_err);
+            }
+        }
+    }
+    (false, last_err)
+}
+
 #[uniffi::export]
 pub fn save_note(path: String, content: String) -> String {
     // Asegurar que la carpeta padre existe antes de validar/escribir
@@ -1417,77 +1584,15 @@ pub fn save_note(path: String, content: String) -> String {
     match res {
         Ok(_) => {
             update_sync_ts();
-            crate::add_telemetry_log(format!("Git: Iniciando auto-commit para {}", path));
-            
-            // Auto Git Commit implementation
-            let path_obj = std::path::Path::new(&path);
-            if let Some(parent) = path_obj.parent() {
-                let parent_str = parent.to_string_lossy().into_owned();
-                if let Some(file_name) = path_obj.file_name() {
-                    if let Some(file_str) = file_name.to_str() {
-                        // 1. Git Add
-                        let add_out = std::process::Command::new("/usr/bin/git")
-                            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
-                            .env_remove("GIT_DIR")
-                            .env_remove("GIT_WORK_TREE")
-                            .env_remove("GIT_INDEX_FILE")
-                            .env_remove("GIT_OBJECT_DIRECTORY")
-                            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-                            .args(["-C", &parent_str, "-c", "safe.directory=*", "add", file_str])
-                            .output();
-                        
-                        match add_out {
-                            Ok(o) if !o.status.success() => {
-                                let err = String::from_utf8_lossy(&o.stderr).to_string();
-                                crate::add_telemetry_log(format!("Git Add Error: {}", err));
-                                crate::log_friction_event("Git".to_string(), "Git Add Error".to_string(), err);
-                            },
-                            Err(e) => {
-                                let err_str = e.to_string();
-                                crate::add_telemetry_log(format!("Git Add Failed to start: {}", err_str));
-                                crate::log_friction_event("Git".to_string(), "Git Add Failed to start".to_string(), err_str);
-                            },
-                            _ => {}
-                        }
-                        
-                        // 2. Git Commit
-                        let commit_out = std::process::Command::new("/usr/bin/git")
-                            .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
-                            .env_remove("GIT_DIR")
-                            .env_remove("GIT_WORK_TREE")
-                            .env_remove("GIT_INDEX_FILE")
-                            .env_remove("GIT_OBJECT_DIRECTORY")
-                            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-                            .args([
-                                "-C", &parent_str,
-                                "-c", "safe.directory=*",
-                                "-c", "user.name=Vault Auto-Save",
-                                "-c", "user.email=vault-autosave@lsm.cl",
-                                "commit", "-m", &format!("[Vault Auto-Save] {}", file_str)
-                            ])
-                            .output();
 
-                        match commit_out {
-                            Ok(o) => {
-                                if o.status.success() {
-                                    crate::add_telemetry_log(format!("Git: Commit exitoso para {}", file_str));
-                                } else {
-                                    let err = String::from_utf8_lossy(&o.stderr).to_string();
-                                    if err.contains("nothing to commit") || err.contains("no cambios") {
-                                        crate::add_telemetry_log("Git: Sin cambios detectados para commit".to_string());
-                                    } else {
-                                        crate::add_telemetry_log(format!("Git Commit Error: {}", err));
-                                        crate::log_friction_event("Git".to_string(), "Git Commit Error".to_string(), err);
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                let err_str = e.to_string();
-                                crate::add_telemetry_log(format!("Git Commit Failed to start: {}", err_str));
-                                crate::log_friction_event("Git".to_string(), "Git Commit Failed to start".to_string(), err_str);
-                            }
-                        }
-                    }
+            // Fase 2: git add+commit en background (no bloquea el guardado del editor).
+            // El worker serializa los commits internos y reintenta ante index.lock de
+            // escritores externos. `update_sync_ts()` sigue siendo síncrono para que la UI
+            // refleje el cambio al instante.
+            let path_obj = std::path::Path::new(&path);
+            if let (Some(parent), Some(file_name)) = (path_obj.parent(), path_obj.file_name()) {
+                if let Some(file_str) = file_name.to_str() {
+                    enqueue_git_commit(parent.to_string_lossy().into_owned(), file_str.to_string());
                 }
             }
 
@@ -1563,6 +1668,30 @@ pub fn get_file_history(path: String) -> Vec<GitCommit> {
     
     crate::add_telemetry_log(format!("Git: Encontrados {} commits", commits.len()));
     commits
+}
+
+#[uniffi::export]
+pub fn get_note_content(path: String) -> String {
+    // Devuelve el contenido de una nota desde DuckDB (indexado por id, ~ms).
+    // Al abrir una nota preferimos la DB al disco: en vaults iCloud el archivo
+    // puede estar sin materializar (read lento o que devuelve stub), y leerlo
+    // en background rompía la propagación del contenido al editor.
+    let conn = match get_db_connection() { Some(c) => c, None => return String::new() };
+    let canonical = canonicalize_path(&path);
+    let mut stmt = match conn.prepare("SELECT content FROM notes WHERE id = ? LIMIT 1") {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    let mut rows = match stmt.query(duckdb::params![&canonical]) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    if let Ok(Some(row)) = rows.next() {
+        if let Ok(content) = row.get::<_, String>(0) {
+            return content;
+        }
+    }
+    String::new()
 }
 
 #[uniffi::export]
@@ -1740,9 +1869,9 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
 
                     if *is_dir {
                         let title = path_obj.file_name().and_then(|s| s.to_str()).unwrap_or("Carpeta");
-                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
                         let _ = conn.execute(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, modified_ts) VALUES (?, ?, ?, ?, true, now(), 0) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, modified_ts=excluded.modified_ts",
                             duckdb::params![canonical, title, canonical, ""],
                         );
                     } else if (canonical.ends_with(".md") || canonical.ends_with(".log")) && !ign.iter().any(|p| canonical.contains(p)) {
@@ -1753,14 +1882,14 @@ pub fn start_watcher(paths: Vec<String>, ignore_patterns: Vec<String>) -> String
                         let title = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("Sin título");
                         let emb = generate_embedding(&content);
                         let sql = format!(
-                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?)",
+                            "INSERT INTO notes (id, title, path, content, is_dir, created_at, embedding, modified_ts) VALUES (?, ?, ?, ?, false, now(), {}, ?) \
+                             ON CONFLICT (id) DO UPDATE SET title=excluded.title, path=excluded.path, content=excluded.content, is_dir=excluded.is_dir, created_at=excluded.created_at, embedding=excluded.embedding, modified_ts=excluded.modified_ts",
                             vector_to_sql_array(&emb)
                         );
                         let mtime = std::fs::metadata(&canonical)
                             .and_then(|m| m.modified()).ok()
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs()).unwrap_or(0);
-                        let _ = conn.execute("DELETE FROM notes WHERE id = ?", duckdb::params![canonical]);
                         match conn.execute(&sql, duckdb::params![canonical, title, canonical, content, mtime as i64]) {
                             Ok(_) => {
                                 // Exitoso, no saturemos el log si no es necesario, pero para debugear este caso en específico:
@@ -3711,6 +3840,10 @@ pub fn log_friction_event(context: String, action: String, friction_detail: Stri
 #[uniffi::export]
 pub fn shutdown_vault_session(workspace_path: String) -> String {
     let mut msgs: Vec<String> = Vec::new();
+
+    // 0. Drenar la cola de commits git en background antes del snapshot de sesión
+    //    (evita perder commits por archivo y contienda de index.lock con el worker).
+    flush_git_commits();
 
     // 1. Consolidar scratchpad → bitácora diaria
     let consolidation = consolidate_session(workspace_path.clone());

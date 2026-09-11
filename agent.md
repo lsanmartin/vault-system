@@ -296,6 +296,13 @@
 6. **Una sola llamada a `init_knowledge_base()`**: ahora protegida con `DB_INITIALIZED` AtomicBool.
 7. **`execute_batch` falla completo si hay error de sintaxis**: todas las tablas o ninguna.
 
+### Migración v4 (2026-09-10): UNIQUE INDEX + UPSERT — supera el principio "sin índices VARCHAR"
+
+- El principio histórico "sin PRIMARY KEY ni índices VARCHAR" (notas 2026-08-05 más abajo) era una defensa contra un bug ART de DuckDB al borrar filas. **Verificado por smoke test en DuckDB 1.5.x**: `CREATE UNIQUE INDEX` sobre `notes(id)` + churn DELETE/INSERT no reproduce el error. Ver `_definitions/unique-index-notes-upsert.md`.
+- Migración v4 en `init_knowledge_base`: dedup con `MAX(rowid)` + `CREATE UNIQUE INDEX ux_notes_id ON notes(id)` + índices `idx_notes_modified_ts`/`idx_notes_created_at`.
+- Las 6 rutas de escritura usan ahora `INSERT ... ON CONFLICT (id) DO UPDATE` (UPSERT), eliminando el `DELETE WHERE id=?` O(n²) por fila.
+- **Limitación vigente**: `duckdb-rs 1.10503.1` no soporta bindear parámetros `List`/`Array` → el embedding sigue interpolado como `ARRAY[...]::FLOAT[384]`.
+
 ### Lecciones aprendidas
 
 - `execute_batch` es atómico en DuckDB: un error de sintaxis en una tabla rompe todo el batch.

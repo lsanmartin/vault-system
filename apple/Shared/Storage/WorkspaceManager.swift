@@ -247,7 +247,12 @@ class WorkspaceManager: ObservableObject {
     
     func triggerScan(for path: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = scanVault(path: path, ignorePatterns: ["/.git", "/.obsidian", "/_documentar", "/05-IA-Drafts/gemini"])
+            // Excluir directorios de dependencias/build (node_modules, target, dist, __pycache__):
+            // en ~/dev suman ~211k archivos que no son contenido del vault y ahogaban el scan.
+            _ = scanVault(path: path, ignorePatterns: [
+                "/.git", "/.obsidian", "/_documentar", "/05-IA-Drafts/gemini",
+                "/node_modules/", "/target/", "/dist/", "/__pycache__/"
+            ])
         }
         
         DispatchQueue.main.async { [weak self] in

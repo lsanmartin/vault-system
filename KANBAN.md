@@ -14,6 +14,11 @@ updated: 2026-08-10
 
 
 
+## 🐛 Bugs conocidos — fuera de alcance de la optimización de perf (registrado 2026-09-10)
+
+- [ ] **`SchedulerView.swift:87` — recursión infinita**. El método `schedulerTick()` se llama a sí mismo (`_ = schedulerTick()`), en vez de llamar a la función FFI `schedulerTick` del core (el nombre local la sombrea). Provoca recursión infinita al pulsar "Ejecutar pending". Fix: renombrar el método local o llamar explícitamente a la función del core. Fuera de alcance de perf para no confundir causa-efecto al medir.
+- [ ] **Scheduler no corre sin intervención manual de UI**. Las tareas programadas no se ejecutan automáticamente: solo se disparan con el botón "Ejecutar pending" (`SchedulerView`). No hay loop automático (relacionado con `kanban` 3.1/3.2: scheduler en Rust + UI). Registrado como bug separado, no como tarea de perf.
+
 ## ⬜ Backlog — Visión: Knowledge OS Portátil + Migración de Legado
 
 - [ ] **V1** Fase A — Hacer portable la app | est:6h | dep:—
