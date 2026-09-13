@@ -31,14 +31,14 @@ XCODE_SCHEME = VaultSystem
 ARCHIVE_PATH = apple/build/$(APP_NAME).xcarchive
 APP_BUNDLE = $(ARCHIVE_PATH)/Products/Applications/$(APP_NAME).app
 
-.PHONY: all clean build-x86_64 build-aarch64 build-universal xcode-build deploy release
+.PHONY: all clean build-x86_64 build-aarch64 build-universal build-intel deploy-intel xcode-build deploy release
 
 all: build-universal
 
 build-x86_64:
-	@echo "--- Compilando Core de Rust para Intel ($(TARGET_X86)) ---"
+	@echo "--- Compilando Core de Rust para Intel ($(TARGET_X86), sin MLX) ---"
 	MACOSX_DEPLOYMENT_TARGET=15.0 DUCKDB_LIB_DIR="$(BREW_PATH_X86)/lib" DUCKDB_INCLUDE_DIR="$(BREW_PATH_X86)/include" \
-	cargo build --target $(TARGET_X86) --release
+	cargo build -p vault_core --no-default-features --target $(TARGET_X86) --release
 
 build-aarch64:
 	@echo "--- Compilando Core de Rust para Apple Silicon ($(TARGET_ARM)) ---"
@@ -65,6 +65,55 @@ build-universal: build-aarch64
 		install_name_tool -id @rpath/libvault_core.dylib "$$DYLIB_IN_FW"; \
 		echo "✅ install name → @rpath/libvault_core.dylib"; \
 	fi
+
+# --- Build Intel (x86_64) sin MLX ---
+# DIRECTRIZ #1: variante de adaptación; el universal (build-universal) sigue siendo el artefacto oficial.
+.PHONY: build-intel deploy-intel
+
+build-intel: build-x86_64
+	@echo "--- Generando bindings Swift desde dylib x86_64 (sin MLX) ---"
+	DUCKDB_LIB_DIR="$(BREW_PATH_X86)/lib" DUCKDB_INCLUDE_DIR="$(BREW_PATH_X86)/include" \
+	cargo run -p vault_core --no-default-features --target $(TARGET_X86) --bin uniffi-bindgen -- \
+		generate --library target/$(TARGET_X86)/release/libvault_core.dylib --language swift --out-dir core/bindings/
+	@echo "--- Empaquetando XCFramework x86_64 ---"
+	rm -rf $(XCFRAMEWORK_DIR)
+	xcodebuild -create-xcframework \
+		-library target/$(TARGET_X86)/release/libvault_core.dylib -headers core/bindings/ \
+		-output $(XCFRAMEWORK_DIR)
+	@echo "--- Fijando @rpath install name en XCFramework (safety net) ---"
+	@DYLIB_IN_FW=$$(find $(XCFRAMEWORK_DIR) -name 'libvault_core.dylib' | head -1); \
+	if [ -n "$$DYLIB_IN_FW" ]; then \
+		install_name_tool -id @rpath/libvault_core.dylib "$$DYLIB_IN_FW"; \
+		echo "✅ install name → @rpath/libvault_core.dylib"; \
+	fi
+	@echo "--- Regenerando .xcodeproj desde project.intel.yml (sin mlx-swift-lm) ---"
+	xcodegen generate --spec apple/project.intel.yml --project apple/
+	@echo "--- Archivando $(APP_NAME) (Intel, x86_64) ---"
+	rm -rf $(ARCHIVE_PATH)
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme $(XCODE_SCHEME) \
+		-configuration Release \
+		-archivePath $(ARCHIVE_PATH) \
+		-arch x86_64 \
+		-skipPackagePluginValidation \
+		-skipMacroValidation \
+		archive \
+		ONLY_ACTIVE_ARCH=YES \
+		CODE_SIGN_IDENTITY="-" \
+		CODE_SIGNING_ALLOWED=YES \
+		CODE_SIGNING_REQUIRED=NO
+	@echo "--- Intel build listo en $(ARCHIVE_PATH) ---"
+
+deploy-intel: build-intel
+	@echo "--- Desplegando a /Applications ---"
+	@mkdir -p ~/.vault_system
+	@if [ -d "/Applications/$(APP_NAME).app" ]; then \
+		echo "Eliminando versión anterior..."; \
+		rm -rf "/Applications/$(APP_NAME).app"; \
+	fi
+	cp -R "$(APP_BUNDLE)" /Applications/
+	@echo "✅ $(APP_NAME) (Intel, sin MLX) instalado en /Applications/"
+	@echo "   Ejecutar con: open /Applications/$(APP_NAME).app"
 
 clean:
 	cargo clean

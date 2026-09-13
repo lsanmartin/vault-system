@@ -1,0 +1,84 @@
+# Variante Intel (x86_64) del spec de XcodeGen.
+#
+# DIRECTRIZ #1: el diseño que prevalece es Apple Silicon (apple/project.yml).
+# Este spec es idéntico salvo por la eliminación de mlx-swift-lm y sus 3 productos
+# (MLXLLM/MLXLMCommon/MLXHuggingFace), que son arm64-only. El código Swift cae a los
+# stubs vía `#if canImport(MLXLLM)` (false en x86_64).
+# Se mantienen swift-huggingface (Hub/HuggingFace) y swift-transformers (Tokenizers),
+# que son Swift puro y funcionan en ambas arquitecturas.
+name: VaultSystem
+packages:
+  swift-huggingface:
+    url: https://github.com/huggingface/swift-huggingface.git
+    from: 0.0.8
+  swift-transformers:
+    url: https://github.com/huggingface/swift-transformers.git
+    from: 1.3.0
+options:
+  bundleIdPrefix: cl.nicelio.vault
+targets:
+  VaultSystem:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: "Markdown Document"
+            CFBundleTypeRole: "Editor"
+            LSHandlerRank: "Alternate"
+            LSItemContentTypes:
+              - "net.daringfireball.markdown"
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: "net.daringfireball.markdown"
+            UTTypeConformsTo:
+              - "public.plain-text"
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - "md"
+                - "markdown"
+    sources:
+      - path: Shared
+      - path: ../core/bindings/vault_core.swift
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Shared/VaultSystem.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        PRODUCT_BUNDLE_IDENTIFIER: cl.nicelio.vault.VaultSystem
+        SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/../core/bindings/vault_coreFFI.h"
+        LIBRARY_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/../target"
+        LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=x86_64]: "$(inherited) $(PROJECT_DIR)/../target /usr/local/opt/duckdb/lib"
+        LIBRARY_SEARCH_PATHS[sdk=macosx*][arch=arm64]: "$(inherited) $(PROJECT_DIR)/../target /opt/homebrew/opt/duckdb/lib"
+        # @rpath resolution: bundle-installed primero, luego dev local
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks $(PROJECT_DIR)/../target/x86_64-apple-darwin/release/deps"
+        OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lduckdb_generated_extension_loader -lautocomplete_extension -lparquet_extension -ljson_extension -licu_extension -lcore_functions_extension -lduckdb_static -lc++ -framework Accelerate -framework Metal -framework Foundation"
+        ARCHS: "$(ARCHS_STANDARD)"
+        ONLY_ACTIVE_ARCH: YES
+        VALID_ARCHS: x86_64 arm64
+    dependencies:
+      - framework: ../target/apple_core.xcframework
+        embed: true
+      - sdk: QuickLookUI.framework
+      - package: swift-huggingface
+        product: HuggingFace
+      - package: swift-transformers
+        product: Tokenizers
+  VaultSystem-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Shared
+      - path: ../core/bindings/vault_core.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: cl.nicelio.vault.VaultSystem-iOS
+        SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/../core/bindings/vault_coreFFI.h"
+        OTHER_LDFLAGS: "$(inherited) -Wl,-all_load -lc++"
+    dependencies:
+      - framework: ../target/apple_core.xcframework
+        embed: false

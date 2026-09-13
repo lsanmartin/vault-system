@@ -1,3 +1,4 @@
+#if canImport(MLXLLM)
 import SwiftUI
 import MLX
 import MLXLMCommon
@@ -147,3 +148,23 @@ struct InlineAICommandView: View {
         }
     }
 }
+#else
+import SwiftUI
+
+/// Stub para Mac Intel: el redactor local (Gemma/MLX) no está disponible en x86_64.
+struct InlineAICommandView: View {
+    @Binding var text: String
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "sparkles").font(.title2).foregroundColor(.purple)
+            Text("Redactor Inteligente no disponible").font(.headline)
+            Text("El cerebro local (Gemma/MLX) requiere Apple Silicon.").font(.caption).foregroundColor(.secondary)
+            Button("Cerrar") { isPresented = false }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+}
+#endif

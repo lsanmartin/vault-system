@@ -1,3 +1,4 @@
+#if canImport(MLXLLM)
 import SwiftUI
 import MLX
 import MLXLMCommon
@@ -131,3 +132,23 @@ struct LocalFlashcardsView: View {
         }
     }
 }
+#else
+import SwiftUI
+
+/// Stub para Mac Intel: la generación de flashcards (Gemma/MLX) no está disponible en x86_64.
+struct LocalFlashcardsView: View {
+    @Binding var text: String
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "square.and.pencil").font(.title2).foregroundColor(.orange)
+            Text("Generador Flashcards no disponible").font(.headline)
+            Text("El cerebro local (Gemma/MLX) requiere Apple Silicon.").font(.caption).foregroundColor(.secondary)
+            Button("Cerrar") { isPresented = false }
+        }
+        .padding()
+        .frame(width: 400)
+    }
+}
+#endif

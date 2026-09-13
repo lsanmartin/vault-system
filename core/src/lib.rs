@@ -116,6 +116,7 @@ pub fn register_ui_listener(listener: Box<dyn UiActionListener>) {
 // --- COLA DE TELEMETRÍA ---
 static TELEMETRY_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static SCAN_PROGRESS: Lazy<Mutex<std::collections::HashMap<String, f32>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+#[cfg(feature = "mlx-accel")]
 static MLX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 // --- MODO DE EMBEDDING ---
@@ -219,10 +220,14 @@ fn generate_embedding(text: &str) -> Vec<f32> {
         return vec![0.0f32; 384];
     }
 
-    // Modo eager: embedding MLX completo (GPU/MLX)
-    generate_embedding_mlx(text)
+    // Modo eager: embedding MLX completo (GPU/MLX) si está disponible; si no, hash CPU.
+    #[cfg(feature = "mlx-accel")]
+    { generate_embedding_mlx(text) }
+    #[cfg(not(feature = "mlx-accel"))]
+    { generate_embedding_fast(text) }
 }
 
+#[cfg(feature = "mlx-accel")]
 fn generate_embedding_mlx(text: &str) -> Vec<f32> {
     if text.is_empty() {
         return vec![0.0f32; 384];

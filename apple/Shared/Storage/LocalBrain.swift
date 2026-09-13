@@ -1,3 +1,4 @@
+#if canImport(MLXLLM)
 import Foundation
 import Combine
 import MLX
@@ -587,3 +588,50 @@ public final class LocalBrain: ObservableObject {
         return clean
     }
 }
+#else
+// Stub de `LocalBrain` para Mac Intel: el cerebro local (Gemma/MLX) no existe en x86_64.
+// Conserva la misma API pública para que el resto de la app compile sin cambios (Directriz #1).
+import Foundation
+import Combine
+
+public enum ModelStatus: Equatable {
+    case notLoaded
+    case downloading(progress: Double)
+    case loading
+    case ready
+    case error(String)
+}
+
+public final class LocalBrain: ObservableObject {
+    public static let shared = LocalBrain()
+
+    @Published public var isProcessing: Bool = false
+    @Published public var pendingCount: Int = 0
+    @Published public var currentNoteTitle: String = ""
+    @Published public var downloadProgress: Double = 0.0
+    @Published public var isDownloading: Bool = false
+    @Published public var modelStatus: ModelStatus = .notLoaded
+    @Published public var isEnabled: Bool = false
+
+    public func cancelDownload() {}
+    public func cancelChat() {}
+
+    public func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+    }
+
+    public func updatePendingCount() {
+        pendingCount = getPendingSummaryNotes(limit: 100).count
+    }
+
+    public func switchModel(to modelId: String?) {}
+    public func preloadModel() {}
+    public func startDigestion() {}
+
+    public func chatStream(prompt: String, context: String = "", history: [(role: String, content: String)] = []) async throws -> AsyncStream<String> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+}
+#endif
