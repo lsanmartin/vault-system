@@ -21,6 +21,14 @@ updated: 2026-08-10
 
 ## ⬜ Backlog — Visión: Knowledge OS Portátil + Migración de Legado
 
+- [ ] **BBDD-FIRST-01** Evolución a arquitectura Database-First con Proyector Markdown | est:8h | dep:—
+  - Doc de arquitectura: [`docs/2026-10-10-plan-database-first-proyeccion-md.md`](docs/2026-10-10-plan-database-first-proyeccion-md.md)
+  - Inversión de `save_note`: mutación en BBDD primero, proyector asíncrono con debounce a disco
+  - Mecanismo anti-eco en watcher para descartar re-indexación de archivos proyectados
+  - Pipeline de Git: enlazar `enqueue_git_commit` al proyector para evitar micro-commits
+  - Capa de contexto para IA: generación de `manifest.json`, `_recent/` y `_index/`
+
+
 - [ ] **V1** Fase A — Hacer portable la app | est:6h | dep:—
   - Eliminar rutas hardcoded de `lsanmartin` (5 sitios: `MCPAccessView.swift:275`, `CPMTaskBoardView.swift:120`, `lib.rs:2357,2368,3801`)
   - Fallback de workspaces → descubrimiento automático en primer arranque
@@ -77,6 +85,28 @@ updated: 2026-08-10
 - [ ] **5.1** LATS agent loop en Rust | est:4h | dep:—
 - [ ] **5.2** `make export-telemetry` → Parquet | est:1h | dep:—
 - [ ] **5.3** Actualizar ADR-001 (MLX/Gemma 4 real) | est:1h | dep:—
+
+## ⬜ Backlog — Fase 6: Bolsa de Cómputo y Token Broker (Iniciativa 2026-09-15)
+
+- [ ] **6.1** Prototipo SQLite Auth/Capture/Release (partida doble local + audit_log hash-chaining) | est:4h | dep:—
+  - Implementar esquema doble entrada `accounts`, `transactions`, `entries` con invariantes estrictos.
+  - Flujo 3 fases: Auth (Hold techo) -> Capture (gasto real) -> Release (delta remanente).
+  - Tabla `audit_log` con encadenamiento criptográfico (`event_hash`, `previous_event_hash`) para Event Sourcing diferido.
+  - refs: `docs/2026-09-15-broker-ia-wallet-tokens.md`
+
+- [ ] **6.2** Integración Gate F0 Supervisor (caché de autorización en memoria, cero latencia) | est:2h | dep:6.1
+  - F0 como caché de lectura rápida de Hold activo (Ledger conserva autoridad absoluta).
+  - refs: `core/src/lib.rs`, `docs/2026-09-15-broker-ia-wallet-tokens.md`
+
+- [ ] **6.3** MCP-Billing-Adapter (Compute Resource Broker heterogéneo) | est:3h | dep:6.1
+  - Normalizar tokens LLM, segundos GPU Blender y pasos ComfyUI a Compute Credits.
+  - Desacoplar `ResourceCost` (proveedor) de `CreditPolicy` (usuario).
+  - refs: `docs/2026-09-15-broker-ia-wallet-tokens.md`
+
+- [ ] **6.4** Offline Compute Lease y Anti-Replay (Hardware SE/TPM) | est:3h | dep:6.1
+  - Modelo de lease acotado por dispositivo para evitar overspend multi-dispositivo.
+  - Contadores monótonos crecientes y firma hardware anti-rollback.
+  - refs: `docs/2026-09-15-broker-ia-wallet-tokens.md`
 
 ## ✅ Completado
 

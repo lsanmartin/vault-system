@@ -21,6 +21,9 @@ Vault System es un Knowledge OS nativo macOS que actúa como hub de IA local + e
 - [2026-08-03] Chat con WebView + marked.js (markdown en burbujas)
 - [2026-08-03] Colapsables para tool calls y gestión de tokens
 - [2026-08-16 11:28] Refactor UI Chat: retorno a vista de chat individual (una por vez) seleccionable con botonera inferior; reubicación de herramientas globales al SidebarColumn.
+- [2026-09-15] Especificación técnica completa Fase 6: Bolsa de Cómputo + Token Broker (harness DashAI, ledger partida doble, ciclo Auth→Capture→Release, SCD-2 TokenRate, Event Sourcing audit_log, MCP-Billing-Adapter). Hoja de ruta Fase 1 (SQLite local) → Fase 2 (TigerBeetle cloud). Doc: `docs/2026-09-15-broker-ia-wallet-tokens.md`.
+- [2026-09-15] Kanban actualizado con Fase 6 (4 tareas 6.1-6.4). Script de sync Kanban↔Apple Reminders creado: `00-Sistema/scripts/sync_kanbans_to_reminders.py` (32 proyectos, bidireccional, ingesta manual, cabecera on-top). Hooks en `post_session.sh` y `morning_dream.sh`.
 
 ## Historial
 - [2026-08-03] DeepSeek auditoría: detectó domain_metadata vacío y _specs.md corrupto en volley51app. Se crea tríada OKF para vault-system.
+- [2026-10-10] Análisis de función de contenedores y Dagster como orquestador externo. Definición de arquitectura híbrida (Dagster en host vía uv + Dagster Pipes efímero en contenedor individual). Vault-system actúa como broker seguro TCC/DuckDB vía Unix Domain Socket MCP. Doc guardado en docs/2026-10-10-analisis-containers-dagster-broker.md.

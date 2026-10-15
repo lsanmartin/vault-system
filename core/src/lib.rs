@@ -131,7 +131,7 @@ static SCANNING_PATHS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::n
 static WATCHER_PENDING_EVENTS: Lazy<Mutex<Vec<(String, bool)>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 // Tamaño de lote reducido para evitar saturar FixedSizeAllocator de DuckDB
-const BATCH_SIZE: usize = 200;
+const BATCH_SIZE: usize = 50;
 
 // --- CACHÉ LRU DE BÚSQUEDA ---
 // 32 slots. Llave: "term:path_filter:last_sync_ts" → invalida automáticamente
@@ -389,7 +389,12 @@ pub fn init_knowledge_base() -> String {
     }
 
     let conn = match Connection::open(&db_path) {
-        Ok(c) => c,
+        Ok(c) => {
+            // Protección contra desbordamiento de WAL y aserciones en transacciones concurrentes
+            let _ = c.execute("PRAGMA wal_autocheckpoint='10MB';", []);
+            let _ = c.execute("PRAGMA checkpoint_threshold='10MB';", []);
+            c
+        },
         Err(e) => return format!("Error abriendo DuckDB: {}", e),
     };
 
@@ -693,7 +698,7 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             return false;
         }
         if e.file_type().is_dir() {
-            const JUNK_DIRS: [&str; 4] = ["node_modules", "target", "dist", "__pycache__"];
+            const JUNK_DIRS: [&str; 9] = ["node_modules", "target", "dist", "__pycache__", "vendor", "venv", ".venv", "env", "build"];
             if JUNK_DIRS.contains(&name) {
                 return false;
             }
@@ -813,7 +818,10 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
                 if tx_failed {
                     let _ = conn.execute("ROLLBACK", []);
                 } else {
-                    let _ = conn.execute("COMMIT", []);
+                    if let Err(e) = conn.execute("COMMIT", []) {
+                        eprintln!("Fallo en COMMIT de lote: {}. Ejecutando ROLLBACK preventivo.", e);
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
                 }
             }
         }
@@ -868,7 +876,10 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
             if tx_failed {
                 let _ = conn.execute("ROLLBACK", []);
             } else {
-                let _ = conn.execute("COMMIT", []);
+                if let Err(e) = conn.execute("COMMIT", []) {
+                    eprintln!("Fallo en COMMIT final de lote: {}. Ejecutando ROLLBACK preventivo.", e);
+                    let _ = conn.execute("ROLLBACK", []);
+                }
             }
         }
     }
@@ -953,9 +964,10 @@ pub fn scan_vault(path: String, ignore_patterns: Vec<String>) -> String {
     }
 
     update_sync_ts();
-    // Dedup post-scan para prevenir hinchazón de DB
+    // Dedup post-scan para prevenir hinchazón de DB y consolidar el WAL limpiamente
     if let Some(conn) = get_db_connection() {
         dedup_and_vacuum(&conn);
+        let _ = conn.execute("CHECKPOINT", []);
     }
     let mut msg = format!("Escaneado completado: {} notas procesadas.", count);
     if stub_count > 0 {
